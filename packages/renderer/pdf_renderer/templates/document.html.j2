@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="{{ document.target_lang }}">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      {% for page in document.pages %}
+      @page page-{{ page.page_id | css_class }} {
+        size: {{ page.size.width }}pt {{ page.size.height }}pt;
+        margin: 0;
+      }
+      {% endfor %}
+
+      html,
+      body {
+        margin: 0;
+        background: #ececec;
+        color: #101010;
+        font-family: {{ document.font_stack | css_font_stack }};
+        letter-spacing: 0;
+      }
+
+      .page {
+        position: relative;
+        width: var(--page-width-pt);
+        height: var(--page-height-pt);
+        margin: 0 auto 18px auto;
+        background: #ffffff;
+        overflow: hidden;
+        page-break-after: always;
+        break-after: page;
+      }
+
+      .block {
+        position: absolute;
+        left: var(--x-pt);
+        top: var(--y-pt);
+        width: var(--w-pt);
+        height: var(--h-pt);
+        overflow: hidden;
+        padding: 0;
+        font-size: var(--font-size-pt);
+        line-height: {{ document.line_height }};
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        color: #111111;
+        font-weight: 400;
+        font-style: normal;
+        text-align: left;
+      }
+
+      .block[data-bold="true"] {
+        font-weight: 700;
+      }
+
+      .block[data-italic="true"] {
+        font-style: italic;
+      }
+
+      .role-title {
+        font-weight: 700;
+        text-align: center;
+        line-height: 1.18;
+      }
+
+      .role-heading {
+        font-weight: 700;
+        line-height: 1.22;
+        text-align: left;
+      }
+
+      .role-abstract,
+      .role-paragraph {
+        text-align: justify;
+        text-indent: 0;
+      }
+
+      .role-reference {
+        text-align: justify;
+        font-size: calc(var(--font-size-pt) * 0.94);
+        line-height: 1.25;
+        overflow-wrap: break-word;
+      }
+
+      .role-caption {
+        text-align: center;
+        font-size: calc(var(--font-size-pt) * 0.92);
+        line-height: 1.25;
+      }
+
+      .intent-compact {
+        font-size: var(--font-size-pt);
+      }
+
+      .quality-missing-translation,
+      .quality-empty-translation,
+      .quality-overflow-clipped {
+        outline: 0.5pt solid rgb(180 120 0 / 36%);
+        outline-offset: -0.5pt;
+      }
+
+      .quality-missing-translation,
+      .quality-empty-translation {
+        color: #555555;
+      }
+
+      .quality-overflow-clipped::after {
+        content: "";
+      }
+
+      @media screen {
+        body {
+          padding: 18px;
+        }
+
+        .page {
+          box-shadow: 0 2px 14px rgb(0 0 0 / 18%);
+        }
+      }
+
+      @media print {
+        body {
+          background: #ffffff;
+        }
+
+        .page {
+          margin: 0;
+          box-shadow: none;
+        }
+
+        .page:last-child {
+          page-break-after: auto;
+          break-after: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    {% for page in document.pages %}
+      <section
+        class="page"
+        data-page-id="{{ page.page_id }}"
+        style="
+          --page-width-pt: {{ page.size.width }}pt;
+          --page-height-pt: {{ page.size.height }}pt;
+          page: page-{{ page.page_id | css_class }};
+        "
+      >
+        {% for block in page.blocks %}
+          <div
+            class="block role-{{ block.role | css_class }} intent-{{ block.render_intent | css_class }}{% for flag in block.quality_flags %} quality-{{ flag | css_class }}{% endfor %}"
+            data-block-id="{{ block.block_id }}"
+            data-render-intent="{{ block.render_intent }}"
+            data-font-scale="{{ block.font_scale }}"
+            data-bold="{{ block.style_seed.bold | lower }}"
+            data-italic="{{ block.style_seed.italic | lower }}"
+            style="
+              --x-pt: {{ block.bbox.x0 }}pt;
+              --y-pt: {{ block.bbox.y0 }}pt;
+              --w-pt: {{ block.bbox.x1 - block.bbox.x0 }}pt;
+              --h-pt: {{ block.bbox.y1 - block.bbox.y0 }}pt;
+              --font-size-pt: {{ block.font_size_pt }}pt;
+              color: {{ block.style_seed.color }};
+            "
+          >{{ block.text }}</div>
+        {% endfor %}
+      </section>
+    {% endfor %}
+  </body>
+</html>

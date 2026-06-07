@@ -1,0 +1,16 @@
+[project]
+name = "pdf-translator-schema"
+version = "0.1.0"
+description = "Shared schemas for PDF translation and typesetting."
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.8"
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pdf_translator_schema*"]
+exclude = ["typescript*"]

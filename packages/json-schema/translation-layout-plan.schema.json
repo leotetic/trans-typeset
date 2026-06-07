@@ -1,0 +1,153 @@
+{
+  "$defs": {
+    "BlockRole": {
+      "enum": [
+        "title",
+        "abstract",
+        "heading",
+        "paragraph",
+        "caption",
+        "formula",
+        "table",
+        "figure",
+        "footnote",
+        "reference",
+        "unknown"
+      ],
+      "title": "BlockRole",
+      "type": "string"
+    },
+    "InlineItem": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "text",
+          "enum": [
+            "text",
+            "citation",
+            "formula",
+            "reference_marker",
+            "asset_ref"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        },
+        "source_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Token"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        }
+      },
+      "title": "InlineItem",
+      "type": "object"
+    },
+    "TranslationBlockPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "source_block_id": {
+          "minLength": 1,
+          "title": "Source Block Id",
+          "type": "string"
+        },
+        "translated_text": {
+          "title": "Translated Text",
+          "type": "string"
+        },
+        "inline_items": {
+          "items": {
+            "$ref": "#/$defs/InlineItem"
+          },
+          "title": "Inline Items",
+          "type": "array"
+        },
+        "role": {
+          "$ref": "#/$defs/BlockRole"
+        },
+        "render_intent": {
+          "default": "normal",
+          "enum": [
+            "normal",
+            "compact",
+            "emphasis",
+            "preserve_asset"
+          ],
+          "title": "Render Intent",
+          "type": "string"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_block_id",
+        "translated_text",
+        "role"
+      ],
+      "title": "TranslationBlockPlan",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "chunk_id": {
+      "minLength": 1,
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "target_lang": {
+      "default": "zh-CN",
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "blocks": {
+      "items": {
+        "$ref": "#/$defs/TranslationBlockPlan"
+      },
+      "minItems": 1,
+      "title": "Blocks",
+      "type": "array"
+    }
+  },
+  "required": [
+    "chunk_id",
+    "blocks"
+  ],
+  "title": "TranslationLayoutPlan",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: pdf-translator-schema
+Version: 0.1.0
+Summary: Shared schemas for PDF translation and typesetting.
+Requires-Python: >=3.11
+Requires-Dist: pydantic>=2.8

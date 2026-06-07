@@ -1,0 +1,20 @@
+[project]
+name = "pdf-translator-renderer"
+version = "0.1.0"
+description = "HTML and PDF renderer for translated academic PDFs."
+requires-python = ">=3.11"
+dependencies = [
+  "jinja2>=3.1",
+  "pdf-translator-schema",
+  "playwright>=1.45"
+]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pdf_renderer*"]
+
+[tool.setuptools.package-data]
+pdf_renderer = ["templates/*.j2"]

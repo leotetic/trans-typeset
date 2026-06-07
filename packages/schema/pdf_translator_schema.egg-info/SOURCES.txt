@@ -1,0 +1,12 @@
+pyproject.toml
+pdf_translator_schema/__init__.py
+pdf_translator_schema/defaults.py
+pdf_translator_schema/json_schema.py
+pdf_translator_schema/models.py
+pdf_translator_schema/validation.py
+pdf_translator_schema.egg-info/PKG-INFO
+pdf_translator_schema.egg-info/SOURCES.txt
+pdf_translator_schema.egg-info/dependency_links.txt
+pdf_translator_schema.egg-info/requires.txt
+pdf_translator_schema.egg-info/top_level.txt
+tests/test_models.py

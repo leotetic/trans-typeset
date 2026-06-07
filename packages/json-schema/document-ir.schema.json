@@ -1,0 +1,289 @@
+{
+  "$defs": {
+    "Asset": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "minLength": 1,
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "unknown",
+          "enum": [
+            "figure",
+            "formula",
+            "table",
+            "image",
+            "unknown"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "alt_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alt Text"
+        }
+      },
+      "required": [
+        "asset_id",
+        "page_id",
+        "bbox"
+      ],
+      "title": "Asset",
+      "type": "object"
+    },
+    "BlockRole": {
+      "enum": [
+        "title",
+        "abstract",
+        "heading",
+        "paragraph",
+        "caption",
+        "formula",
+        "table",
+        "figure",
+        "footnote",
+        "reference",
+        "unknown"
+      ],
+      "title": "BlockRole",
+      "type": "string"
+    },
+    "BoundingBox": {
+      "additionalProperties": false,
+      "properties": {
+        "x0": {
+          "minimum": 0,
+          "title": "X0",
+          "type": "number"
+        },
+        "y0": {
+          "minimum": 0,
+          "title": "Y0",
+          "type": "number"
+        },
+        "x1": {
+          "exclusiveMinimum": 0,
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "exclusiveMinimum": 0,
+          "title": "Y1",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x0",
+        "y0",
+        "x1",
+        "y1"
+      ],
+      "title": "BoundingBox",
+      "type": "object"
+    },
+    "DocumentBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "minLength": 1,
+          "title": "Block Id",
+          "type": "string"
+        },
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/BlockRole",
+          "default": "unknown"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox"
+        },
+        "column": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Column",
+          "type": "integer"
+        },
+        "reading_order": {
+          "minimum": 0,
+          "title": "Reading Order",
+          "type": "integer"
+        },
+        "source_text": {
+          "default": "",
+          "title": "Source Text",
+          "type": "string"
+        },
+        "span_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Span Refs",
+          "type": "array"
+        },
+        "style_seed": {
+          "$ref": "#/$defs/StyleSeed"
+        }
+      },
+      "required": [
+        "block_id",
+        "page_id",
+        "bbox",
+        "reading_order"
+      ],
+      "title": "DocumentBlock",
+      "type": "object"
+    },
+    "DocumentPage": {
+      "additionalProperties": false,
+      "properties": {
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "size": {
+          "$ref": "#/$defs/PageSize"
+        },
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/DocumentBlock"
+          },
+          "title": "Blocks",
+          "type": "array"
+        },
+        "assets": {
+          "items": {
+            "$ref": "#/$defs/Asset"
+          },
+          "title": "Assets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "page_id",
+        "size"
+      ],
+      "title": "DocumentPage",
+      "type": "object"
+    },
+    "PageSize": {
+      "additionalProperties": false,
+      "properties": {
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "number"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "title": "PageSize",
+      "type": "object"
+    },
+    "StyleSeed": {
+      "additionalProperties": false,
+      "properties": {
+        "font_size": {
+          "default": 10.0,
+          "exclusiveMinimum": 0,
+          "title": "Font Size",
+          "type": "number"
+        },
+        "font_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Name"
+        },
+        "bold": {
+          "default": false,
+          "title": "Bold",
+          "type": "boolean"
+        },
+        "italic": {
+          "default": false,
+          "title": "Italic",
+          "type": "boolean"
+        },
+        "color": {
+          "default": "#111111",
+          "title": "Color",
+          "type": "string"
+        }
+      },
+      "title": "StyleSeed",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "doc_id": {
+      "minLength": 1,
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/DocumentPage"
+      },
+      "minItems": 1,
+      "title": "Pages",
+      "type": "array"
+    }
+  },
+  "required": [
+    "doc_id",
+    "pages"
+  ],
+  "title": "DocumentIR",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

@@ -1,0 +1,6 @@
+-e packages/schema
+-e packages/renderer
+-e services/api
+pytest>=8.2
+ruff>=0.5
+

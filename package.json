@@ -1,0 +1,19 @@
+{
+  "name": "trans-typesetting",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local PDF literature translation and typesetting system.",
+  "workspaces": [
+    "apps/web",
+    "packages/schema/typescript"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "build:web": "npm --workspace apps/web run build",
+    "typecheck:web": "npm --workspace apps/web run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
+

@@ -1,0 +1,11 @@
+pyproject.toml
+pdf_renderer/__init__.py
+pdf_renderer/models.py
+pdf_renderer/renderer.py
+pdf_renderer/templates/document.html.j2
+pdf_translator_renderer.egg-info/PKG-INFO
+pdf_translator_renderer.egg-info/SOURCES.txt
+pdf_translator_renderer.egg-info/dependency_links.txt
+pdf_translator_renderer.egg-info/requires.txt
+pdf_translator_renderer.egg-info/top_level.txt
+tests/test_renderer.py

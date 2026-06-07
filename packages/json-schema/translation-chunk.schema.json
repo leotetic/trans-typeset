@@ -1,0 +1,387 @@
+{
+  "$defs": {
+    "AlignmentDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "default": "center",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Title",
+          "type": "string"
+        },
+        "abstract": {
+          "default": "justify",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Abstract",
+          "type": "string"
+        },
+        "heading": {
+          "default": "left",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Heading",
+          "type": "string"
+        },
+        "paragraph": {
+          "default": "justify",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Paragraph",
+          "type": "string"
+        },
+        "caption": {
+          "default": "center",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Caption",
+          "type": "string"
+        },
+        "formula": {
+          "default": "center",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Formula",
+          "type": "string"
+        },
+        "table": {
+          "default": "center",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Table",
+          "type": "string"
+        },
+        "figure": {
+          "default": "center",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Figure",
+          "type": "string"
+        },
+        "footnote": {
+          "default": "justify",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Footnote",
+          "type": "string"
+        },
+        "reference": {
+          "default": "left",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Reference",
+          "type": "string"
+        },
+        "unknown": {
+          "default": "left",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "title": "AlignmentDefaults",
+      "type": "object"
+    },
+    "BlockRole": {
+      "enum": [
+        "title",
+        "abstract",
+        "heading",
+        "paragraph",
+        "caption",
+        "formula",
+        "table",
+        "figure",
+        "footnote",
+        "reference",
+        "unknown"
+      ],
+      "title": "BlockRole",
+      "type": "string"
+    },
+    "OverflowPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "default": "scale_then_expand_then_continue",
+          "enum": [
+            "scale_then_expand_then_continue",
+            "scale_then_continue",
+            "continue_without_scaling"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        },
+        "min_font_scale": {
+          "default": 0.86,
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "title": "Min Font Scale",
+          "type": "number"
+        },
+        "max_font_scale": {
+          "default": 1.0,
+          "minimum": 1,
+          "title": "Max Font Scale",
+          "type": "number"
+        },
+        "allow_box_expansion": {
+          "default": true,
+          "title": "Allow Box Expansion",
+          "type": "boolean"
+        },
+        "allow_continuation_page": {
+          "default": true,
+          "title": "Allow Continuation Page",
+          "type": "boolean"
+        }
+      },
+      "title": "OverflowPolicy",
+      "type": "object"
+    },
+    "PreservePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "formulas": {
+          "const": "preserve",
+          "default": "preserve",
+          "title": "Formulas",
+          "type": "string"
+        },
+        "citations": {
+          "const": "preserve",
+          "default": "preserve",
+          "title": "Citations",
+          "type": "string"
+        },
+        "reference_markers": {
+          "const": "preserve",
+          "default": "preserve",
+          "title": "Reference Markers",
+          "type": "string"
+        },
+        "figure_table_assets": {
+          "const": "preserve",
+          "default": "preserve",
+          "title": "Figure Table Assets",
+          "type": "string"
+        },
+        "whitespace": {
+          "default": "allow_reflow",
+          "enum": [
+            "allow_reflow",
+            "preserve"
+          ],
+          "title": "Whitespace",
+          "type": "string"
+        },
+        "line_breaks": {
+          "default": "allow_reflow",
+          "enum": [
+            "allow_reflow",
+            "preserve"
+          ],
+          "title": "Line Breaks",
+          "type": "string"
+        }
+      },
+      "title": "PreservePolicy",
+      "type": "object"
+    },
+    "RenderDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "target_lang": {
+          "default": "zh-CN",
+          "title": "Target Lang",
+          "type": "string"
+        },
+        "font_stack": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Font Stack",
+          "type": "array"
+        },
+        "line_height": {
+          "default": 1.35,
+          "exclusiveMinimum": 0,
+          "title": "Line Height",
+          "type": "number"
+        },
+        "paragraph_spacing_em": {
+          "default": 0.45,
+          "minimum": 0,
+          "title": "Paragraph Spacing Em",
+          "type": "number"
+        },
+        "alignment": {
+          "$ref": "#/$defs/AlignmentDefaults"
+        },
+        "overflow_policy": {
+          "$ref": "#/$defs/OverflowPolicy"
+        },
+        "preserve_policy": {
+          "$ref": "#/$defs/PreservePolicy"
+        }
+      },
+      "title": "RenderDefaults",
+      "type": "object"
+    },
+    "SourceBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "block_id": {
+          "minLength": 1,
+          "title": "Block Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/BlockRole"
+        },
+        "source_text": {
+          "title": "Source Text",
+          "type": "string"
+        },
+        "nearby_titles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Nearby Titles",
+          "type": "array"
+        },
+        "preserve_tokens": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Preserve Tokens",
+          "type": "array"
+        }
+      },
+      "required": [
+        "block_id",
+        "role",
+        "source_text"
+      ],
+      "title": "SourceBlock",
+      "type": "object"
+    },
+    "TranslationConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "max_output_ratio": {
+          "default": 1.8,
+          "exclusiveMinimum": 0,
+          "title": "Max Output Ratio",
+          "type": "number"
+        },
+        "require_all_blocks": {
+          "default": true,
+          "title": "Require All Blocks",
+          "type": "boolean"
+        },
+        "preserve_tokens": {
+          "default": true,
+          "title": "Preserve Tokens",
+          "type": "boolean"
+        }
+      },
+      "title": "TranslationConstraints",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "chunk_id": {
+      "minLength": 1,
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "target_lang": {
+      "default": "zh-CN",
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "source_blocks": {
+      "items": {
+        "$ref": "#/$defs/SourceBlock"
+      },
+      "minItems": 1,
+      "title": "Source Blocks",
+      "type": "array"
+    },
+    "context": {
+      "default": "",
+      "title": "Context",
+      "type": "string"
+    },
+    "glossary": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Glossary",
+      "type": "object"
+    },
+    "render_defaults": {
+      "$ref": "#/$defs/RenderDefaults"
+    },
+    "constraints": {
+      "$ref": "#/$defs/TranslationConstraints"
+    }
+  },
+  "required": [
+    "chunk_id",
+    "source_blocks"
+  ],
+  "title": "TranslationChunk",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}
