@@ -376,6 +376,51 @@ select:focus-visible {
   background: #255861;
 }
 
+.backend-status {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #bdd3c5;
+  background: #f6fbf7;
+  color: #2f7548;
+  padding: 9px 10px;
+}
+
+.backend-status.offline {
+  border-color: #d7aaa6;
+  background: #fff8f7;
+  color: #a23730;
+}
+
+.backend-status > span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+}
+
+.backend-status p {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 690;
+}
+
+.backend-status button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #d7aaa6;
+  background: #ffffff;
+  color: #a23730;
+  cursor: pointer;
+}
+
 .job-card {
   display: grid;
   gap: 11px;

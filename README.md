@@ -33,9 +33,28 @@ cp .env.example .env
 npm run dev:web
 ```
 
-默认前端访问 `http://localhost:5173`，后端访问 `http://localhost:8000`。
+默认前端访问 `http://127.0.0.1:5173`，后端访问 `http://127.0.0.1:8000`。
 
-前端开发服务器会把 `/api` 代理到 `http://localhost:8000`。如果 `.env` 中没有配置 `OPENAI_API_KEY`，后端会使用本地 deterministic translator，把每个文本块标记为目标语言的占位译文，便于端到端验证上传、分块、schema 校验和渲染流程。
+前端开发服务器会把 `/api` 代理到 `VITE_API_PROXY_TARGET`，默认是 `http://127.0.0.1:8000`。如果 `.env` 中没有配置 `OPENAI_API_KEY`，后端会使用本地 deterministic translator，把每个文本块标记为目标语言的占位译文，便于端到端验证上传、分块、schema 校验和渲染流程。
+
+常用配置在 `.env` 中：
+
+```bash
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+ALLOWED_TARGET_LANGS=zh-CN,zh-TW,ja-JP,ko-KR,en-US
+MAX_UPLOAD_BYTES=52428800
+VITE_DEV_HOST=127.0.0.1
+VITE_DEV_PORT=5173
+VITE_API_PROXY_TARGET=http://127.0.0.1:8000
+```
+
+## Troubleshooting
+
+- 端口占用：如果 `5173` 或 `8000` 已被占用，先停掉旧进程，或把 `VITE_DEV_PORT`、后端 uvicorn `--port` 和 `VITE_API_PROXY_TARGET` 改成同一组新端口。
+- `listen EPERM`：优先确认前端使用 `127.0.0.1` 而不是 `0.0.0.0`。本项目默认读取 `VITE_DEV_HOST=127.0.0.1`。
+- 后端未启动：前端任务面板会显示后端离线。先访问 `http://127.0.0.1:8000/api/health`，应返回 `{"status":"ok"}`。
+- 前端打不开：优先访问 `http://127.0.0.1:5173`。如果改过前端端口，请访问 `VITE_DEV_PORT` 对应地址。
+- 上传失败：仅支持 PDF，默认最大 50 MB，目标语言必须在 `ALLOWED_TARGET_LANGS` 中。
 
 ## Development
 

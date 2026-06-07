@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..config import settings
 from ..models import CreateDocumentResponse, JobState, JobStatus
@@ -29,17 +29,27 @@ async def ensure_pdf_upload(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported")
 
 
+def ensure_target_lang(target_lang: str) -> None:
+    if target_lang not in settings.allowed_target_langs:
+        allowed = ", ".join(settings.allowed_target_langs)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported target language: {target_lang}. Allowed: {allowed}",
+        )
+
+
 @router.post("/documents", response_model=CreateDocumentResponse)
 async def create_document(
     background_tasks: BackgroundTasks,
     file: Annotated[UploadFile, File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
 ) -> CreateDocumentResponse:
+    ensure_target_lang(target_lang)
     await ensure_pdf_upload(file)
 
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
-    pdf_path = await storage.save_upload(doc_id, file)
+    pdf_path = await storage.save_upload(doc_id, file, settings.max_upload_bytes)
     status = JobStatus(
         job_id=job_id,
         doc_id=doc_id,
@@ -71,9 +81,25 @@ async def get_preview(doc_id: str) -> HTMLResponse:
     return HTMLResponse(path.read_text(encoding="utf-8"))
 
 
+@router.head("/documents/{doc_id}/preview")
+async def head_preview(doc_id: str) -> Response:
+    path = storage.preview_html_path(doc_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Preview not found")
+    return Response(media_type="text/html")
+
+
 @router.get("/documents/{doc_id}/download")
 async def download_document(doc_id: str) -> FileResponse:
     path = storage.output_pdf_path(doc_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="Translated PDF not found")
     return FileResponse(path, filename=f"{doc_id}-translated.pdf", media_type="application/pdf")
+
+
+@router.head("/documents/{doc_id}/download")
+async def head_download(doc_id: str) -> Response:
+    path = storage.output_pdf_path(doc_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Translated PDF not found")
+    return Response(media_type="application/pdf")

@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 
 from pdf_translator_schema import DocumentIR
 
@@ -29,11 +29,16 @@ class Storage:
     def new_job_id(self) -> str:
         return f"job_{uuid4().hex}"
 
-    async def save_upload(self, doc_id: str, upload: UploadFile) -> Path:
+    async def save_upload(self, doc_id: str, upload: UploadFile, max_bytes: int) -> Path:
         suffix = Path(upload.filename or "upload.pdf").suffix or ".pdf"
         path = self.uploads / f"{doc_id}{suffix}"
+        total_bytes = 0
         with path.open("wb") as out:
             while chunk := await upload.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=413, detail="PDF upload is too large")
                 out.write(chunk)
         return path
 
@@ -82,4 +87,3 @@ class Storage:
 
 
 storage = Storage(settings.storage_dir)
-

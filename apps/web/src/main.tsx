@@ -17,19 +17,25 @@ import {
   XCircle
 } from "lucide-react";
 import type { JobStatus } from "@trans-typesetting/schema";
+import {
+  ApiError,
+  createDocument,
+  getHealth,
+  getJob,
+  verifyDownload,
+  verifyPreview
+} from "./api";
 import "./styles.css";
-
-interface CreateDocumentResponse {
-  job_id: string;
-  doc_id: string;
-}
 
 type UploadIssue = {
   kind: "error" | "info";
   message: string;
 };
 
+type HealthState = "checking" | "online" | "offline";
 type PreviewState = "idle" | "loading" | "ready" | "error";
+
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
 const languageOptions = [
   { label: "简体中文", value: "zh-CN" },
@@ -46,15 +52,6 @@ const statuses: JobStatus["status"][] = [
   "rendering",
   "completed"
 ];
-
-const jobStatusValues = new Set<JobStatus["status"]>([
-  "queued",
-  "parsing",
-  "translating",
-  "rendering",
-  "completed",
-  "failed"
-]);
 
 const statusCopy: Record<JobStatus["status"], string> = {
   queued: "排队中",
@@ -79,13 +76,17 @@ function App() {
   const [targetLang, setTargetLang] = useState("zh-CN");
   const [job, setJob] = useState<JobStatus | null>(null);
   const [docId, setDocId] = useState<string | null>(null);
+  const [healthState, setHealthState] = useState<HealthState>("checking");
+  const [healthIssue, setHealthIssue] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isRetryingStatus, setIsRetryingStatus] = useState(false);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
+  const [previewIssue, setPreviewIssue] = useState<string | null>(null);
   const [uploadIssue, setUploadIssue] = useState<UploadIssue | null>(null);
   const [taskIssue, setTaskIssue] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const pollDelayRef = useRef(1200);
 
   const activeDocId = job?.doc_id ?? docId;
   const previewUrl = useMemo(
@@ -99,17 +100,27 @@ function App() {
   const isTaskRunning = job
     ? ["queued", "parsing", "translating", "rendering"].includes(job.status)
     : false;
-  const canSubmit = Boolean(file) && !isUploading && !isTaskRunning;
+  const canSubmit = Boolean(file) && !isUploading && !isTaskRunning && healthState === "online";
   const isComplete = job?.status === "completed" && Boolean(previewUrl);
+  const hasBackendFailure = healthState === "offline";
+  const artifactsReady = isComplete && previewState === "ready" && !previewIssue;
 
-  const refreshJob = useCallback(async (jobId: string) => {
-    const response = await fetch(`/api/jobs/${jobId}`);
-    if (!response.ok) {
-      const message = await readErrorMessage(response, "无法读取任务状态。");
-      throw new Error(message);
+  const checkHealth = useCallback(async () => {
+    setHealthIssue(null);
+    try {
+      await getHealth();
+      setHealthState("online");
+      setHealthIssue(null);
+      return true;
+    } catch (reason) {
+      setHealthState("offline");
+      setHealthIssue(apiMessage(reason, "无法连接后端服务。"));
+      return false;
     }
-    const payload = await readJson(response, "任务状态返回不是有效 JSON。");
-    const nextJob = parseJobStatus(payload);
+  }, []);
+
+  const refreshJob = useCallback(async (jobId: string, signal?: AbortSignal) => {
+    const nextJob = await getJob(jobId, { signal });
     setJob(nextJob);
     if (nextJob.doc_id) {
       setDocId(nextJob.doc_id);
@@ -118,36 +129,81 @@ function App() {
   }, []);
 
   useEffect(() => {
+    void checkHealth();
+  }, [checkHealth]);
+
+  useEffect(() => {
     if (!job || job.status === "completed" || job.status === "failed") {
       return;
     }
 
     let cancelled = false;
-    const timer = window.setInterval(async () => {
+    const controller = new AbortController();
+    let timer: number | null = null;
+
+    const poll = async () => {
       try {
-        const nextJob = await refreshJob(job.job_id);
+        const nextJob = await refreshJob(job.job_id, controller.signal);
         if (!cancelled) {
+          pollDelayRef.current = 1200;
           setTaskIssue(null);
+          setHealthState("online");
+          setHealthIssue(null);
           if (nextJob.error) {
             setTaskIssue(nextJob.error);
           }
         }
       } catch (reason) {
         if (!cancelled) {
-          setTaskIssue(reason instanceof Error ? reason.message : "无法读取任务状态。");
+          const message = apiMessage(reason, "无法读取任务状态。");
+          setTaskIssue(message);
+          if (reason instanceof ApiError && ["network", "timeout"].includes(reason.kind)) {
+            setHealthState("offline");
+            setHealthIssue(message);
+          }
+          pollDelayRef.current = Math.min(pollDelayRef.current * 1.7, 8000);
+        }
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(poll, pollDelayRef.current);
         }
       }
-    }, 1200);
+    };
+
+    timer = window.setTimeout(poll, pollDelayRef.current);
 
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      controller.abort();
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
     };
   }, [job, refreshJob]);
 
   useEffect(() => {
     setPreviewState(isComplete && previewUrl ? "loading" : "idle");
+    setPreviewIssue(null);
   }, [isComplete, previewUrl]);
+
+  useEffect(() => {
+    if (!isComplete || !activeDocId) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void Promise.all([
+      verifyPreview(activeDocId, { signal: controller.signal }),
+      verifyDownload(activeDocId, { signal: controller.signal })
+    ]).catch((reason) => {
+      if (!controller.signal.aborted) {
+        setPreviewState("error");
+        setPreviewIssue(previewMessage(reason));
+      }
+    });
+
+    return () => controller.abort();
+  }, [activeDocId, isComplete]);
 
   function resetFileInput() {
     if (inputRef.current) {
@@ -169,6 +225,16 @@ function App() {
     if (!isPdfFile(nextFile)) {
       setFile(null);
       setUploadIssue({ kind: "error", message: "仅支持 PDF 文件，请重新选择。" });
+      resetFileInput();
+      return;
+    }
+
+    if (nextFile.size > MAX_UPLOAD_BYTES) {
+      setFile(null);
+      setUploadIssue({
+        kind: "error",
+        message: `PDF 文件不能超过 ${formatFileSize(MAX_UPLOAD_BYTES)}。`
+      });
       resetFileInput();
       return;
     }
@@ -204,10 +270,11 @@ function App() {
 
     setIsRetryingStatus(true);
     try {
+      await checkHealth();
       await refreshJob(job.job_id);
       setTaskIssue(null);
     } catch (reason) {
-      setTaskIssue(reason instanceof Error ? reason.message : "无法读取任务状态。");
+      setTaskIssue(apiMessage(reason, "无法读取任务状态。"));
     } finally {
       setIsRetryingStatus(false);
     }
@@ -219,32 +286,26 @@ function App() {
       return;
     }
 
+    if (!isPdfFile(file) || file.size > MAX_UPLOAD_BYTES) {
+      handleFile(file);
+      return;
+    }
+
     setIsUploading(true);
     setUploadIssue(null);
     setTaskIssue(null);
     setJob(null);
     setDocId(null);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("target_lang", targetLang);
-
     try {
-      const response = await fetch("/api/documents", {
-        method: "POST",
-        body: formData
-      });
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response, "上传失败。"));
+      if (!(await checkHealth())) {
+        throw new Error("后端服务不可用，请先启动 API。");
       }
-
-      const payload = parseCreateDocumentResponse(
-        await readJson(response, "上传接口返回不是有效 JSON。")
-      );
+      const payload = await createDocument(file, targetLang);
       setDocId(payload.doc_id);
       await refreshJob(payload.job_id);
     } catch (reason) {
-      setTaskIssue(reason instanceof Error ? reason.message : "上传失败。");
+      setTaskIssue(apiMessage(reason, "上传失败。"));
     } finally {
       setIsUploading(false);
     }
@@ -340,6 +401,11 @@ function App() {
 
           <section className="tool-section task-section" aria-labelledby="task-heading">
             <SectionTitle id="task-heading" icon={<Clock3 size={16} />} title="任务" />
+            <BackendStatus
+              healthState={healthState}
+              issue={healthIssue}
+              onRetry={() => void checkHealth()}
+            />
             <button className="primary" type="button" onClick={submit} disabled={!canSubmit}>
               {isUploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
               <span>{isUploading ? "上传中" : job ? "重新翻译" : "开始翻译"}</span>
@@ -351,7 +417,7 @@ function App() {
               issue={taskIssue}
               onRetryStatus={retryStatus}
             />
-            {isComplete && downloadUrl ? (
+            {artifactsReady && downloadUrl ? (
               <a className="download" href={downloadUrl}>
                 <Download size={18} />
                 <span>下载 PDF</span>
@@ -366,7 +432,7 @@ function App() {
               <span>预览</span>
               <strong>{isComplete ? "纯译文排版" : "等待完成"}</strong>
             </div>
-            {isComplete && downloadUrl && previewUrl ? (
+            {artifactsReady && downloadUrl && previewUrl ? (
               <div className="toolbar-actions">
                 <a className="toolbar-button" href={previewUrl} target="_blank" rel="noreferrer" aria-label="Open preview in a new tab">
                   <ExternalLink size={18} />
@@ -384,18 +450,70 @@ function App() {
                   className={previewState === "ready" ? "is-ready" : ""}
                   title="PDF translation preview"
                   src={previewUrl}
-                  onLoad={() => setPreviewState("ready")}
-                  onError={() => setPreviewState("error")}
+                  onLoad={() => {
+                    if (!previewIssue) {
+                      setPreviewState("ready");
+                    }
+                  }}
+                  onError={() => {
+                    setPreviewState("error");
+                    setPreviewIssue("预览 HTML 加载失败。");
+                  }}
                 />
-                {previewState !== "ready" ? <PreviewOverlay state={previewState} /> : null}
+                {previewIssue || previewState !== "ready" ? (
+                  <PreviewOverlay state={previewIssue ? "error" : previewState} issue={previewIssue} />
+                ) : null}
               </>
             ) : (
-              <EmptyPreview job={job} taskIssue={taskIssue} />
+              <EmptyPreview
+                job={job}
+                taskIssue={taskIssue}
+                backendOffline={hasBackendFailure}
+                previewIssue={previewIssue}
+              />
             )}
           </div>
         </section>
       </section>
     </main>
+  );
+}
+
+function BackendStatus({
+  healthState,
+  issue,
+  onRetry
+}: {
+  healthState: HealthState;
+  issue: string | null;
+  onRetry: () => void;
+}) {
+  const isOffline = healthState === "offline";
+  const isChecking = healthState === "checking";
+  return (
+    <div className={`backend-status${isOffline ? " offline" : ""}`}>
+      <span aria-hidden="true">
+        {isChecking ? (
+          <Loader2 className="spin" size={16} />
+        ) : isOffline ? (
+          <XCircle size={16} />
+        ) : (
+          <CheckCircle2 size={16} />
+        )}
+      </span>
+      <p>
+        {isChecking
+          ? "正在检查后端服务"
+          : isOffline
+            ? issue ?? "后端服务不可用。"
+            : "后端服务已连接"}
+      </p>
+      {isOffline ? (
+        <button type="button" onClick={onRetry} aria-label="Retry backend health check">
+          <RefreshCw size={15} />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -506,25 +624,38 @@ function JobProgress({
   );
 }
 
-function PreviewOverlay({ state }: { state: PreviewState }) {
+function PreviewOverlay({ state, issue }: { state: PreviewState; issue: string | null }) {
   const isError = state === "error";
 
   return (
     <div className={`preview-overlay${isError ? " failed" : ""}`} role="status">
       {isError ? <XCircle size={30} /> : <Loader2 className="spin" size={30} />}
-      <span>{isError ? "预览加载失败" : "正在加载预览"}</span>
+      <span>{isError ? issue ?? "预览加载失败" : "正在加载预览"}</span>
     </div>
   );
 }
 
-function EmptyPreview({ job, taskIssue }: { job: JobStatus | null; taskIssue: string | null }) {
-  const hasFailure = job?.status === "failed" || Boolean(taskIssue);
+function EmptyPreview({
+  job,
+  taskIssue,
+  backendOffline,
+  previewIssue
+}: {
+  job: JobStatus | null;
+  taskIssue: string | null;
+  backendOffline: boolean;
+  previewIssue: string | null;
+}) {
+  const hasFailure = job?.status === "failed" || Boolean(taskIssue) || backendOffline || Boolean(previewIssue);
+  const message = backendOffline
+    ? "后端服务不可用，请确认 API 已启动。"
+    : previewIssue ?? taskIssue ?? job?.error ?? job?.message;
 
   return (
     <div className={`empty-preview${hasFailure ? " failed" : ""}`}>
       {hasFailure ? <XCircle size={42} /> : <FileText size={42} />}
       <h2>{hasFailure ? "无法生成预览" : "预览将在完成后显示"}</h2>
-      <p>{hasFailure ? taskIssue ?? job?.error ?? job?.message : "任务完成后显示译文预览。"}</p>
+      <p>{hasFailure ? message : "任务完成后显示译文预览。"}</p>
     </div>
   );
 }
@@ -550,65 +681,18 @@ function normalizeProgress(progress: number) {
   return Math.min(1, Math.max(0, progress));
 }
 
-function parseCreateDocumentResponse(payload: unknown): CreateDocumentResponse {
-  if (!isRecord(payload) || typeof payload.job_id !== "string" || typeof payload.doc_id !== "string") {
-    throw new Error("上传接口返回缺少任务信息。");
-  }
-
-  return {
-    job_id: payload.job_id,
-    doc_id: payload.doc_id
-  };
-}
-
-function parseJobStatus(payload: unknown): JobStatus {
-  if (
-    !isRecord(payload) ||
-    typeof payload.job_id !== "string" ||
-    typeof payload.filename !== "string" ||
-    typeof payload.status !== "string" ||
-    !jobStatusValues.has(payload.status as JobStatus["status"]) ||
-    typeof payload.progress !== "number" ||
-    typeof payload.message !== "string"
-  ) {
-    throw new Error("任务状态返回缺少必要字段。");
-  }
-
-  return {
-    job_id: payload.job_id,
-    doc_id: typeof payload.doc_id === "string" || payload.doc_id === null ? payload.doc_id : undefined,
-    filename: payload.filename,
-    status: payload.status as JobStatus["status"],
-    progress: payload.progress,
-    message: payload.message,
-    error: typeof payload.error === "string" || payload.error === null ? payload.error : undefined
-  };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-async function readJson(response: Response, fallback: string) {
-  try {
-    return await response.json();
-  } catch {
-    throw new Error(fallback);
-  }
-}
-
-async function readErrorMessage(response: Response, fallback: string) {
-  const payload = await response.json().catch(() => null);
-  if (typeof payload?.detail === "string") {
-    return payload.detail;
-  }
-  if (typeof payload?.error === "string") {
-    return payload.error;
-  }
-  if (typeof payload?.message === "string") {
-    return payload.message;
+function apiMessage(reason: unknown, fallback: string) {
+  if (reason instanceof Error && reason.message) {
+    return reason.message;
   }
   return fallback;
+}
+
+function previewMessage(reason: unknown) {
+  if (reason instanceof ApiError && reason.status === 404) {
+    return "任务已完成，但预览或 PDF 文件不存在。";
+  }
+  return apiMessage(reason, "预览或下载资源不可用。");
 }
 
 createRoot(document.getElementById("root")!).render(
