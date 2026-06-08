@@ -43,6 +43,7 @@ import "./styles.css";
 
 type UploadIssue = {
   kind: "error" | "info";
+  target?: "requirements" | "document";
   message: string;
 };
 
@@ -91,6 +92,11 @@ const statuses: JobStatus["status"][] = [
   "rendering",
   "completed"
 ];
+
+type BaseUrlValidation = {
+  error: string | null;
+  warning: string | null;
+};
 
 const statusCopy: Record<JobStatus["status"], string> = {
   queued: "排队中",
@@ -198,6 +204,10 @@ function App() {
   const isComplete = job?.status === "completed" && Boolean(previewUrl);
   const hasBackendFailure = healthState === "offline";
   const artifactsReady = isComplete && previewState === "ready" && !previewIssue;
+  const baseUrlValidation = useMemo(
+    () => validateOpenAIBaseUrl(configDraft.openai_base_url),
+    [configDraft.openai_base_url]
+  );
   const configuredLanguages = runtimeConfig?.allowed_target_langs.length
     ? runtimeConfig.allowed_target_langs
     : languageOptions.map((option) => option.value);
@@ -420,7 +430,7 @@ function App() {
     resetFileInput();
   }
 
-  function clearPdfSlot(slot: PdfSlot) {
+  function clearPdfSlot(slot: PdfSlot, options: { preserveIssue?: boolean } = {}) {
     if (slot === "content") {
       setContentPdfFile(null);
       if (contentPdfInputRef.current) {
@@ -432,7 +442,9 @@ function App() {
         layoutPdfInputRef.current.value = "";
       }
     }
-    setUploadIssue(null);
+    if (!options.preserveIssue) {
+      setUploadIssue(null);
+    }
   }
 
   function handlePdfSlotFiles(slot: PdfSlot, nextFiles: FileList | File[] | null | undefined) {
@@ -441,24 +453,29 @@ function App() {
       return;
     }
     if (!isPdfFile(selectedFile)) {
-      setUploadIssue({ kind: "error", message: "仅支持 PDF 文件，请重新选择。" });
-      clearPdfSlot(slot);
+      setUploadIssue({
+        kind: "error",
+        target: slot === "content" ? "document" : "requirements",
+        message: "仅支持 PDF 文件，请重新选择。"
+      });
+      clearPdfSlot(slot, { preserveIssue: true });
       return;
     }
     if (selectedFile.size > maxUploadBytes) {
       setUploadIssue({
         kind: "error",
+        target: slot === "content" ? "document" : "requirements",
         message: `PDF 文件不能超过 ${formatFileSize(maxUploadBytes)}。`
       });
-      clearPdfSlot(slot);
+      clearPdfSlot(slot, { preserveIssue: true });
       return;
     }
     if (slot === "content") {
       setContentPdfFile(selectedFile);
-      setUploadIssue({ kind: "info", message: "已选择待翻译 PDF，可以开始排版。" });
+      setUploadIssue({ kind: "info", target: "document", message: "已选择待翻译 PDF，可以开始排版。" });
     } else {
       setLayoutPdfFile(selectedFile);
-      setUploadIssue({ kind: "info", message: "已选择版式参考 PDF，后端会作为语义排版源。" });
+      setUploadIssue({ kind: "info", target: "requirements", message: "已选择版式参考 PDF，后端会作为语义排版源。" });
     }
     setTaskIssue(null);
   }
@@ -476,6 +493,7 @@ function App() {
       setFiles([]);
       setUploadIssue({
         kind: "error",
+        target: "requirements",
         message: inputMode === "image" ? "仅支持 PNG、JPEG 或 WebP 图片。" : "仅支持 PDF 文件，请重新选择。"
       });
       resetFileInput();
@@ -487,6 +505,7 @@ function App() {
       setFiles([]);
       setUploadIssue({
         kind: "error",
+        target: "requirements",
         message: `PDF 文件不能超过 ${formatFileSize(maxUploadBytes)}。`
       });
       resetFileInput();
@@ -496,6 +515,7 @@ function App() {
     setFiles(selectedFiles);
     setUploadIssue({
       kind: "info",
+      target: "requirements",
       message:
         inputMode === "image"
           ? "已选择图片，可以开始智能排版。"
@@ -597,6 +617,10 @@ function App() {
   }
 
   async function saveRuntimeConfig() {
+    if (baseUrlValidation.error) {
+      setConfigIssue(baseUrlValidation.error);
+      return;
+    }
     setIsSavingConfig(true);
     try {
       const config = await updateRuntimeConfig({
@@ -620,6 +644,7 @@ function App() {
     if (!hasSubmitInput) {
       setUploadIssue({
         kind: "error",
+        target: inputMode === "pdf" ? "document" : "requirements",
         message:
           inputMode === "text"
             ? "请输入要排版的文本。"
@@ -716,8 +741,55 @@ function App() {
             </div>
           </header>
 
-          <section className="tool-section" aria-labelledby="upload-heading">
-            <SectionTitle id="upload-heading" icon={<Upload size={16} />} title="文献上传" />
+          <section className="tool-section" aria-labelledby="config-heading">
+            <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="文献配置" />
+            {inputMode === "pdf" ? (
+              <>
+                <PdfUploadSlot
+                  label="待翻译 PDF"
+                  meta="必填，作为翻译与排版内容源"
+                  file={contentPdfFile}
+                  required
+                  issueKind={uploadIssue?.kind}
+                  isDragging={draggingPdfSlot === "content"}
+                  inputRef={contentPdfInputRef}
+                  onSelect={(files) => handlePdfSlotFiles("content", files)}
+                  onClear={() => clearPdfSlot("content")}
+                  onDragOver={(event) => handlePdfDragOver(event, "content")}
+                  onDragLeave={handlePdfDragLeave}
+                  onDrop={(event) => handlePdfDrop(event, "content")}
+                />
+                <div className="upload-footer" id="document-upload-feedback">
+                  {contentPdfFile ? (
+                    <span className="hint">待翻译 PDF 已就绪。</span>
+                  ) : (
+                    <InlineNotice
+                      issue={uploadIssue?.target === "document" ? uploadIssue : null}
+                      fallback="请选择待翻译 PDF。"
+                    />
+                  )}
+                  {contentPdfFile ? (
+                    <button className="ghost-button" type="button" onClick={() => clearPdfSlot("content")}>
+                      <X size={15} />
+                      移除文件
+                    </button>
+                  ) : null}
+                </div>
+              </>
+            ) : null}
+            <RuntimeConfigCard
+              config={runtimeConfig}
+              draft={configDraft}
+              issue={configIssue}
+              validation={baseUrlValidation}
+              isSaving={isSavingConfig}
+              onDraftChange={setConfigDraft}
+              onSave={saveRuntimeConfig}
+            />
+          </section>
+
+          <section className="tool-section" aria-labelledby="typesetting-heading">
+            <SectionTitle id="typesetting-heading" icon={<SlidersHorizontal size={16} />} title="排版需求" />
             <div className="segmented" role="tablist" aria-label="Input mode">
               {inputModes.map((mode) => (
                 <button
@@ -751,20 +823,6 @@ function App() {
               />
             ) : inputMode === "pdf" ? (
               <div className="pdf-source-grid">
-                <PdfUploadSlot
-                  label="待翻译 PDF"
-                  meta="必填，作为翻译与排版内容源"
-                  file={contentPdfFile}
-                  required
-                  issueKind={uploadIssue?.kind}
-                  isDragging={draggingPdfSlot === "content"}
-                  inputRef={contentPdfInputRef}
-                  onSelect={(files) => handlePdfSlotFiles("content", files)}
-                  onClear={() => clearPdfSlot("content")}
-                  onDragOver={(event) => handlePdfDragOver(event, "content")}
-                  onDragLeave={handlePdfDragLeave}
-                  onDrop={(event) => handlePdfDrop(event, "content")}
-                />
                 <PdfUploadSlot
                   label="版式参考 PDF"
                   meta="可选，作为排版语义输入源"
@@ -833,18 +891,17 @@ function App() {
               </>
             )}
             <div className="upload-footer" id="upload-feedback">
-              <InlineNotice issue={uploadIssue} />
-              {files.length || contentPdfFile || layoutPdfFile ? (
+              <InlineNotice
+                issue={uploadIssue?.target !== "document" ? uploadIssue : null}
+                fallback={inputMode === "pdf" ? "版式参考 PDF 可选。" : "等待输入。"}
+              />
+              {files.length || (inputMode === "pdf" && layoutPdfFile) ? (
                 <button className="ghost-button" type="button" onClick={clearFile}>
                   <X size={15} />
                   移除输入
                 </button>
               ) : null}
             </div>
-          </section>
-
-          <section className="tool-section" aria-labelledby="typesetting-heading">
-            <SectionTitle id="typesetting-heading" icon={<SlidersHorizontal size={16} />} title="排版需求" />
             <label className="field">
               <span>
                 <Globe2 size={16} />
@@ -892,18 +949,6 @@ function App() {
               draft={constraintDraft}
               onToggle={() => setIsConstraintsOpen((current) => !current)}
               onChange={setConstraintDraft}
-            />
-          </section>
-
-          <section className="tool-section" aria-labelledby="config-heading">
-            <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="运行配置" />
-            <RuntimeConfigCard
-              config={runtimeConfig}
-              draft={configDraft}
-              issue={configIssue}
-              isSaving={isSavingConfig}
-              onDraftChange={setConfigDraft}
-              onSave={saveRuntimeConfig}
             />
           </section>
 
@@ -1223,9 +1268,15 @@ function ConstraintPanel({
   );
 }
 
-function InlineNotice({ issue }: { issue: UploadIssue | null }) {
+function InlineNotice({
+  issue,
+  fallback = "等待 PDF 文件。"
+}: {
+  issue: UploadIssue | null;
+  fallback?: string;
+}) {
   if (!issue) {
-    return <span className="hint">等待 PDF 文件。</span>;
+    return <span className="hint">{fallback}</span>;
   }
 
   return (
@@ -1240,6 +1291,7 @@ function RuntimeConfigCard({
   config,
   draft,
   issue,
+  validation,
   isSaving,
   onDraftChange,
   onSave
@@ -1253,6 +1305,7 @@ function RuntimeConfigCard({
     translator_max_attempts: number;
   };
   issue: string | null;
+  validation: BaseUrlValidation;
   isSaving: boolean;
   onDraftChange: React.Dispatch<React.SetStateAction<{
     openai_base_url: string;
@@ -1265,8 +1318,12 @@ function RuntimeConfigCard({
 }) {
   const provider = config?.translator_provider ?? "deterministic";
   const isConfigured = config?.openai_api_key_configured ?? false;
+  const baseUrlMessage = validation.error ?? validation.warning;
   return (
-    <div className={`model-slot config-editor${issue ? " warning" : ""}`} aria-label="Model configuration">
+    <div
+      className={`model-slot config-editor${issue || validation.error ? " warning" : ""}`}
+      aria-label="Model configuration"
+    >
       <div className="config-summary">
         <div>
           <span className="model-slot-label">模型配置</span>
@@ -1289,6 +1346,11 @@ function RuntimeConfigCard({
             onDraftChange((current) => ({ ...current, openai_base_url: event.target.value }))
           }
         />
+        {baseUrlMessage ? (
+          <small className={`field-note ${validation.error ? "error" : "warning"}`}>
+            {baseUrlMessage}
+          </small>
+        ) : null}
       </label>
       <label>
         <span>Model</span>
@@ -1342,7 +1404,12 @@ function RuntimeConfigCard({
           />
         </label>
       </div>
-      <button className="secondary-action" type="button" onClick={onSave} disabled={isSaving || !config}>
+      <button
+        className="secondary-action"
+        type="button"
+        onClick={onSave}
+        disabled={isSaving || !config || Boolean(validation.error)}
+      >
         {isSaving ? <Loader2 className="spin" size={15} /> : <Settings2 size={15} />}
         <span>{isSaving ? "保存中" : "保存配置"}</span>
       </button>
@@ -1681,6 +1748,75 @@ function clampNumber(value: string, min: number, max: number) {
     return min;
   }
   return Math.min(max, Math.max(min, Number(parsed.toFixed(2))));
+}
+
+function validateOpenAIBaseUrl(value: string): BaseUrlValidation {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (!trimmed) {
+    return { error: "Base URL 不能为空。", warning: null };
+  }
+  if (!/^https?:\/\//i.test(trimmed)) {
+    return { error: "Base URL 必须以 http:// 或 https:// 开头。", warning: null };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { error: "Base URL 不是有效 URL。", warning: null };
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: "Base URL 只支持 http:// 或 https://。", warning: null };
+  }
+  if (!parsed.hostname) {
+    return { error: "Base URL 必须包含 host。", warning: null };
+  }
+  if (parsed.search || parsed.hash) {
+    return { error: "Base URL 不应包含查询参数或 fragment。", warning: null };
+  }
+
+  const path = parsed.pathname.replace(/\/+$/, "");
+  const segments = path.split("/").filter(Boolean);
+  if (segments.at(-1) !== "v1") {
+    return {
+      error: "Base URL 应指向 OpenAI-compatible /v1 API 根路径。",
+      warning: null
+    };
+  }
+
+  if (parsed.protocol === "http:" && !isPrivateOrLocalHost(parsed.hostname)) {
+    return {
+      error: null,
+      warning: "公网 HTTP 会明文传输 API Key；仅在可信网络中使用。"
+    };
+  }
+
+  return { error: null, warning: null };
+}
+
+function isPrivateOrLocalHost(hostname: string) {
+  const normalized = hostname.toLowerCase();
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) {
+    return true;
+  }
+  if (normalized === "::1" || normalized === "[::1]") {
+    return true;
+  }
+
+  const octets = normalized.split(".").map((segment) => Number(segment));
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet))) {
+    return false;
+  }
+
+  const [first, second] = octets;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 169 && second === 254)
+  );
 }
 
 function apiMessage(reason: unknown, fallback: string) {

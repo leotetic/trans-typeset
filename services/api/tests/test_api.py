@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 from app import config as config_module
+from app.provider_config import ProviderConfigError
 from app.config import Settings
 from app.main import app
 from app import runtime_config
@@ -101,6 +102,20 @@ def test_load_settings_prefers_dotenv_provider_values_over_process_env(
     assert loaded.openai_api_key == "dotenv-secret"
     assert loaded.openai_api_key_from_env is True
     assert loaded.openai_model == "dotenv-model"
+
+
+def test_load_settings_rejects_invalid_openai_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        config_module,
+        "_dotenv_values",
+        lambda: {"OPENAI_BASE_URL": "10.194.160.128:8080/v1"},
+    )
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    with pytest.raises(ProviderConfigError, match="Base URL must start"):
+        config_module.load_settings()
 
 
 def test_config_env_provider_overrides_stale_persisted_key(
@@ -243,6 +258,58 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
     assert "secret-key" not in response.text
     assert storage.read_runtime_config()["openai_api_key"] == "secret-key"
     assert storage.read_runtime_config()["render_defaults"]["line_height"] == 1.5
+
+
+@pytest.mark.parametrize(
+    ("base_url", "detail"),
+    [
+        ("10.194.160.128:8080/v1", "Base URL must start with http:// or https://"),
+        ("ftp://example.test/v1", "Base URL must start with http:// or https://"),
+        (
+            "https://example.test/chat/completions",
+            "Base URL must point to an OpenAI-compatible /v1 API root, "
+            "for example https://api.example.com/v1",
+        ),
+    ],
+)
+def test_update_config_rejects_invalid_openai_base_url(
+    base_url: str,
+    detail: str,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    monkeypatch.setattr(runtime_config, "settings", config)
+    client = TestClient(app)
+
+    response = client.put("/api/config", json={"openai_base_url": base_url})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == detail
+    assert storage.read_runtime_config() == {}
+
+
+def test_update_config_allows_private_http_openai_base_url(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    monkeypatch.setattr(runtime_config, "settings", config)
+    client = TestClient(app)
+
+    response = client.put(
+        "/api/config",
+        json={"openai_base_url": "http://10.194.160.128:8080/v1/"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["openai_base_url"] == "http://10.194.160.128:8080/v1"
+    assert storage.read_runtime_config()["openai_base_url"] == "http://10.194.160.128:8080/v1"
 
 
 def test_update_config_rejects_unsupported_default_language(tmp_path: Path, monkeypatch) -> None:
@@ -825,6 +892,11 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     )
     storage.save_document_ir(document)
     storage.write_json("doc_1", "translation-chunks.json", [{"chunk_id": "chunk_1"}])
+    storage.write_json(
+        "doc_1",
+        "translation-diagnostics.json",
+        [{"chunk_id": "chunk_1", "error_type": "UnparseableTranslationResponseError"}],
+    )
     storage.write_json("doc_1", "layout-trace.json", {"kind": "layout_trace"})
     storage.write_json("doc_1", "parser-diagnostics.json", {"kind": "parser_diagnostics"})
     client = TestClient(app)
@@ -838,12 +910,16 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert artifacts["semantic-analysis"]["available"] is False
     assert artifacts["document-ir"]["available"] is True
     assert artifacts["translation-chunks"]["available"] is True
+    assert artifacts["translation-diagnostics"]["available"] is True
     assert artifacts["layout-trace"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False
     assert artifacts["parser-diagnostics"]["available"] is True
 
     document_response = client.get("/api/documents/doc_1/artifacts/document-ir")
     chunks_response = client.get("/api/documents/doc_1/artifacts/translation-chunks")
+    translation_diagnostics_response = client.get(
+        "/api/documents/doc_1/artifacts/translation-diagnostics"
+    )
     parser_response = client.get("/api/documents/doc_1/artifacts/parser-diagnostics")
     trace_response = client.get("/api/documents/doc_1/artifacts/layout-trace")
 
@@ -851,6 +927,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert document_response.json()["doc_id"] == "doc_1"
     assert chunks_response.status_code == 200
     assert chunks_response.json() == [{"chunk_id": "chunk_1"}]
+    assert translation_diagnostics_response.status_code == 200
+    assert translation_diagnostics_response.json() == [
+        {"chunk_id": "chunk_1", "error_type": "UnparseableTranslationResponseError"}
+    ]
     assert parser_response.status_code == 200
     assert parser_response.json() == {"kind": "parser_diagnostics"}
     assert trace_response.status_code == 200

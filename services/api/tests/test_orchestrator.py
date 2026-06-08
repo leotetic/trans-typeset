@@ -224,6 +224,159 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert captured["renderer_render_defaults"].overflow_policy.min_font_scale == 0.77
 
 
+def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    storage.write_runtime_config(
+        {
+            "translation_concurrency": 1,
+            "translator_max_attempts": 2,
+            "agent_max_repair_attempts": 0,
+        }
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                    DocumentBlock(
+                        block_id="b2",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=50, x1=120, y1=80),
+                        reading_order=1,
+                        source_text="Beta [1]",
+                    ),
+                ],
+            )
+        ],
+    )
+    chunks = [
+        TranslationChunk(
+            chunk_id="chunk_1",
+            source_blocks=[
+                SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Alpha")
+            ],
+        ),
+        TranslationChunk(
+            chunk_id="chunk_2",
+            source_blocks=[
+                SourceBlock(
+                    block_id="b2",
+                    role=BlockRole.PARAGRAPH,
+                    source_text="Beta [1]",
+                    preserve_tokens=["[1]"],
+                )
+            ],
+        ),
+    ]
+
+    class FakeTranslator:
+        def __init__(self) -> None:
+            self._diagnostics: list[dict[str, object]] = []
+
+        async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+            block = chunk.source_blocks[0]
+            if chunk.chunk_id == "chunk_2":
+                self._diagnostics.append(
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "attempt": 2,
+                        "error_type": "UnparseableTranslationResponseError",
+                        "content_type": "str",
+                        "content_length": 42,
+                        "response_preview_length": 24,
+                        "sanitized_response_preview": "plain text without JSON",
+                    }
+                )
+                return TranslationLayoutPlan(
+                    chunk_id=chunk.chunk_id,
+                    blocks=[
+                        TranslationBlockPlan(
+                            source_block_id=block.block_id,
+                            translated_text=block.source_text,
+                            role=block.role,
+                            quality_flags=[
+                                "translator_response_unparseable",
+                                "source_text_fallback",
+                                "missing_translation",
+                            ],
+                        )
+                    ],
+                )
+            return TranslationLayoutPlan(
+                chunk_id=chunk.chunk_id,
+                blocks=[
+                    TranslationBlockPlan(
+                        source_block_id=block.block_id,
+                        translated_text="translated Alpha",
+                        role=block.role,
+                    )
+                ],
+            )
+
+        def drain_diagnostics(self) -> list[dict[str, object]]:
+            diagnostics = list(self._diagnostics)
+            self._diagnostics.clear()
+            return diagnostics
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        assert "translated Alpha" in html
+        assert "Beta [1]" in html
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
+    monkeypatch.setattr(orchestrator, "build_chunks", lambda *_args, **_kwargs: chunks)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "paper.pdf",
+            tmp_path / "paper.pdf",
+            "zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    progress = storage.read_output_json("doc_1", "translation-progress.json")
+    plans = storage.read_output_json("doc_1", "translation-plans.json")
+    diagnostics = storage.read_output_json("doc_1", "translation-diagnostics.json")
+
+    assert status.status == JobState.COMPLETED
+    assert [chunk.status for chunk in status.chunks] == ["completed", "completed"]
+    assert "source_text_fallback" in progress[1]["quality_flags"]
+    assert plans[1]["blocks"][0]["translated_text"] == "Beta [1]"
+    assert diagnostics == [
+        {
+            "chunk_id": "chunk_2",
+            "attempt": 2,
+            "error_type": "UnparseableTranslationResponseError",
+            "content_type": "str",
+            "content_length": 42,
+            "response_preview_length": 24,
+            "sanitized_response_preview": "plain text without JSON",
+        }
+    ]
+    assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
+
+
 def test_process_document_job_persists_pdf_export_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -497,6 +650,7 @@ def test_text_workflow_runs_to_artifacts(
     assert "semantic_analysis_considered" in layout_plan["quality_flags"]
     assert "planner_fallback" in layout_plan["quality_flags"]
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
+    assert (tmp_path / "checkpoints" / "langgraph.sqlite").exists()
 
 
 def test_pdf_workflow_records_content_and_layout_sources(

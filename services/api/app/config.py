@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .provider_config import normalize_openai_base_url
+
 try:
     from dotenv import dotenv_values, find_dotenv
 except Exception:  # pragma: no cover - dotenv is an application dependency.
@@ -105,14 +107,15 @@ def load_settings() -> Settings:
         _provider_value(dotenv_config, "VISION_ANALYZER_MODEL", "").strip()
         or openai_model
     )
+    raw_openai_base_url = _provider_value(
+        dotenv_config,
+        "OPENAI_BASE_URL",
+        "https://api.openai.com/v1",
+    )
+    openai_base_url = normalize_openai_base_url(raw_openai_base_url)
+
     return Settings(
-        openai_base_url=_provider_value(
-            dotenv_config,
-            "OPENAI_BASE_URL",
-            "https://api.openai.com/v1",
-        )
-        .strip()
-        .rstrip("/"),
+        openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
         openai_api_key_from_env=bool(openai_api_key),
         openai_model=openai_model,

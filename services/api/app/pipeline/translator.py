@@ -18,14 +18,25 @@ from pdf_translator_schema.models import FORBIDDEN_LAYOUT_KEYS, BlockRole
 from pdf_translator_schema.validation import LayoutPlanValidationError
 from pydantic import ValidationError
 
+from ..provider_config import ProviderConfigError, normalize_openai_base_url
+
 
 class TranslationError(RuntimeError):
     pass
 
 
+class UnparseableTranslationResponseError(TranslationError):
+    def __init__(self, message: str, *, content: object) -> None:
+        super().__init__(message)
+        self.content = content
+
+
 class Translator:
     async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
         raise NotImplementedError
+
+    def drain_diagnostics(self) -> list[dict[str, Any]]:
+        return []
 
 
 def _inline_item_for_token(token: str) -> InlineItem:
@@ -86,16 +97,30 @@ class OpenAICompatibleTranslator(Translator):
         model: str,
         max_attempts: int = 2,
     ) -> None:
-        self.base_url = base_url.strip().rstrip("/")
+        try:
+            self.base_url = normalize_openai_base_url(base_url)
+        except ProviderConfigError as exc:
+            raise TranslationError(str(exc)) from exc
         self.api_key = api_key.strip()
         self.model = model.strip()
         self.max_attempts = max(1, max_attempts)
+        self._diagnostics: list[dict[str, Any]] = []
 
     async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
         last_error: TranslationError | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
                 return await self._translate_once(chunk, attempt, last_error)
+            except UnparseableTranslationResponseError as exc:
+                last_error = exc
+                self._record_unparseable_response(chunk, attempt, exc)
+                if attempt >= self.max_attempts:
+                    return self._fallback_plan_for_unparseable_response(
+                        chunk,
+                        attempt,
+                        exc,
+                    )
+                await asyncio.sleep(0.25 * attempt)
             except TranslationError as exc:
                 last_error = exc
                 if attempt >= self.max_attempts:
@@ -103,6 +128,11 @@ class OpenAICompatibleTranslator(Translator):
                 await asyncio.sleep(0.25 * attempt)
 
         raise last_error or TranslationError(f"Translator failed for {chunk.chunk_id}")
+
+    def drain_diagnostics(self) -> list[dict[str, Any]]:
+        diagnostics = list(self._diagnostics)
+        self._diagnostics.clear()
+        return diagnostics
 
     async def _translate_once(
         self,
@@ -136,10 +166,11 @@ class OpenAICompatibleTranslator(Translator):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        request_url = f"{self.base_url}/chat/completions"
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
-                    f"{self.base_url}/chat/completions", headers=headers, json=payload
+                    request_url, headers=headers, json=payload
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
@@ -149,6 +180,23 @@ class OpenAICompatibleTranslator(Translator):
                 f"HTTP {exc.response.status_code}: {detail}"
             ) from exc
         except httpx.HTTPError as exc:
+            if _is_ssl_protocol_mismatch(exc):
+                suggestion = _http_scheme_suggestion(self.base_url)
+                hint = (
+                    "HTTPS/HTTP protocol mismatch. The endpoint accepted a connection "
+                    "but did not speak TLS. If this OpenAI-compatible service is running "
+                    f"over plain HTTP, try Base URL {suggestion}."
+                    if suggestion
+                    else (
+                        "HTTPS/HTTP protocol mismatch. The endpoint accepted a connection "
+                        "but did not speak TLS. Check whether the Base URL scheme and port "
+                        "match the provider."
+                    )
+                )
+                raise TranslationError(
+                    f"OpenAI-compatible translator request failed for {chunk.chunk_id}: "
+                    f"{hint} Current request URL: {request_url}"
+                ) from exc
             raise TranslationError(
                 f"OpenAI-compatible translator request failed for {chunk.chunk_id}: {exc}"
             ) from exc
@@ -292,8 +340,9 @@ class OpenAICompatibleTranslator(Translator):
         if isinstance(raw_payload, dict):
             return raw_payload
         if raw_payload is not None:
-            raise TranslationError(
-                f"Translator returned JSON that is not an object for {chunk.chunk_id}"
+            raise UnparseableTranslationResponseError(
+                f"Translator returned JSON that is not an object for {chunk.chunk_id}",
+                content=content,
             )
 
         sanitized_content = _strip_thinking_blocks(content)
@@ -308,9 +357,75 @@ class OpenAICompatibleTranslator(Translator):
             if isinstance(candidate, dict) and _looks_like_layout_plan_payload(candidate):
                 return candidate
 
-        raise TranslationError(
+        raise UnparseableTranslationResponseError(
             f"Translator returned content without a TranslationLayoutPlan JSON object "
-            f"for {chunk.chunk_id}"
+            f"for {chunk.chunk_id}",
+            content=content,
+        )
+
+    def _fallback_plan_for_unparseable_response(
+        self,
+        chunk: TranslationChunk,
+        attempt: int,
+        exc: UnparseableTranslationResponseError,
+    ) -> TranslationLayoutPlan:
+        blocks: list[TranslationBlockPlan] = []
+        for source in chunk.source_blocks:
+            quality_flags = [
+                "translator_response_unparseable",
+                "source_text_fallback",
+                "missing_translation",
+            ]
+            if attempt > 1:
+                quality_flags.append(f"retry_attempt_{attempt}")
+            inline_items = []
+            for token in source.preserve_tokens:
+                inline_items.append(_inline_item_for_token(token))
+                quality_flags.append("preserve_token_repaired")
+            blocks.append(
+                TranslationBlockPlan(
+                    source_block_id=source.block_id,
+                    translated_text=source.source_text,
+                    inline_items=inline_items,
+                    role=source.role,
+                    render_intent="preserve_asset"
+                    if source.role in {BlockRole.FIGURE, BlockRole.TABLE}
+                    else "normal",
+                    quality_flags=_unique_strings(quality_flags),
+                )
+            )
+        plan = TranslationLayoutPlan(
+            chunk_id=chunk.chunk_id,
+            target_lang=chunk.target_lang,
+            blocks=blocks,
+        )
+        try:
+            return validate_layout_plan(chunk, plan)
+        except LayoutPlanValidationError as validation_exc:
+            raise TranslationError(
+                "Translator fallback layout plan validation failed "
+                f"for {chunk.chunk_id}: {validation_exc}"
+            ) from validation_exc
+
+    def _record_unparseable_response(
+        self,
+        chunk: TranslationChunk,
+        attempt: int,
+        exc: UnparseableTranslationResponseError,
+    ) -> None:
+        text = _diagnostic_text_for_content(exc.content)
+        preview = _sanitize_diagnostic_preview(text)
+        self._diagnostics.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "attempt": attempt,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "content_type": type(exc.content).__name__,
+                "content_length": len(text),
+                "response_preview_length": len(preview),
+                "sanitized_response_preview": preview,
+            }
         )
 
     def _build_prompt(
@@ -384,8 +499,51 @@ def _is_minimax_m3_model(model: str) -> bool:
     return "minimax-m3" in normalized or "minimax/m3" in normalized
 
 
+def _is_ssl_protocol_mismatch(exc: httpx.HTTPError) -> bool:
+    message = str(exc).lower()
+    return "wrong_version_number" in message or "wrong version number" in message
+
+
+def _http_scheme_suggestion(base_url: str) -> str | None:
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https":
+        return None
+    return parsed._replace(scheme="http").geturl()
+
+
 def _strip_thinking_blocks(content: str) -> str:
     return re.sub(r"<think\b[^>]*>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _diagnostic_text_for_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        try:
+            return json.dumps(content, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            return repr(content)
+    return repr(content)
+
+
+def _sanitize_diagnostic_preview(content: str, limit: int = 1000) -> str:
+    sanitized = re.sub(
+        r"<think\b[^>]*>.*?</think>",
+        "<think>...</think>",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    sanitized = re.sub(r"Bearer\s+[A-Za-z0-9._\-]+", "Bearer [REDACTED]", sanitized)
+    sanitized = re.sub(r"sk-[A-Za-z0-9_\-]{12,}", "sk-[REDACTED]", sanitized)
+    sanitized = "".join(
+        character
+        if character in {"\n", "\r", "\t"} or ord(character) >= 32
+        else " "
+        for character in sanitized
+    )
+    if len(sanitized) <= limit:
+        return sanitized
+    return sanitized[: limit - 1].rstrip() + "…"
 
 
 def _looks_like_layout_plan_payload(payload: dict[str, Any]) -> bool:

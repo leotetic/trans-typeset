@@ -240,7 +240,7 @@ async def _run_graph_job(
     target_lang: str,
     input_kind: InputKind,
     intent: UserIntent,
-        source_path: Path | None = None,
+    source_path: Path | None = None,
     content_source_path: Path | None = None,
     layout_source_path: Path | None = None,
     layout_source_filename: str | None = None,
@@ -607,6 +607,17 @@ async def _translate_chunks(
     plans_by_index: list[TranslationLayoutPlan | None] = [None] * len(chunks)
     completed_chunks = 0
     semaphore = asyncio.Semaphore(max(1, translation_concurrency))
+    translation_diagnostics: list[dict[str, Any]] = []
+
+    def drain_translation_diagnostics() -> None:
+        drain_diagnostics = getattr(translator, "drain_diagnostics", None)
+        if not callable(drain_diagnostics):
+            return
+        diagnostics = drain_diagnostics()
+        if not diagnostics:
+            return
+        translation_diagnostics.extend(diagnostics)
+        storage.write_json(doc_id, "translation-diagnostics.json", translation_diagnostics)
 
     async def translate_chunk(index: int) -> None:
         nonlocal completed_chunks
@@ -633,8 +644,10 @@ async def _translate_chunks(
                     [progress.model_dump() for progress in chunk_progress],
                 )
                 translated = await translator.translate(chunk)
+                drain_translation_diagnostics()
                 ensure_not_canceled(job_id)
         except JobCanceled:
+            drain_translation_diagnostics()
             progress_entry.status = "canceled"
             progress_entry.progress = 1
             progress_entry.message = "Canceled"
@@ -645,6 +658,7 @@ async def _translate_chunks(
             )
             raise
         except Exception as exc:
+            drain_translation_diagnostics()
             progress_entry.status = "failed"
             progress_entry.progress = 1
             progress_entry.message = "Failed"

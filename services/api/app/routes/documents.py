@@ -18,6 +18,7 @@ from ..models import (
     RuntimeConfig,
     UpdateRuntimeConfig,
 )
+from ..provider_config import ProviderConfigError, normalize_openai_base_url
 from ..pipeline.orchestrator import (
     process_document_job,
     process_image_document_job,
@@ -40,6 +41,7 @@ JSON_ARTIFACTS = {
     "document-ir": ("document_ir", "document-ir"),
     "translation-chunks": ("translation-chunks.json", "translation-chunks"),
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
+    "translation-diagnostics": ("translation-diagnostics.json", "translation-diagnostics"),
     "layout-trace": ("layout-trace.json", "layout-trace"),
     "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
     "render-evaluation": ("render-evaluation.json", "render-evaluation"),
@@ -138,7 +140,12 @@ async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
     if "default_target_lang" in updates:
         ensure_target_lang(updates["default_target_lang"])
     if "openai_base_url" in updates:
-        updates["openai_base_url"] = str(updates["openai_base_url"]).rstrip("/")
+        try:
+            updates["openai_base_url"] = normalize_openai_base_url(
+                str(updates["openai_base_url"])
+            )
+        except ProviderConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if "openai_api_key" in updates and updates["openai_api_key"] == "":
         updates["openai_api_key"] = ""
     if "render_defaults" in updates:

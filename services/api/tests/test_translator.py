@@ -389,3 +389,143 @@ def test_openai_translator_retries_chunk_after_unrepairable_response(
     assert len(calls) == 2
     assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
     assert "Previous attempt failed validation" in calls[1]["messages"][1]["content"]
+
+
+def test_openai_translator_falls_back_after_repeated_unparseable_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = make_chunk()
+    calls: list[dict] = []
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "<think>secret scratchpad</think>\n"
+                                "Plain translated text without plan JSON sk-live-secret123456"
+                            ),
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> FakeResponse:
+            calls.append(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(translator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1", "key", "model", max_attempts=2
+    )
+
+    plan = asyncio.run(translator.translate(chunk))
+    diagnostics = translator.drain_diagnostics()
+
+    assert len(calls) == 2
+    assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
+    assert [block.translated_text for block in plan.blocks] == [
+        "Alpha [1].",
+        "Beta y = f(x).",
+    ]
+    assert all("translator_response_unparseable" in block.quality_flags for block in plan.blocks)
+    assert all("source_text_fallback" in block.quality_flags for block in plan.blocks)
+    assert all("missing_translation" in block.quality_flags for block in plan.blocks)
+    assert all("retry_attempt_2" in block.quality_flags for block in plan.blocks)
+    tokens = {
+        item.source_token
+        for block in plan.blocks
+        for item in block.inline_items
+    }
+    assert tokens == {"[1]", "y = f(x)"}
+    assert len(diagnostics) == 2
+    assert diagnostics[0]["chunk_id"] == chunk.chunk_id
+    assert diagnostics[0]["attempt"] == 1
+    assert diagnostics[0]["content_type"] == "str"
+    assert "<think>...</think>" in diagnostics[0]["sanitized_response_preview"]
+    assert "sk-live-secret123456" not in diagnostics[0]["sanitized_response_preview"]
+    assert "sk-[REDACTED]" in diagnostics[0]["sanitized_response_preview"]
+
+
+def test_openai_translator_explains_ssl_protocol_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = make_chunk()
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> None:
+            raise translator_module.httpx.ConnectError(
+                "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1081)"
+            )
+
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator(
+        "https://10.194.160.128:8080/v1", "key", "model", max_attempts=1
+    )
+
+    with pytest.raises(TranslationError) as exc_info:
+        asyncio.run(translator.translate(chunk))
+
+    message = str(exc_info.value)
+    assert "HTTPS/HTTP protocol mismatch" in message
+    assert "try Base URL http://10.194.160.128:8080/v1" in message
+    assert "Current request URL: https://10.194.160.128:8080/v1/chat/completions" in message
+
+
+def test_openai_translator_keeps_generic_http_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = make_chunk()
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> None:
+            raise translator_module.httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1", "key", "model", max_attempts=1
+    )
+
+    with pytest.raises(TranslationError) as exc_info:
+        asyncio.run(translator.translate(chunk))
+
+    message = str(exc_info.value)
+    assert "connection refused" in message
+    assert "HTTPS/HTTP protocol mismatch" not in message

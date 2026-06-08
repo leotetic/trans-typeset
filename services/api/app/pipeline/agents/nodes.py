@@ -26,19 +26,55 @@ from .state import TypesettingGraphContext, TypesettingGraphState
 
 
 def make_nodes(context: TypesettingGraphContext) -> dict[str, Any]:
+    async def read_input(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _read_input(state, context)
+
+    def analyze_intent(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _analyze_intent(state, context)
+
+    async def semantic_recognize(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _semantic_recognize(state, context)
+
+    async def build_layout_plan(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _build_layout_plan(state, context)
+
+    def validate_layout_plan(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _validate_layout_plan(state, context)
+
+    async def translate_chunks(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _translate_chunks_node(state, context)
+
+    def render_preview(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _render_preview(state, context)
+
+    def evaluate_render(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _evaluate_render(state, context)
+
+    def repair_layout_plan(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _repair_layout_plan(state, context)
+
+    async def export_pdf(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _export_pdf(state, context)
+
+    def complete(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _complete(state, context)
+
+    def fail(state: TypesettingGraphState) -> TypesettingGraphState:
+        return _fail(state, context)
+
     return {
-        "read_input": lambda state: _read_input(state, context),
-        "analyze_intent": lambda state: _analyze_intent(state, context),
-        "semantic_recognize": lambda state: _semantic_recognize(state, context),
-        "build_layout_plan": lambda state: _build_layout_plan(state, context),
-        "validate_layout_plan": lambda state: _validate_layout_plan(state, context),
-        "translate_chunks": lambda state: _translate_chunks_node(state, context),
-        "render_preview": lambda state: _render_preview(state, context),
-        "evaluate_render": lambda state: _evaluate_render(state, context),
-        "repair_layout_plan": lambda state: _repair_layout_plan(state, context),
-        "export_pdf": lambda state: _export_pdf(state, context),
-        "complete": lambda state: _complete(state, context),
-        "fail": lambda state: _fail(state, context),
+        "read_input": read_input,
+        "analyze_intent": analyze_intent,
+        "semantic_recognize": semantic_recognize,
+        "build_layout_plan": build_layout_plan,
+        "validate_layout_plan": validate_layout_plan,
+        "translate_chunks": translate_chunks,
+        "render_preview": render_preview,
+        "evaluate_render": evaluate_render,
+        "repair_layout_plan": repair_layout_plan,
+        "export_pdf": export_pdf,
+        "complete": complete,
+        "fail": fail,
     }
 
 

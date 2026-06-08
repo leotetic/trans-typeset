@@ -4,6 +4,7 @@ from pdf_translator_schema import LayoutMode, RenderDefaults, TypesettingStandar
 
 from .config import settings
 from .models import RuntimeConfig
+from .provider_config import ProviderConfigError, normalize_openai_base_url
 from .storage import Storage
 
 
@@ -48,12 +49,15 @@ def effective_runtime_config(storage: Storage) -> dict:
         persisted.get("render_defaults"),
         default_target_lang,
     )
-    provider_config = {
-        "openai_base_url": str(
-            persisted.get("openai_base_url", settings.openai_base_url)
+    try:
+        openai_base_url = normalize_openai_base_url(
+            str(persisted.get("openai_base_url", settings.openai_base_url))
         )
-        .strip()
-        .rstrip("/"),
+    except ProviderConfigError:
+        openai_base_url = settings.openai_base_url
+
+    provider_config = {
+        "openai_base_url": openai_base_url,
         "openai_api_key": str(
             persisted.get("openai_api_key", settings.openai_api_key)
         ).strip(),

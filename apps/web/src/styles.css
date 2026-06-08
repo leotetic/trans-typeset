@@ -470,6 +470,21 @@ textarea:focus-visible {
   font-size: 13px;
 }
 
+.config-editor .field-note {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.config-editor .field-note.error {
+  color: #9a3412;
+}
+
+.config-editor .field-note.warning {
+  color: #7c5f11;
+}
+
 .config-numbers {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sqlite3
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from pdf_translator_schema import InputKind, UserIntent, WorkflowRun
 
@@ -36,7 +36,6 @@ async def run_typesetting_graph(
     input_text: str = "",
     mime_type: str | None = None,
 ) -> TypesettingGraphState:
-    graph = build_typesetting_graph(context)
     initial_state = make_initial_graph_state(
         job_id=job_id,
         doc_id=doc_id,
@@ -54,10 +53,12 @@ async def run_typesetting_graph(
     )
     initial_state["workflow"] = workflow.model_dump(mode="json")
     try:
-        return await graph.ainvoke(
-            initial_state,
-            config={"configurable": {"thread_id": job_id}},
-        )
+        async with _async_checkpoint_saver(context) as checkpointer:
+            graph = build_typesetting_graph(context, checkpointer=checkpointer)
+            return await graph.ainvoke(
+                initial_state,
+                config={"configurable": {"thread_id": job_id}},
+            )
     except Exception as exc:
         saved_workflow = context.load_saved_workflow(doc_id, workflow)
         status_chunks = []
@@ -89,7 +90,11 @@ async def run_typesetting_graph(
         return {**initial_state, "error": str(exc)}
 
 
-def build_typesetting_graph(context: TypesettingGraphContext) -> Any:
+def build_typesetting_graph(
+    context: TypesettingGraphContext,
+    *,
+    checkpointer: Any | None = None,
+) -> Any:
     try:
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.graph import END, START, StateGraph
@@ -134,22 +139,31 @@ def build_typesetting_graph(context: TypesettingGraphContext) -> Any:
     graph.add_edge("export_pdf", "complete")
     graph.add_edge("complete", END)
     graph.add_edge("fail", END)
-    return graph.compile(checkpointer=_checkpoint_saver(context, MemorySaver))
+    return graph.compile(checkpointer=checkpointer or MemorySaver())
 
 
-def _checkpoint_saver(context: TypesettingGraphContext, memory_saver_cls: Any) -> Any:
+@asynccontextmanager
+async def _async_checkpoint_saver(
+    context: TypesettingGraphContext,
+) -> AsyncIterator[Any | None]:
     try:
-        from langgraph.checkpoint.sqlite import SqliteSaver
+        from langgraph.checkpoint.memory import MemorySaver
     except Exception:
-        return memory_saver_cls()
+        yield None
+        return
+
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except Exception:
+        yield MemorySaver()
+        return
 
     checkpoint_dir = context.storage.root / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(
-        checkpoint_dir / "langgraph.sqlite",
-        check_same_thread=False,
-    )
-    return SqliteSaver(connection)
+    async with AsyncSqliteSaver.from_conn_string(
+        str(checkpoint_dir / "langgraph.sqlite")
+    ) as saver:
+        yield saver
 
 
 class _FallbackTypesettingGraph:
