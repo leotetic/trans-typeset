@@ -83,7 +83,6 @@ export interface StyleSeed {
   color?: string;
 }
 
-<<<<<<< HEAD
 export interface TextSpanIR {
   span_id: string;
   page_id: string;
@@ -105,7 +104,8 @@ export interface TextLineIR {
   text?: string;
   bbox: BoundingBox;
   span_ids?: string[];
-=======
+}
+
 export interface Formula {
   formula_id: string;
   placeholder: string;
@@ -116,7 +116,6 @@ export interface Formula {
   confidence?: number | null;
   asset_id?: string | null;
   quality_flags?: string[];
->>>>>>> codex/freatrue_formula
 }
 
 export interface DocumentBlock {
