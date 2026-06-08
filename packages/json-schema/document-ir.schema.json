@@ -147,6 +147,18 @@
           "title": "Source Text",
           "type": "string"
         },
+        "text_for_translation": {
+          "default": "",
+          "title": "Text For Translation",
+          "type": "string"
+        },
+        "formulas": {
+          "items": {
+            "$ref": "#/$defs/Formula"
+          },
+          "title": "Formulas",
+          "type": "array"
+        },
         "span_refs": {
           "items": {
             "type": "string"
@@ -198,6 +210,90 @@
         "size"
       ],
       "title": "DocumentPage",
+      "type": "object"
+    },
+    "Formula": {
+      "additionalProperties": false,
+      "properties": {
+        "formula_id": {
+          "minLength": 1,
+          "title": "Formula Id",
+          "type": "string"
+        },
+        "placeholder": {
+          "pattern": "^@@FORMULA_[A-Za-z0-9_]+@@$",
+          "title": "Placeholder",
+          "type": "string"
+        },
+        "kind": {
+          "default": "inline",
+          "enum": [
+            "inline",
+            "display"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_text": {
+          "default": "",
+          "title": "Source Text",
+          "type": "string"
+        },
+        "latex": {
+          "default": "",
+          "title": "Latex",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "formula_id",
+        "placeholder"
+      ],
+      "title": "Formula",
       "type": "object"
     },
     "PageSize": {

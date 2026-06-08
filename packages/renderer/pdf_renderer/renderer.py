@@ -46,7 +46,17 @@ def _env() -> Environment:
     )
     env.filters["css_class"] = _css_class
     env.filters["css_font_stack"] = _css_font_stack
+    env.globals["katex_css"] = _load_katex_asset("katex.min.css")
+    env.globals["katex_js"] = _load_katex_asset("katex.min.js")
     return env
+
+
+def _load_katex_asset(filename: str) -> str:
+    for root in [Path.cwd(), *Path(__file__).resolve().parents]:
+        candidate = root / "node_modules" / "katex" / "dist" / filename
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    return ""
 
 
 def render_to_html(document: RenderDocument) -> str:

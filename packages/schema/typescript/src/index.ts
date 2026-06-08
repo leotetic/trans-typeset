@@ -71,6 +71,18 @@ export interface StyleSeed {
   color?: string;
 }
 
+export interface Formula {
+  formula_id: string;
+  placeholder: string;
+  kind?: "inline" | "display";
+  source_text?: string;
+  latex?: string;
+  bbox?: BoundingBox | null;
+  confidence?: number | null;
+  asset_id?: string | null;
+  quality_flags?: string[];
+}
+
 export interface DocumentBlock {
   block_id: string;
   page_id: string;
@@ -79,6 +91,8 @@ export interface DocumentBlock {
   column?: number;
   reading_order: number;
   source_text?: string;
+  text_for_translation?: string;
+  formulas?: Formula[];
   span_refs?: string[];
   style_seed?: StyleSeed;
 }
@@ -333,6 +347,7 @@ export interface SourceBlock {
   source_text: string;
   nearby_titles?: string[];
   preserve_tokens?: string[];
+  requires_translation?: boolean;
 }
 
 export interface TranslationChunk {

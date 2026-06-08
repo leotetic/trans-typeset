@@ -79,6 +79,29 @@ def test_deterministic_translator_covers_every_block_and_tokens() -> None:
     assert tokens == {"[1]", "y = f(x)"}
 
 
+def test_deterministic_translator_preserves_formula_only_blocks_without_prefix() -> None:
+    placeholder = "@@FORMULA_Fdisplay@@"
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="formula",
+                role=BlockRole.FORMULA,
+                source_text=placeholder,
+                preserve_tokens=[placeholder],
+                requires_translation=False,
+            )
+        ],
+    )
+
+    plan = asyncio.run(DeterministicTranslator().translate(chunk))
+
+    assert plan.blocks[0].translated_text == placeholder
+    assert plan.blocks[0].inline_items[0].kind == "formula"
+    assert "formula_preserved_without_translation" in plan.blocks[0].quality_flags
+
+
 def test_build_translator_without_api_key_uses_deterministic() -> None:
     assert isinstance(
         build_translator("https://example.test/v1", "", "model"),

@@ -165,6 +165,7 @@ async def _read_input(
                 raise
             assets = []
             parser_diagnostics = context.build_parser_diagnostics(document)
+            formula_diagnostics = context.build_formula_diagnostics(document)
             normalized = helpers["normalized_input_payload"](
                 input_sources=[input_source, layout_input_source],
                 document=document,
@@ -182,7 +183,12 @@ async def _read_input(
                     "filename": state.get("layout_source_filename") or filename,
                     "artifact_path": str(layout_source_path),
                 }
-            output_artifacts = ["normalized-input", "document-ir", "parser-diagnostics"]
+            output_artifacts = [
+                "normalized-input",
+                "document-ir",
+                "parser-diagnostics",
+                "formula-diagnostics",
+            ]
         elif input_kind == InputKind.TEXT:
             text = state.get("input_text", "")
             input_source = helpers["build_input_source"](
@@ -202,12 +208,18 @@ async def _read_input(
                 "page_count": len(document.pages),
                 "quality_flags": [],
             }
+            formula_diagnostics = context.build_formula_diagnostics(document)
             normalized = helpers["normalized_input_payload"](
                 input_sources=[input_source],
                 document=document,
                 input_text=text,
             )
-            output_artifacts = ["normalized-input", "document-ir", "parser-diagnostics"]
+            output_artifacts = [
+                "normalized-input",
+                "document-ir",
+                "parser-diagnostics",
+                "formula-diagnostics",
+            ]
         else:
             source_path = Path(state["source_path"])
             input_source = helpers["build_input_source"](
@@ -238,6 +250,7 @@ async def _read_input(
                 "asset_count": len(assets),
                 "quality_flags": ["deterministic_ocr_mock", "ocr_uncertain"],
             }
+            formula_diagnostics = context.build_formula_diagnostics(document)
             normalized = helpers["normalized_input_payload"](
                 input_sources=[input_source],
                 document=document,
@@ -248,10 +261,12 @@ async def _read_input(
                 "document-ir",
                 "asset-ir",
                 "parser-diagnostics",
+                "formula-diagnostics",
             ]
 
         context.storage.save_document_ir(document)
         context.storage.write_json(doc_id, "parser-diagnostics.json", parser_diagnostics)
+        context.storage.write_json(doc_id, "formula-diagnostics.json", formula_diagnostics)
         context.storage.write_json(doc_id, "normalized-input.json", normalized)
         workflow = helpers["append_workflow_step"](
             workflow,

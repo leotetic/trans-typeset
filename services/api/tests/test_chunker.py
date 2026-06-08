@@ -1,6 +1,6 @@
 from app.pipeline.chunker import build_chunks, extract_preserve_tokens
 from pdf_translator_schema import BlockRole, BoundingBox, DocumentIR, DocumentPage, PageSize
-from pdf_translator_schema.models import DocumentBlock, RenderDefaults
+from pdf_translator_schema.models import DocumentBlock, Formula, RenderDefaults
 
 
 def make_block(
@@ -127,3 +127,62 @@ def test_build_chunks_uses_configured_render_defaults_with_target_language() -> 
     assert chunks[0].render_defaults.target_lang == "zh-CN"
     assert chunks[0].render_defaults.font_stack == ["Custom Font", "serif"]
     assert chunks[0].render_defaults.line_height == 1.6
+
+
+def test_build_chunks_uses_formula_placeholders_not_source_formula_text() -> None:
+    placeholder = "@@FORMULA_Fabc123@@"
+    block = make_block(
+        "p1_b1",
+        "We solve @fs=@t + ∇·(fs v)=0.",
+        role=BlockRole.PARAGRAPH,
+    ).model_copy(
+        update={
+            "text_for_translation": f"We solve {placeholder}.",
+            "formulas": [
+                Formula(
+                    formula_id="Fabc123",
+                    placeholder=placeholder,
+                    kind="inline",
+                    source_text="@fs=@t + ∇·(fs v)=0",
+                    latex=r"\partial fs = \partial t + \nabla \cdot (fs v)=0",
+                )
+            ],
+        },
+        deep=True,
+    )
+
+    chunks = build_chunks(make_document([block]), target_lang="zh-CN")
+    source = chunks[0].source_blocks[0]
+
+    assert source.source_text == f"We solve {placeholder}."
+    assert "@fs" not in source.source_text
+    assert placeholder in source.preserve_tokens
+    assert source.requires_translation is True
+
+
+def test_build_chunks_marks_formula_only_blocks_as_not_translatable() -> None:
+    placeholder = "@@FORMULA_Fdisplay@@"
+    block = make_block(
+        "p1_formula",
+        "@fs=@t",
+        role=BlockRole.FORMULA,
+    ).model_copy(
+        update={
+            "text_for_translation": placeholder,
+            "formulas": [
+                Formula(
+                    formula_id="Fdisplay",
+                    placeholder=placeholder,
+                    kind="display",
+                    source_text="@fs=@t",
+                    latex=r"\partial fs = \partial t",
+                )
+            ],
+        },
+        deep=True,
+    )
+
+    chunks = build_chunks(make_document([block]), target_lang="zh-CN")
+
+    assert chunks[0].source_blocks[0].source_text == placeholder
+    assert chunks[0].source_blocks[0].requires_translation is False

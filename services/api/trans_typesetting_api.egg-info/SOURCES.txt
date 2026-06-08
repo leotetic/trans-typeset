@@ -4,9 +4,11 @@ app/config.py
 app/jobs.py
 app/main.py
 app/models.py
+app/provider_config.py
 app/runtime_config.py
 app/storage.py
 app/pipeline/chunker.py
+app/pipeline/formula_processing.py
 app/pipeline/orchestrator.py
 app/pipeline/parser.py
 app/pipeline/resume.py
@@ -18,6 +20,7 @@ app/pipeline/agents/llm.py
 app/pipeline/agents/nodes.py
 app/pipeline/agents/state.py
 app/routes/documents.py
+tests/test_agent_loop.py
 tests/test_api.py
 tests/test_chunker.py
 tests/test_jobs.py

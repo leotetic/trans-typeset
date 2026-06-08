@@ -19,6 +19,7 @@ from pdf_translator_schema.validation import LayoutPlanValidationError
 from pydantic import ValidationError
 
 from ..provider_config import ProviderConfigError, normalize_openai_base_url
+from .formula_processing import FORMULA_PLACEHOLDER_PATTERN
 
 
 class TranslationError(RuntimeError):
@@ -40,7 +41,9 @@ class Translator:
 
 
 def _inline_item_for_token(token: str) -> InlineItem:
-    if re.fullmatch(r"\[[0-9,\-\s;]+\]", token):
+    if FORMULA_PLACEHOLDER_PATTERN.fullmatch(token):
+        kind = "formula"
+    elif re.fullmatch(r"\[[0-9,\-\s;]+\]", token):
         kind = "reference_marker"
     elif re.search(r"\b\d{4}[a-z]?\b", token) or token.startswith(
         ("Fig", "Figure", "Table", "Sec", "Section")
@@ -61,7 +64,11 @@ class DeterministicTranslator(Translator):
         blocks: list[TranslationBlockPlan] = []
         for source in chunk.source_blocks:
             prefix = "【译】" if chunk.target_lang.startswith("zh") else f"[{chunk.target_lang}] "
-            translated = prefix + source.source_text
+            translated = (
+                source.source_text
+                if not source.requires_translation
+                else prefix + source.source_text
+            )
             inline_items = [_inline_item_for_token(token) for token in source.preserve_tokens]
             blocks.append(
                 TranslationBlockPlan(
@@ -72,7 +79,9 @@ class DeterministicTranslator(Translator):
                     render_intent="normal"
                     if source.role not in {BlockRole.FIGURE, BlockRole.TABLE}
                     else "preserve_asset",
-                    quality_flags=["mock_translation"],
+                    quality_flags=["formula_preserved_without_translation"]
+                    if not source.requires_translation
+                    else ["mock_translation"],
                 )
             )
         plan = TranslationLayoutPlan(
@@ -107,6 +116,47 @@ class OpenAICompatibleTranslator(Translator):
         self._diagnostics: list[dict[str, Any]] = []
 
     async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+        if not any(source.requires_translation for source in chunk.source_blocks):
+            return _preserve_only_plan(chunk)
+        if any(not source.requires_translation for source in chunk.source_blocks):
+            translatable_sources = [
+                source for source in chunk.source_blocks if source.requires_translation
+            ]
+            preserved_sources = [
+                source for source in chunk.source_blocks if not source.requires_translation
+            ]
+            translatable_chunk = chunk.model_copy(
+                update={"source_blocks": translatable_sources},
+                deep=True,
+            )
+            preserved_chunk = chunk.model_copy(
+                update={"source_blocks": preserved_sources},
+                deep=True,
+            )
+            translated_plan = await self._translate_with_retries(translatable_chunk)
+            preserved_plan = _preserve_only_plan(preserved_chunk)
+            blocks_by_id = {
+                block.source_block_id: block
+                for block in [*translated_plan.blocks, *preserved_plan.blocks]
+            }
+            return validate_layout_plan(
+                chunk,
+                TranslationLayoutPlan(
+                    chunk_id=chunk.chunk_id,
+                    target_lang=chunk.target_lang,
+                    blocks=[
+                        blocks_by_id[source.block_id]
+                        for source in chunk.source_blocks
+                        if source.block_id in blocks_by_id
+                    ],
+                ),
+            )
+
+        return await self._translate_with_retries(chunk)
+
+    async def _translate_with_retries(
+        self, chunk: TranslationChunk
+    ) -> TranslationLayoutPlan:
         last_error: TranslationError | None = None
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -215,7 +265,7 @@ class OpenAICompatibleTranslator(Translator):
         try:
             plan = TranslationLayoutPlan.model_validate(raw_payload)
             return validate_layout_plan(chunk, plan)
-        except (ValidationError, LayoutPlanValidationError) as exc:
+        except (ValidationError, LayoutPlanValidationError):
             repaired_payload = self._repair_payload(chunk, raw_payload, attempt)
 
         try:
@@ -283,7 +333,11 @@ class OpenAICompatibleTranslator(Translator):
             for token in source.preserve_tokens:
                 if token not in translated_text and token not in planned_tokens:
                     inline_items.append(_inline_item_for_token(token).model_dump())
-                    repaired_flags.append("preserve_token_repaired")
+                    repaired_flags.append(
+                        "formula_placeholder_repaired"
+                        if FORMULA_PLACEHOLDER_PATTERN.fullmatch(token)
+                        else "preserve_token_repaired"
+                    )
 
             if not raw_block:
                 repaired_flags.append("missing_block_repaired")
@@ -457,6 +511,10 @@ class OpenAICompatibleTranslator(Translator):
         return (
             "Translate the following academic paper chunk. Preserve citation, formula, "
             "reference marker, figure, and table tokens. Cover every input block exactly once. "
+            "Do not translate, delete, rewrite, or move formula placeholders matching "
+            "@@FORMULA_[A-Za-z0-9_]+@@; copy them exactly into translated_text or inline_items. "
+            "Blocks with requires_translation=false are formula-only blocks and must be "
+            "copied exactly. "
             "Use glossary entries consistently when they are provided in the chunk JSON. "
             "Use the chunk context for local continuity, but translate only the listed blocks. "
             "Return valid JSON object only.\n\n"
@@ -479,6 +537,29 @@ def build_translator(
         api_key=api_key,
         model=model,
         max_attempts=max_attempts,
+    )
+
+
+def _preserve_only_plan(chunk: TranslationChunk) -> TranslationLayoutPlan:
+    blocks = []
+    for source in chunk.source_blocks:
+        blocks.append(
+            TranslationBlockPlan(
+                source_block_id=source.block_id,
+                translated_text=source.source_text,
+                inline_items=[_inline_item_for_token(token) for token in source.preserve_tokens],
+                role=source.role,
+                render_intent="normal",
+                quality_flags=["formula_preserved_without_translation"],
+            )
+        )
+    return validate_layout_plan(
+        chunk,
+        TranslationLayoutPlan(
+            chunk_id=chunk.chunk_id,
+            target_lang=chunk.target_lang,
+            blocks=blocks,
+        ),
     )
 
 

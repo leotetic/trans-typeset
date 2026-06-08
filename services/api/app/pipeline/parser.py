@@ -15,6 +15,8 @@ from pdf_translator_schema import (
 )
 from pdf_translator_schema.models import DocumentBlock
 
+from .formula_processing import build_formula_diagnostics, normalize_document_formulas
+
 HEADER_FOOTER_BAND_RATIO = 0.08
 MIN_TEXT_BLOCKS_FOR_DIGITAL_PDF = 1
 
@@ -403,7 +405,7 @@ def parse_pdf(
                 "next_step": "Use a digitally born PDF or run OCR before uploading.",
             },
         )
-    return DocumentIR(doc_id=doc_id, pages=pages)
+    return normalize_document_formulas(DocumentIR(doc_id=doc_id, pages=pages))
 
 
 def build_parser_diagnostics(document: DocumentIR) -> dict:
@@ -420,7 +422,11 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
     if role_counts.get(BlockRole.TABLE.value, 0):
         fallback_flags.append("table_text_fallback")
     if role_counts.get(BlockRole.FORMULA.value, 0):
-        fallback_flags.append("formula_text_fallback")
+        formula_diagnostics = build_formula_diagnostics(document)
+        if formula_diagnostics["formula_count"]:
+            fallback_flags.append("formula_placeholder_normalized")
+        else:
+            fallback_flags.append("formula_text_fallback")
     if asset_counts.get("image", 0):
         fallback_flags.append("raster_image_assets_preserved")
     if asset_counts.get("figure", 0):
@@ -434,6 +440,7 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
         "asset_count": sum(len(page.assets) for page in document.pages),
         "role_counts": role_counts,
         "asset_counts": asset_counts,
+        "formula_diagnostics": build_formula_diagnostics(document),
         "fallback_flags": fallback_flags,
         "unsupported_features": [
             {

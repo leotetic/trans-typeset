@@ -48,6 +48,7 @@ JSON_ARTIFACTS = {
     "pdf-export-diagnostics": ("pdf-export-diagnostics.json", "pdf-export-diagnostics"),
     "translation-progress": ("translation-progress.json", "translation-progress"),
     "parser-diagnostics": ("parser-diagnostics.json", "parser-diagnostics"),
+    "formula-diagnostics": ("formula-diagnostics.json", "formula-diagnostics"),
 }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from html import escape
 from math import ceil
 from typing import Any
 
@@ -16,6 +17,7 @@ from pdf_translator_schema.models import (
     BlockRole,
     BoundingBox,
     DocumentBlock,
+    Formula,
     PageSize,
     RenderDefaults,
     RoleStyleDefaults,
@@ -28,6 +30,7 @@ _CONTINUATION_MARGIN_PT = 54.0
 _MIN_FINAL_FRAGMENT_CHARS = 12
 _MIN_FINAL_FRAGMENT_LINES = 2
 _LOW_UTILIZATION_THRESHOLD = 0.18
+_FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -216,6 +219,7 @@ class RenderBlock:
     role: BlockRole
     bbox: BoundingBox
     text: str
+    html: str
     style_seed: StyleSeed
     font_size_pt: float
     font_scale: float = 1.0
@@ -324,6 +328,8 @@ class RenderDocument:
         pages: list[dict[str, Any]] = []
         quality_flag_counts: dict[str, int] = {}
         block_count = 0
+        formula_rendered_count = 0
+        unresolved_formula_placeholders: list[dict[str, str]] = []
         page_utilization: list[dict[str, Any]] = []
         low_utilization_pages: list[str] = []
         single_fragment_pages: list[str] = []
@@ -334,6 +340,15 @@ class RenderDocument:
             for block in page.blocks:
                 block_count += 1
                 text_area += _bbox_area(block.bbox)
+                formula_rendered_count += block.html.count("data-formula-id=")
+                for placeholder in _FORMULA_PLACEHOLDER_PATTERN.findall(block.html):
+                    unresolved_formula_placeholders.append(
+                        {
+                            "page_id": page.page_id,
+                            "block_id": block.block_id,
+                            "placeholder": placeholder,
+                        }
+                    )
                 for flag in block.quality_flags:
                     quality_flag_counts[flag] = quality_flag_counts.get(flag, 0) + 1
                 if block.quality_flags:
@@ -398,6 +413,8 @@ class RenderDocument:
             "block_count": block_count,
             "quality_flag_counts": quality_flag_counts,
             "layout_issues": self.layout_issues(),
+            "formula_rendered_count": formula_rendered_count,
+            "unresolved_formula_placeholders": unresolved_formula_placeholders,
             "page_utilization": page_utilization,
             "low_utilization_pages": low_utilization_pages,
             "single_fragment_pages": single_fragment_pages,
@@ -470,7 +487,6 @@ class RenderDocument:
                         quality_flags.append("role_mismatch")
                 if layout_intent is not None:
                     quality_flags.extend(layout_intent.quality_flags)
-
                 font_scale = 1.0
                 if render_intent == "compact":
                     font_scale = compact_font_scale
@@ -526,12 +542,16 @@ class RenderDocument:
                         else:
                             quality_flags.append("overflow_clipped")
 
+                html, formula_flags = _formula_html_for_text(text, block.formulas)
+                quality_flags.extend(formula_flags)
+
                 render_blocks.append(
                     RenderBlock(
                         block_id=block.block_id,
                         role=block.role,
                         bbox=render_bbox,
                         text=text,
+                        html=html,
                         style_seed=block.style_seed,
                         font_size_pt=font_size_pt,
                         font_scale=font_scale,
@@ -755,6 +775,8 @@ def _from_ir_and_plans_continuous_reflow(
             flags.append("compact_reflow")
         if layout_intent is not None:
             flags.extend(layout_intent.quality_flags)
+        html, formula_flags = _formula_html_for_text(text, block.formulas)
+        flags.extend(formula_flags)
 
         if block.role == BlockRole.REFERENCE and current_blocks:
             finish_page()
@@ -812,6 +834,7 @@ def _from_ir_and_plans_continuous_reflow(
                     role=block.role,
                     bbox=bbox,
                     text=fragment,
+                    html=_formula_html_for_text(fragment, block.formulas)[0],
                     style_seed=block.style_seed,
                     font_size_pt=style.font_size_pt,
                     font_scale=style.font_size_pt / block.style_seed.font_size
@@ -894,6 +917,48 @@ def _translated_text_for_block(
         if plan.role != block.role:
             quality_flags.append("role_mismatch")
     return text, render_intent, quality_flags
+
+
+def _formula_html_for_text(text: str, formulas: list[Formula]) -> tuple[str, list[str]]:
+    if not formulas:
+        return escape(text), (
+            ["unresolved_formula_placeholder"]
+            if _FORMULA_PLACEHOLDER_PATTERN.search(text)
+            else []
+        )
+    formulas_by_placeholder = {formula.placeholder: formula for formula in formulas}
+    flags: list[str] = []
+    parts: list[str] = []
+    cursor = 0
+    for match in _FORMULA_PLACEHOLDER_PATTERN.finditer(text):
+        parts.append(escape(text[cursor : match.start()]))
+        placeholder = match.group(0)
+        formula = formulas_by_placeholder.get(placeholder)
+        if formula is None:
+            parts.append(escape(placeholder))
+            flags.append("unresolved_formula_placeholder")
+        else:
+            parts.append(_formula_span(formula))
+            flags.append("formula_placeholder_resolved")
+            if not formula.latex.strip():
+                flags.append("formula_render_fallback")
+        cursor = match.end()
+    parts.append(escape(text[cursor:]))
+    return "".join(parts), _unique_flags(flags)
+
+
+def _formula_span(formula: Formula) -> str:
+    display = "true" if formula.kind == "display" else "false"
+    css_kind = "display" if formula.kind == "display" else "inline"
+    latex = formula.latex.strip() or formula.source_text
+    fallback = formula.source_text or formula.placeholder
+    return (
+        f'<span class="formula formula-{css_kind}" '
+        f'data-formula-id="{escape(formula.formula_id, quote=True)}" '
+        f'data-display="{display}" '
+        f'data-latex="{escape(latex, quote=True)}">'
+        f'{escape(fallback)}</span>'
+    )
 
 
 def _style_for_role(defaults: RenderDefaults, role: BlockRole) -> RoleStyleDefaults:
@@ -1208,6 +1273,7 @@ def _make_continuation_blocks(
                 role=source_block.role,
                 bbox=bbox,
                 text=visible_text,
+                html=_formula_html_for_text(visible_text, source_block.formulas)[0],
                 style_seed=source_block.style_seed,
                 font_size_pt=font_size_pt,
                 font_scale=font_scale,

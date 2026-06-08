@@ -20,7 +20,7 @@ from pdf_translator_schema import (
     TranslationBlockPlan,
     TranslationLayoutPlan,
 )
-from pdf_translator_schema.models import DocumentBlock, RenderDefaults, StyleSeed
+from pdf_translator_schema.models import DocumentBlock, Formula, RenderDefaults, StyleSeed
 
 RENDERER_ROOT = Path(__file__).resolve().parents[1]
 
@@ -283,6 +283,50 @@ def test_structured_roles_have_dedicated_rendering_rules() -> None:
     assert ".role-formula" in html
     assert "Cambria Math" in html
     assert ".role-footnote" in html
+
+
+def test_formula_placeholders_are_rendered_as_formula_nodes() -> None:
+    placeholder = "@@FORMULA_Fabc123@@"
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="We solve @fs=@t.",
+    ).model_copy(
+        update={
+            "text_for_translation": f"We solve {placeholder}.",
+            "formulas": [
+                Formula(
+                    formula_id="Fabc123",
+                    placeholder=placeholder,
+                    kind="inline",
+                    source_text="@fs=@t",
+                    latex=r"\partial fs = \partial t",
+                )
+            ],
+        },
+        deep=True,
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_b1",
+            translated_text=f"我们求解 {placeholder}。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(_document([block]), [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "@@FORMULA_" not in html
+    assert 'class="formula formula-inline"' in html
+    assert 'data-formula-id="Fabc123"' in html
+    assert r"\partial fs = \partial t" in html
+    assert "window.katex" in html
+    assert "katex.render" in html
+    assert diagnostics["formula_rendered_count"] == 1
+    assert diagnostics["unresolved_formula_placeholders"] == []
 
 
 def test_original_bbox_is_a_hard_constraint() -> None:
