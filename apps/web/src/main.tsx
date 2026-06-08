@@ -18,12 +18,14 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import type { JobStatus } from "@trans-typesetting/schema";
+import type { JobStatus, OutputKind, StyleIntent } from "@trans-typesetting/schema";
 import {
   ApiError,
   cancelJob,
   createDocument,
   createDocumentsBatch,
+  createImageWorkflow,
+  createTextWorkflow,
   getDocumentArtifact,
   getHealth,
   getJob,
@@ -46,6 +48,7 @@ type UploadIssue = {
 type HealthState = "checking" | "online" | "offline";
 type PreviewState = "idle" | "loading" | "ready" | "error";
 type InspectorState = "idle" | "loading" | "ready" | "error";
+type InputMode = "text" | "image" | "pdf";
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
@@ -58,6 +61,27 @@ const languageOptions = [
 ];
 
 const languageLabels = new Map(languageOptions.map((option) => [option.value, option.label]));
+
+const inputModes: Array<{ label: string; value: InputMode }> = [
+  { label: "Text", value: "text" },
+  { label: "Image", value: "image" },
+  { label: "PDF", value: "pdf" }
+];
+
+const outputKindOptions: Array<{ label: string; value: OutputKind }> = [
+  { label: "翻译排版", value: "translation" },
+  { label: "文档排版", value: "typeset_document" },
+  { label: "参考版式", value: "layout_reference" },
+  { label: "摘要版式", value: "summary_layout" }
+];
+
+const styleIntentOptions: Array<{ label: string; value: StyleIntent }> = [
+  { label: "Academic", value: "academic" },
+  { label: "Report", value: "report" },
+  { label: "Handout", value: "handout" },
+  { label: "Slide", value: "slide_like" },
+  { label: "Plain", value: "plain" }
+];
 
 const statuses: JobStatus["status"][] = [
   "queued",
@@ -88,8 +112,13 @@ const statusDetail: Record<JobStatus["status"], string> = {
 };
 
 function App() {
+  const [inputMode, setInputMode] = useState<InputMode>("text");
   const [files, setFiles] = useState<File[]>([]);
+  const [textInput, setTextInput] = useState("Title\n\nAbstract This paper studies local smart typesetting [1].");
   const [targetLang, setTargetLang] = useState("zh-CN");
+  const [outputKind, setOutputKind] = useState<OutputKind>("typeset_document");
+  const [styleIntent, setStyleIntent] = useState<StyleIntent>("academic");
+  const [instruction, setInstruction] = useState("按照gb-GB/T 7713.1 进行排版");
   const [job, setJob] = useState<JobStatus | null>(null);
   const [docId, setDocId] = useState<string | null>(null);
   const [healthState, setHealthState] = useState<HealthState>("checking");
@@ -140,7 +169,9 @@ function App() {
   const isTaskRunning = job
     ? ["queued", "parsing", "translating", "rendering"].includes(job.status)
     : false;
-  const canSubmit = files.length > 0 && !isUploading && !isTaskRunning && healthState === "online";
+  const hasSubmitInput =
+    inputMode === "text" ? Boolean(textInput.trim()) : files.length > 0;
+  const canSubmit = hasSubmitInput && !isUploading && !isTaskRunning && healthState === "online";
   const isComplete = job?.status === "completed" && Boolean(previewUrl);
   const hasBackendFailure = healthState === "offline";
   const artifactsReady = isComplete && previewState === "ready" && !previewIssue;
@@ -223,7 +254,7 @@ function App() {
   }, [refreshConfig, refreshHistory]);
 
   useEffect(() => {
-    if (!job || job.status === "completed" || job.status === "failed") {
+    if (!job || ["completed", "failed", "canceled"].includes(job.status)) {
       return;
     }
 
@@ -246,10 +277,19 @@ function App() {
       } catch (reason) {
         if (!cancelled) {
           const message = apiMessage(reason, "无法读取任务状态。");
-          setTaskIssue(message);
           if (reason instanceof ApiError && ["network", "timeout"].includes(reason.kind)) {
-            setHealthState("offline");
-            setHealthIssue(message);
+            const backendReachable = await checkHealth();
+            if (!cancelled) {
+              if (backendReachable) {
+                setTaskIssue("任务仍在后台运行，状态同步暂时中断。");
+                setHealthState("online");
+                setHealthIssue(null);
+              } else {
+                setTaskIssue(message);
+              }
+            }
+          } else {
+            setTaskIssue(message);
           }
           pollDelayRef.current = Math.min(pollDelayRef.current * 1.7, 8000);
         }
@@ -269,7 +309,7 @@ function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [job, refreshJob]);
+  }, [checkHealth, job, refreshJob]);
 
   useEffect(() => {
     setPreviewState(isComplete && previewUrl ? "loading" : "idle");
@@ -359,10 +399,15 @@ function App() {
       return;
     }
 
-    const invalidFile = selectedFiles.find((nextFile) => !isPdfFile(nextFile));
+    const invalidFile = selectedFiles.find((nextFile) =>
+      inputMode === "image" ? !isImageFile(nextFile) : !isPdfFile(nextFile)
+    );
     if (invalidFile) {
       setFiles([]);
-      setUploadIssue({ kind: "error", message: "仅支持 PDF 文件，请重新选择。" });
+      setUploadIssue({
+        kind: "error",
+        message: inputMode === "image" ? "仅支持 PNG、JPEG 或 WebP 图片。" : "仅支持 PDF 文件，请重新选择。"
+      });
       resetFileInput();
       return;
     }
@@ -382,9 +427,11 @@ function App() {
     setUploadIssue({
       kind: "info",
       message:
-        selectedFiles.length === 1
-          ? "已选择 PDF，可以开始翻译。"
-          : `已选择 ${selectedFiles.length} 个 PDF，可以批量翻译。`
+        inputMode === "image"
+          ? "已选择图片，可以开始智能排版。"
+          : selectedFiles.length === 1
+            ? "已选择 PDF，可以开始翻译。"
+            : `已选择 ${selectedFiles.length} 个 PDF，可以批量翻译。`
     });
     setTaskIssue(null);
   }
@@ -483,12 +530,22 @@ function App() {
   }
 
   async function submit() {
-    if (!files.length) {
-      setUploadIssue({ kind: "error", message: "请选择一个英文 PDF 文件。" });
+    if (!hasSubmitInput) {
+      setUploadIssue({
+        kind: "error",
+        message: inputMode === "text" ? "请输入要排版的文本。" : "请选择输入文件。"
+      });
       return;
     }
 
-    if (files.some((selectedFile) => !isPdfFile(selectedFile) || selectedFile.size > maxUploadBytes)) {
+    if (
+      inputMode !== "text" &&
+      files.some((selectedFile) =>
+        inputMode === "image"
+          ? !isImageFile(selectedFile) || selectedFile.size > maxUploadBytes
+          : !isPdfFile(selectedFile) || selectedFile.size > maxUploadBytes
+      )
+    ) {
       handleFiles(files);
       return;
     }
@@ -503,12 +560,21 @@ function App() {
       if (!(await checkHealth())) {
         throw new Error("后端服务不可用，请先启动 API。");
       }
-      if (files.length === 1) {
-        const payload = await createDocument(files[0], targetLang);
+      const intent = { output_kind: outputKind, style_intent: styleIntent, instruction };
+      if (inputMode === "text") {
+        const payload = await createTextWorkflow(textInput, targetLang, intent);
+        setDocId(payload.doc_id);
+        await refreshJob(payload.job_id);
+      } else if (inputMode === "image") {
+        const payload = await createImageWorkflow(files[0], targetLang, intent);
+        setDocId(payload.doc_id);
+        await refreshJob(payload.job_id);
+      } else if (files.length === 1) {
+        const payload = await createDocument(files[0], targetLang, intent);
         setDocId(payload.doc_id);
         await refreshJob(payload.job_id);
       } else {
-        const payload = await createDocumentsBatch(files, targetLang);
+        const payload = await createDocumentsBatch(files, targetLang, intent);
         if (payload.jobs[0]) {
           setDocId(payload.jobs[0].doc_id);
           await refreshJob(payload.jobs[0].job_id);
@@ -524,64 +590,103 @@ function App() {
 
   return (
     <main className="shell">
-      <section className="workspace" aria-label="PDF translation workspace">
-        <aside className="control-panel" aria-label="PDF translation controls">
+      <section className="workspace" aria-label="Smart typesetting workspace">
+        <aside className="control-panel" aria-label="Smart typesetting controls">
           <header className="app-header">
             <div className="app-mark" aria-hidden="true">
               <FileText size={22} strokeWidth={2.1} />
             </div>
             <div className="app-title">
               <h1>Trans Typesetting</h1>
-              <p>英文 PDF 纯译文排版</p>
+              <p>本地智能翻译与排版工作台</p>
             </div>
           </header>
 
           <section className="tool-section" aria-labelledby="upload-heading">
             <SectionTitle id="upload-heading" icon={<Upload size={16} />} title="上传" />
-            <button
-              className={`upload-zone${files.length ? " has-file" : ""}${isDraggingFile ? " is-dragging" : ""}${uploadIssue?.kind === "error" ? " has-error" : ""}`}
-              type="button"
-              aria-describedby="upload-feedback"
-              onClick={() => inputRef.current?.click()}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-            >
-              <span className="upload-icon" aria-hidden="true">
-                <FileText size={28} />
-              </span>
-              <span className="upload-main">
-                {files.length ? (
-                  <>
-                    <span className="file-name">
-                      {files.length === 1 ? files[0].name : `${files.length} 个 PDF 文件`}
-                    </span>
-                    <span className="file-meta">
-                      {files.length === 1
-                        ? formatFileSize(files[0].size)
-                        : formatFileSize(files.reduce((total, selectedFile) => total + selectedFile.size, 0))}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="file-name">选择或拖入英文 PDF</span>
-                    <span className="file-meta">支持 .pdf 文件</span>
-                  </>
-                )}
-              </span>
-              <span className="upload-action">
-                {files.length ? "更换" : "浏览"}
-                <ChevronRight size={16} />
-              </span>
-            </button>
-            <input
-              ref={inputRef}
-              className="hidden-input"
-              type="file"
-              multiple
-              accept="application/pdf,.pdf"
-              onChange={(event) => handleFiles(event.target.files)}
-            />
+            <div className="segmented" role="tablist" aria-label="Input mode">
+              {inputModes.map((mode) => (
+                <button
+                  key={mode.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={inputMode === mode.value}
+                  className={inputMode === mode.value ? "active" : ""}
+                  onClick={() => {
+                    setInputMode(mode.value);
+                    setFiles([]);
+                    setUploadIssue(null);
+                    resetFileInput();
+                  }}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            {inputMode === "text" ? (
+              <textarea
+                className="text-input"
+                value={textInput}
+                onChange={(event) => {
+                  setTextInput(event.target.value);
+                  setUploadIssue(null);
+                }}
+                aria-label="Text input"
+              />
+            ) : (
+              <>
+                <button
+                  className={`upload-zone${files.length ? " has-file" : ""}${isDraggingFile ? " is-dragging" : ""}${uploadIssue?.kind === "error" ? " has-error" : ""}`}
+                  type="button"
+                  aria-describedby="upload-feedback"
+                  onClick={() => inputRef.current?.click()}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <span className="upload-icon" aria-hidden="true">
+                    <FileText size={28} />
+                  </span>
+                  <span className="upload-main">
+                    {files.length ? (
+                      <>
+                        <span className="file-name">
+                          {files.length === 1
+                            ? files[0].name
+                            : `${files.length} 个 ${inputMode === "image" ? "图片" : "PDF"} 文件`}
+                        </span>
+                        <span className="file-meta">
+                          {files.length === 1
+                            ? formatFileSize(files[0].size)
+                            : formatFileSize(files.reduce((total, selectedFile) => total + selectedFile.size, 0))}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="file-name">
+                          {inputMode === "image" ? "选择或拖入图片" : "选择或拖入英文 PDF"}
+                        </span>
+                        <span className="file-meta">
+                          {inputMode === "image" ? "支持 .png .jpg .webp" : "支持 .pdf 文件"}
+                        </span>
+                      </>
+                    )}
+                  </span>
+                  <span className="upload-action">
+                    {files.length ? "更换" : "浏览"}
+                    <ChevronRight size={16} />
+                  </span>
+                </button>
+                <input
+                  ref={inputRef}
+                  className="hidden-input"
+                  type="file"
+                  multiple={inputMode === "pdf"}
+                  accept={inputMode === "image" ? "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" : "application/pdf,.pdf"}
+                  onChange={(event) => handleFiles(event.target.files)}
+                />
+              </>
+            )}
             <div className="upload-footer" id="upload-feedback">
               <InlineNotice issue={uploadIssue} />
               {files.length ? (
@@ -607,6 +712,35 @@ function App() {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="field">
+              <span>输出类型</span>
+              <select value={outputKind} onChange={(event) => setOutputKind(event.target.value as OutputKind)}>
+                {outputKindOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>版式风格</span>
+              <select value={styleIntent} onChange={(event) => setStyleIntent(event.target.value as StyleIntent)}>
+                {styleIntentOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>排版说明</span>
+              <textarea
+                className="intent-input"
+                value={instruction}
+                onChange={(event) => setInstruction(event.target.value)}
+                aria-label="Typesetting instruction"
+              />
             </label>
             <RuntimeConfigCard
               config={runtimeConfig}
@@ -644,7 +778,7 @@ function App() {
             />
             <button className="primary" type="button" onClick={submit} disabled={!canSubmit}>
               {isUploading ? <Loader2 className="spin" size={18} /> : <Upload size={18} />}
-              <span>{isUploading ? "上传中" : job ? "重新翻译" : "开始翻译"}</span>
+              <span>{isUploading ? "提交中" : job ? "重新执行" : "开始排版"}</span>
             </button>
             <JobProgress
               job={job}
@@ -1258,6 +1392,17 @@ function isPdfFile(file: File) {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 }
 
+function isImageFile(file: File) {
+  const name = file.name.toLowerCase();
+  return (
+    ["image/png", "image/jpeg", "image/webp"].includes(file.type) ||
+    name.endsWith(".png") ||
+    name.endsWith(".jpg") ||
+    name.endsWith(".jpeg") ||
+    name.endsWith(".webp")
+  );
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) {
     return `${bytes} B`;
@@ -1345,6 +1490,18 @@ function previewMessage(reason: unknown) {
 
 function artifactLabel(name: string) {
   switch (name) {
+    case "normalized-input":
+      return "Input";
+    case "user-intent":
+      return "Intent";
+    case "workflow-run":
+      return "Workflow";
+    case "layout-intent-plan":
+      return "Layout";
+    case "validation-and-repair":
+      return "Repair";
+    case "asset-ir":
+      return "Assets";
     case "document-ir":
       return "IR";
     case "translation-chunks":
@@ -1353,6 +1510,8 @@ function artifactLabel(name: string) {
       return "Plans";
     case "renderer-diagnostics":
       return "Diagnostics";
+    case "render-evaluation":
+      return "Evaluation";
     case "translation-progress":
       return "Progress";
     case "parser-diagnostics":

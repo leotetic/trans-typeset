@@ -1,0 +1,400 @@
+{
+  "$defs": {
+    "InputKind": {
+      "enum": [
+        "text",
+        "image",
+        "pdf"
+      ],
+      "title": "InputKind",
+      "type": "string"
+    },
+    "InputSource": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "input_type": {
+          "$ref": "#/$defs/InputKind"
+        },
+        "filename": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Filename"
+        },
+        "mime_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mime Type"
+        },
+        "size_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "artifact_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Artifact Path"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "input_type"
+      ],
+      "title": "InputSource",
+      "type": "object"
+    },
+    "OutputKind": {
+      "enum": [
+        "translation",
+        "typeset_document",
+        "layout_reference",
+        "summary_layout"
+      ],
+      "title": "OutputKind",
+      "type": "string"
+    },
+    "StyleIntent": {
+      "enum": [
+        "academic",
+        "report",
+        "handout",
+        "slide_like",
+        "plain"
+      ],
+      "title": "StyleIntent",
+      "type": "string"
+    },
+    "UserConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "page_width_pt": {
+          "default": 612.0,
+          "exclusiveMinimum": 0,
+          "title": "Page Width Pt",
+          "type": "number"
+        },
+        "page_height_pt": {
+          "default": 792.0,
+          "exclusiveMinimum": 0,
+          "title": "Page Height Pt",
+          "type": "number"
+        },
+        "target_font_size_pt": {
+          "default": 11.0,
+          "exclusiveMinimum": 0,
+          "title": "Target Font Size Pt",
+          "type": "number"
+        },
+        "allow_continuation": {
+          "default": true,
+          "title": "Allow Continuation",
+          "type": "boolean"
+        },
+        "preserve_images": {
+          "default": true,
+          "title": "Preserve Images",
+          "type": "boolean"
+        }
+      },
+      "title": "UserConstraints",
+      "type": "object"
+    },
+    "UserIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "target_lang": {
+          "default": "zh-CN",
+          "title": "Target Lang",
+          "type": "string"
+        },
+        "output_kind": {
+          "$ref": "#/$defs/OutputKind",
+          "default": "translation"
+        },
+        "style_intent": {
+          "$ref": "#/$defs/StyleIntent",
+          "default": "academic"
+        },
+        "instruction": {
+          "default": "",
+          "title": "Instruction",
+          "type": "string"
+        },
+        "preserve_policy": {
+          "items": {
+            "enum": [
+              "citations",
+              "formulas",
+              "tables",
+              "figures",
+              "reference_markers"
+            ],
+            "type": "string"
+          },
+          "title": "Preserve Policy",
+          "type": "array"
+        },
+        "reference_assets": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reference Assets",
+          "type": "array"
+        },
+        "constraints": {
+          "$ref": "#/$defs/UserConstraints"
+        }
+      },
+      "title": "UserIntent",
+      "type": "object"
+    },
+    "WorkflowStatus": {
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "canceled"
+      ],
+      "title": "WorkflowStatus",
+      "type": "string"
+    },
+    "WorkflowStep": {
+      "additionalProperties": false,
+      "properties": {
+        "step_id": {
+          "minLength": 1,
+          "title": "Step Id",
+          "type": "string"
+        },
+        "name": {
+          "$ref": "#/$defs/WorkflowStepName"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkflowStepStatus"
+        },
+        "progress": {
+          "default": 0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Progress",
+          "type": "number"
+        },
+        "attempt": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "message": {
+          "default": "",
+          "title": "Message",
+          "type": "string"
+        },
+        "input_artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Input Artifacts",
+          "type": "array"
+        },
+        "output_artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Output Artifacts",
+          "type": "array"
+        },
+        "diagnostics": {
+          "additionalProperties": true,
+          "title": "Diagnostics",
+          "type": "object"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "step_id",
+        "name",
+        "status"
+      ],
+      "title": "WorkflowStep",
+      "type": "object"
+    },
+    "WorkflowStepName": {
+      "enum": [
+        "read_input",
+        "analyze_intent",
+        "build_plan",
+        "validate_plan",
+        "translate",
+        "render",
+        "evaluate_render",
+        "repair",
+        "complete",
+        "fail"
+      ],
+      "title": "WorkflowStepName",
+      "type": "string"
+    },
+    "WorkflowStepStatus": {
+      "enum": [
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "skipped",
+        "repaired"
+      ],
+      "title": "WorkflowStepStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "workflow_id": {
+      "minLength": 1,
+      "title": "Workflow Id",
+      "type": "string"
+    },
+    "job_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Job Id"
+    },
+    "doc_id": {
+      "minLength": 1,
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/WorkflowStatus",
+      "default": "queued"
+    },
+    "current_step": {
+      "$ref": "#/$defs/WorkflowStepName",
+      "default": "read_input"
+    },
+    "progress": {
+      "default": 0,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Progress",
+      "type": "number"
+    },
+    "input_sources": {
+      "items": {
+        "$ref": "#/$defs/InputSource"
+      },
+      "title": "Input Sources",
+      "type": "array"
+    },
+    "user_intent": {
+      "$ref": "#/$defs/UserIntent"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/WorkflowStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "artifacts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Artifacts",
+      "type": "object"
+    },
+    "diagnostics": {
+      "additionalProperties": true,
+      "title": "Diagnostics",
+      "type": "object"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error"
+    }
+  },
+  "required": [
+    "workflow_id",
+    "doc_id"
+  ],
+  "title": "WorkflowRun",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

@@ -1,0 +1,109 @@
+{
+  "$defs": {
+    "OutputKind": {
+      "enum": [
+        "translation",
+        "typeset_document",
+        "layout_reference",
+        "summary_layout"
+      ],
+      "title": "OutputKind",
+      "type": "string"
+    },
+    "StyleIntent": {
+      "enum": [
+        "academic",
+        "report",
+        "handout",
+        "slide_like",
+        "plain"
+      ],
+      "title": "StyleIntent",
+      "type": "string"
+    },
+    "UserConstraints": {
+      "additionalProperties": false,
+      "properties": {
+        "page_width_pt": {
+          "default": 612.0,
+          "exclusiveMinimum": 0,
+          "title": "Page Width Pt",
+          "type": "number"
+        },
+        "page_height_pt": {
+          "default": 792.0,
+          "exclusiveMinimum": 0,
+          "title": "Page Height Pt",
+          "type": "number"
+        },
+        "target_font_size_pt": {
+          "default": 11.0,
+          "exclusiveMinimum": 0,
+          "title": "Target Font Size Pt",
+          "type": "number"
+        },
+        "allow_continuation": {
+          "default": true,
+          "title": "Allow Continuation",
+          "type": "boolean"
+        },
+        "preserve_images": {
+          "default": true,
+          "title": "Preserve Images",
+          "type": "boolean"
+        }
+      },
+      "title": "UserConstraints",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "target_lang": {
+      "default": "zh-CN",
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "output_kind": {
+      "$ref": "#/$defs/OutputKind",
+      "default": "translation"
+    },
+    "style_intent": {
+      "$ref": "#/$defs/StyleIntent",
+      "default": "academic"
+    },
+    "instruction": {
+      "default": "",
+      "title": "Instruction",
+      "type": "string"
+    },
+    "preserve_policy": {
+      "items": {
+        "enum": [
+          "citations",
+          "formulas",
+          "tables",
+          "figures",
+          "reference_markers"
+        ],
+        "type": "string"
+      },
+      "title": "Preserve Policy",
+      "type": "array"
+    },
+    "reference_assets": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reference Assets",
+      "type": "array"
+    },
+    "constraints": {
+      "$ref": "#/$defs/UserConstraints"
+    }
+  },
+  "title": "UserIntent",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

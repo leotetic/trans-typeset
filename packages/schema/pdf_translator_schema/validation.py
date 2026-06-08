@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from .models import TranslationChunk, TranslationLayoutPlan
+from .models import DocumentIR, LayoutIntentPlan, TranslationChunk, TranslationLayoutPlan
 
 
 class LayoutPlanValidationError(ValueError):
+    pass
+
+
+class LayoutIntentPlanValidationError(ValueError):
     pass
 
 
@@ -64,3 +68,41 @@ def validate_layout_plan(
 
     return plan
 
+
+def validate_layout_intent_plan(
+    document: DocumentIR, plan: LayoutIntentPlan
+) -> LayoutIntentPlan:
+    if plan.doc_id != document.doc_id:
+        raise LayoutIntentPlanValidationError(
+            f"plan doc_id {plan.doc_id!r} does not match {document.doc_id!r}"
+        )
+
+    expected_ids = set(document.blocks_by_id())
+    returned_ids = {block.source_block_id for block in plan.blocks}
+
+    unknown_ids = returned_ids - expected_ids
+    if unknown_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan contains unknown source_block_id values: "
+            + ", ".join(sorted(unknown_ids))
+        )
+
+    missing_ids = expected_ids - returned_ids
+    if missing_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan is missing source_block_id values: "
+            + ", ".join(sorted(missing_ids))
+        )
+
+    expected_asset_ids = {
+        asset.asset_id for page in document.pages for asset in page.assets
+    }
+    returned_asset_ids = {asset.asset_id for asset in plan.assets}
+    unknown_asset_ids = returned_asset_ids - expected_asset_ids
+    if unknown_asset_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan contains unknown asset_id values: "
+            + ", ".join(sorted(unknown_asset_ids))
+        )
+
+    return plan

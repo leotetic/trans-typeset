@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -62,6 +62,197 @@ class BlockRole(StrEnum):
     FOOTNOTE = "footnote"
     REFERENCE = "reference"
     UNKNOWN = "unknown"
+
+
+class InputKind(StrEnum):
+    TEXT = "text"
+    IMAGE = "image"
+    PDF = "pdf"
+
+
+class OutputKind(StrEnum):
+    TRANSLATION = "translation"
+    TYPESET_DOCUMENT = "typeset_document"
+    LAYOUT_REFERENCE = "layout_reference"
+    SUMMARY_LAYOUT = "summary_layout"
+
+
+class StyleIntent(StrEnum):
+    ACADEMIC = "academic"
+    REPORT = "report"
+    HANDOUT = "handout"
+    SLIDE_LIKE = "slide_like"
+    PLAIN = "plain"
+
+
+class WorkflowStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELED = "canceled"
+
+
+class WorkflowStepStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    REPAIRED = "repaired"
+
+
+class WorkflowStepName(StrEnum):
+    READ_INPUT = "read_input"
+    ANALYZE_INTENT = "analyze_intent"
+    BUILD_PLAN = "build_plan"
+    VALIDATE_PLAN = "validate_plan"
+    TRANSLATE = "translate"
+    RENDER = "render"
+    EVALUATE_RENDER = "evaluate_render"
+    REPAIR = "repair"
+    COMPLETE = "complete"
+    FAIL = "fail"
+
+
+class InputSource(StrictBaseModel):
+    source_id: str = Field(min_length=1)
+    input_type: InputKind
+    filename: str | None = None
+    mime_type: str | None = None
+    size_bytes: int = Field(default=0, ge=0)
+    sha256: str | None = Field(default=None, min_length=64, max_length=64)
+    artifact_path: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class AssetIR(StrictBaseModel):
+    asset_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    kind: Literal["image", "pdf_asset", "reference", "ocr_text", "unknown"] = "unknown"
+    mime_type: str | None = None
+    path: str | None = None
+    ocr_text: str = ""
+    alt_text: str | None = None
+    source_block_ids: list[str] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class UserConstraints(StrictBaseModel):
+    page_width_pt: float = Field(default=612.0, gt=0)
+    page_height_pt: float = Field(default=792.0, gt=0)
+    target_font_size_pt: float = Field(default=11.0, gt=0)
+    allow_continuation: bool = True
+    preserve_images: bool = True
+
+
+class UserIntent(StrictBaseModel):
+    target_lang: str = "zh-CN"
+    output_kind: OutputKind = OutputKind.TRANSLATION
+    style_intent: StyleIntent = StyleIntent.ACADEMIC
+    instruction: str = ""
+    preserve_policy: list[
+        Literal["citations", "formulas", "tables", "figures", "reference_markers"]
+    ] = Field(
+        default_factory=lambda: [
+            "citations",
+            "formulas",
+            "tables",
+            "figures",
+            "reference_markers",
+        ]
+    )
+    reference_assets: list[str] = Field(default_factory=list)
+    constraints: UserConstraints = Field(default_factory=UserConstraints)
+
+
+class WorkflowStep(StrictBaseModel):
+    step_id: str = Field(min_length=1)
+    name: WorkflowStepName
+    status: WorkflowStepStatus
+    progress: float = Field(default=0, ge=0, le=1)
+    attempt: int = Field(default=1, ge=1)
+    message: str = ""
+    input_artifacts: list[str] = Field(default_factory=list)
+    output_artifacts: list[str] = Field(default_factory=list)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class WorkflowRun(StrictBaseModel):
+    workflow_id: str = Field(min_length=1)
+    job_id: str | None = None
+    doc_id: str = Field(min_length=1)
+    status: WorkflowStatus = WorkflowStatus.QUEUED
+    current_step: WorkflowStepName = WorkflowStepName.READ_INPUT
+    progress: float = Field(default=0, ge=0, le=1)
+    input_sources: list[InputSource] = Field(default_factory=list)
+    user_intent: UserIntent = Field(default_factory=UserIntent)
+    steps: list[WorkflowStep] = Field(default_factory=list)
+    artifacts: dict[str, str] = Field(default_factory=dict)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
+
+
+class LayoutIntentBlock(NoLayoutCoordinatesModel):
+    source_block_id: str = Field(min_length=1)
+    role: BlockRole
+    priority: int = Field(default=3, ge=1, le=5)
+    render_intent: Literal[
+        "normal",
+        "compact",
+        "emphasis",
+        "preserve_asset",
+        "callout",
+        "reference_layout",
+    ] = "normal"
+    asset_refs: list[str] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class LayoutIntentAsset(NoLayoutCoordinatesModel):
+    asset_id: str = Field(min_length=1)
+    usage: Literal["preserve", "inline_reference", "background_reference", "ignore"] = (
+        "preserve"
+    )
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class LayoutIntentPlan(NoLayoutCoordinatesModel):
+    schema_version: Literal["0.1"] = "0.1"
+    plan_id: str = Field(min_length=1)
+    doc_id: str = Field(min_length=1)
+    target_lang: str = "zh-CN"
+    output_kind: OutputKind = OutputKind.TRANSLATION
+    style_intent: StyleIntent = StyleIntent.ACADEMIC
+    blocks: list[LayoutIntentBlock] = Field(default_factory=list)
+    assets: list[LayoutIntentAsset] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)
+
+    @field_validator("blocks")
+    @classmethod
+    def validate_no_duplicate_source_blocks(
+        cls, blocks: list[LayoutIntentBlock]
+    ) -> list[LayoutIntentBlock]:
+        seen: set[str] = set()
+        for block in blocks:
+            if block.source_block_id in seen:
+                raise ValueError(f"duplicate source_block_id: {block.source_block_id}")
+            seen.add(block.source_block_id)
+        return blocks
+
+    @field_validator("assets")
+    @classmethod
+    def validate_no_duplicate_assets(
+        cls, assets: list[LayoutIntentAsset]
+    ) -> list[LayoutIntentAsset]:
+        seen: set[str] = set()
+        for asset in assets:
+            if asset.asset_id in seen:
+                raise ValueError(f"duplicate asset_id: {asset.asset_id}")
+            seen.add(asset.asset_id)
+        return assets
 
 
 class BoundingBox(StrictBaseModel):

@@ -1,0 +1,189 @@
+{
+  "$defs": {
+    "BlockRole": {
+      "enum": [
+        "title",
+        "abstract",
+        "heading",
+        "paragraph",
+        "caption",
+        "formula",
+        "table",
+        "figure",
+        "footnote",
+        "reference",
+        "unknown"
+      ],
+      "title": "BlockRole",
+      "type": "string"
+    },
+    "LayoutIntentAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "minLength": 1,
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "usage": {
+          "default": "preserve",
+          "enum": [
+            "preserve",
+            "inline_reference",
+            "background_reference",
+            "ignore"
+          ],
+          "title": "Usage",
+          "type": "string"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "title": "LayoutIntentAsset",
+      "type": "object"
+    },
+    "LayoutIntentBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "source_block_id": {
+          "minLength": 1,
+          "title": "Source Block Id",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/BlockRole"
+        },
+        "priority": {
+          "default": 3,
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "render_intent": {
+          "default": "normal",
+          "enum": [
+            "normal",
+            "compact",
+            "emphasis",
+            "preserve_asset",
+            "callout",
+            "reference_layout"
+          ],
+          "title": "Render Intent",
+          "type": "string"
+        },
+        "asset_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Asset Refs",
+          "type": "array"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_block_id",
+        "role"
+      ],
+      "title": "LayoutIntentBlock",
+      "type": "object"
+    },
+    "OutputKind": {
+      "enum": [
+        "translation",
+        "typeset_document",
+        "layout_reference",
+        "summary_layout"
+      ],
+      "title": "OutputKind",
+      "type": "string"
+    },
+    "StyleIntent": {
+      "enum": [
+        "academic",
+        "report",
+        "handout",
+        "slide_like",
+        "plain"
+      ],
+      "title": "StyleIntent",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "plan_id": {
+      "minLength": 1,
+      "title": "Plan Id",
+      "type": "string"
+    },
+    "doc_id": {
+      "minLength": 1,
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "target_lang": {
+      "default": "zh-CN",
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "output_kind": {
+      "$ref": "#/$defs/OutputKind",
+      "default": "translation"
+    },
+    "style_intent": {
+      "$ref": "#/$defs/StyleIntent",
+      "default": "academic"
+    },
+    "blocks": {
+      "items": {
+        "$ref": "#/$defs/LayoutIntentBlock"
+      },
+      "title": "Blocks",
+      "type": "array"
+    },
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/LayoutIntentAsset"
+      },
+      "title": "Assets",
+      "type": "array"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "plan_id",
+    "doc_id"
+  ],
+  "title": "LayoutIntentPlan",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

@@ -1,4 +1,4 @@
-import type { JobStatus, RenderDefaults } from "@trans-typesetting/schema";
+import type { JobStatus, OutputKind, RenderDefaults, StyleIntent } from "@trans-typesetting/schema";
 
 export interface CreateDocumentResponse {
   job_id: string;
@@ -34,6 +34,12 @@ export interface UpdateRuntimeConfig {
   translation_concurrency?: number;
   translator_max_attempts?: number;
   render_defaults?: RenderDefaults;
+}
+
+export interface WorkflowIntentInput {
+  output_kind: OutputKind;
+  style_intent: StyleIntent;
+  instruction: string;
 }
 
 export interface ArtifactSummary {
@@ -90,13 +96,54 @@ export async function getHealth(options: ApiRequestInit = {}) {
 export async function createDocument(
   file: File,
   targetLang: string,
+  intent?: WorkflowIntentInput,
   options: ApiRequestInit = {}
 ) {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("target_lang", targetLang);
+  appendIntentFields(formData, intent);
 
   return requestJson("/api/documents", parseCreateDocumentResponse, {
+    method: "POST",
+    body: formData,
+    timeoutMs: 60_000,
+    ...options
+  });
+}
+
+export async function createTextWorkflow(
+  text: string,
+  targetLang: string,
+  intent: WorkflowIntentInput,
+  options: ApiRequestInit = {}
+) {
+  const formData = new FormData();
+  formData.append("text", text);
+  formData.append("target_lang", targetLang);
+  formData.append("filename", "text-input.txt");
+  appendIntentFields(formData, intent);
+
+  return requestJson("/api/workflows/text", parseCreateDocumentResponse, {
+    method: "POST",
+    body: formData,
+    timeoutMs: 60_000,
+    ...options
+  });
+}
+
+export async function createImageWorkflow(
+  file: File,
+  targetLang: string,
+  intent: WorkflowIntentInput,
+  options: ApiRequestInit = {}
+) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("target_lang", targetLang);
+  appendIntentFields(formData, intent);
+
+  return requestJson("/api/workflows/image", parseCreateDocumentResponse, {
     method: "POST",
     body: formData,
     timeoutMs: 60_000,
@@ -107,6 +154,7 @@ export async function createDocument(
 export async function createDocumentsBatch(
   files: File[],
   targetLang: string,
+  intent?: WorkflowIntentInput,
   options: ApiRequestInit = {}
 ) {
   const formData = new FormData();
@@ -114,6 +162,7 @@ export async function createDocumentsBatch(
     formData.append("files", file);
   }
   formData.append("target_lang", targetLang);
+  appendIntentFields(formData, intent);
 
   return requestJson("/api/documents/batch", parseBatchCreateDocumentResponse, {
     method: "POST",
@@ -121,6 +170,15 @@ export async function createDocumentsBatch(
     timeoutMs: 90_000,
     ...options
   });
+}
+
+function appendIntentFields(formData: FormData, intent?: WorkflowIntentInput) {
+  if (!intent) {
+    return;
+  }
+  formData.append("output_kind", intent.output_kind);
+  formData.append("style_intent", intent.style_intent);
+  formData.append("instruction", intent.instruction);
 }
 
 export async function getJob(jobId: string, options: ApiRequestInit = {}) {

@@ -11,6 +11,8 @@ from pdf_translator_schema import (
     DocumentIR,
     DocumentPage,
     PageSize,
+    LayoutIntentBlock,
+    LayoutIntentPlan,
     TranslationBlockPlan,
     TranslationLayoutPlan,
 )
@@ -241,6 +243,47 @@ def test_compact_intent_scales_font_and_expands_box_before_continuation() -> Non
     assert render_block.font_size_pt < block.style_seed.font_size
     assert render_block.bbox.y1 > block.bbox.y1
     assert "quality-box-expanded" in html
+
+
+def test_layout_intent_plan_applies_semantic_intent_without_overriding_bbox() -> None:
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=132, y1=140),
+        font_size=12,
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_b1",
+            translated_text="这是一段很长很长很长很长很长很长很长的译文，必须留在原始块内。",
+            role=BlockRole.PARAGRAPH,
+            render_intent="normal",
+        )
+    )
+    layout_intent = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        blocks=[
+            LayoutIntentBlock(
+                source_block_id="p1_b1",
+                role=BlockRole.PARAGRAPH,
+                render_intent="compact",
+                quality_flags=["repair_compact_intent"],
+            )
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([block]),
+        [plan],
+        "zh-CN",
+        layout_intent_plan=layout_intent,
+    )
+    render_block = render_document.pages[0].blocks[0]
+
+    assert render_block.render_intent == "compact"
+    assert render_block.bbox.x0 == block.bbox.x0
+    assert "repair_compact_intent" in render_block.quality_flags
 
 
 def test_normal_intent_scales_font_when_overflow_risk_is_detected() -> None:

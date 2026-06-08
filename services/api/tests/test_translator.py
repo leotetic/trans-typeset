@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 from app.pipeline import translator as translator_module
@@ -40,6 +41,28 @@ def make_chunk() -> TranslationChunk:
     )
 
 
+def make_valid_payload(chunk: TranslationChunk) -> dict:
+    return {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "译文 [1]",
+                "inline_items": [],
+                "role": "paragraph",
+            },
+            {
+                "source_block_id": "b2",
+                "translated_text": "译文 y = f(x)",
+                "inline_items": [],
+                "role": "paragraph",
+            },
+        ],
+    }
+
+
 def test_deterministic_translator_covers_every_block_and_tokens() -> None:
     chunk = make_chunk()
     translator = DeterministicTranslator()
@@ -79,25 +102,7 @@ def test_openai_translator_trims_api_key_for_authorization_header(
 ) -> None:
     chunk = make_chunk()
     calls: list[dict] = []
-    valid_payload = {
-        "schema_version": "0.1",
-        "chunk_id": chunk.chunk_id,
-        "target_lang": chunk.target_lang,
-        "blocks": [
-            {
-                "source_block_id": "b1",
-                "translated_text": "译文 [1]",
-                "inline_items": [],
-                "role": "paragraph",
-            },
-            {
-                "source_block_id": "b2",
-                "translated_text": "译文 y = f(x)",
-                "inline_items": [],
-                "role": "paragraph",
-            },
-        ],
-    }
+    valid_payload = make_valid_payload(chunk)
 
     class FakeResponse:
         def raise_for_status(self) -> None:
@@ -125,7 +130,13 @@ def test_openai_translator_trims_api_key_for_authorization_header(
             return None
 
         async def post(self, *args, **kwargs) -> FakeResponse:
-            calls.append({"url": args[0], "headers": kwargs["headers"]})
+            calls.append(
+                {
+                    "url": args[0],
+                    "headers": kwargs["headers"],
+                    "payload": kwargs["json"],
+                }
+            )
             return FakeResponse()
 
     monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
@@ -143,8 +154,123 @@ def test_openai_translator_trims_api_key_for_authorization_header(
                 "Authorization": "Bearer secret-key",
                 "Content-Type": "application/json",
             },
+            "payload": {
+                "model": "model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You translate academic PDF text blocks. Return only JSON "
+                            "matching TranslationLayoutPlan schema_version 0.1. Do not "
+                            "include coordinates. Return exactly one JSON object and no "
+                            "markdown."
+                        ),
+                    },
+                    {"role": "user", "content": translator._build_prompt(chunk)},
+                ],
+                "temperature": 0.2,
+                "response_format": {"type": "json_object"},
+            },
         }
     ]
+
+
+def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = make_chunk()
+    calls: list[dict] = []
+    valid_payload = make_valid_payload(chunk)
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": valid_payload,
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> FakeResponse:
+            calls.append(kwargs["json"])
+            return FakeResponse()
+
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator(
+        "https://api.minimax.io/v1", "key", "MiniMax-M3"
+    )
+
+    plan = asyncio.run(translator.translate(chunk))
+
+    assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
+    assert calls == [
+        {
+            "model": "MiniMax-M3",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You translate academic PDF text blocks. Return only JSON matching "
+                        "TranslationLayoutPlan schema_version 0.1. Do not include coordinates. "
+                        "Return exactly one JSON object and no markdown."
+                    ),
+                },
+                {"role": "user", "content": translator._build_prompt(chunk)},
+            ],
+            "temperature": 0.2,
+            "reasoning_split": True,
+            "thinking": {"type": "disabled"},
+        }
+    ]
+
+
+def test_openai_translator_extracts_plan_from_wrapped_content() -> None:
+    chunk = make_chunk()
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+    valid_payload = make_valid_payload(chunk)
+
+    wrapped = (
+        '<think>{"schema_version":"0.1","chunk_id":"wrong","target_lang":"zh-CN",'
+        '"blocks":[]}</think>\n'
+        "Here is the plan:\n"
+        f"```json\n{json.dumps(valid_payload, ensure_ascii=False)}\n```"
+    )
+
+    plan = translator._validate_or_repair_content(chunk, wrapped, attempt=1)
+
+    assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
+    assert plan.chunk_id == chunk.chunk_id
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "prefix {\"note\":\"not the plan\"} suffix",
+        "no json object here",
+    ],
+)
+def test_openai_translator_rejects_content_without_layout_plan(content: str) -> None:
+    chunk = make_chunk()
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+
+    with pytest.raises(TranslationError, match="without a TranslationLayoutPlan JSON object"):
+        translator._validate_or_repair_content(chunk, content, attempt=1)
 
 
 def test_openai_translator_repairs_missing_blocks_tokens_and_coordinates(
@@ -215,25 +341,7 @@ def test_openai_translator_retries_chunk_after_unrepairable_response(
 ) -> None:
     chunk = make_chunk()
     calls: list[dict] = []
-    valid_payload = {
-        "schema_version": "0.1",
-        "chunk_id": chunk.chunk_id,
-        "target_lang": chunk.target_lang,
-        "blocks": [
-            {
-                "source_block_id": "b1",
-                "translated_text": "译文 [1]",
-                "inline_items": [],
-                "role": "paragraph",
-            },
-            {
-                "source_block_id": "b2",
-                "translated_text": "译文 y = f(x)",
-                "inline_items": [],
-                "role": "paragraph",
-            },
-        ],
-    }
+    valid_payload = make_valid_payload(chunk)
 
     async def no_sleep(_seconds: float) -> None:
         return None

@@ -2,7 +2,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from app.config import Settings
 from app.models import JobState
+from app import runtime_config
 from app.pipeline import orchestrator
 from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
@@ -252,3 +254,87 @@ def test_process_document_job_persists_scanned_pdf_diagnostics(
     assert "requires OCR" in (status.error or "")
     assert diagnostics["kind"] == "unsupported_scanned_pdf"
     assert diagnostics["recoverable"] is True
+
+
+def test_text_workflow_runs_to_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        assert "【译】" in html
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_text_document_job(
+            "job_1",
+            "doc_1",
+            "text-input.txt",
+            "Paper Title\n\nAbstract This is a text workflow [1].",
+            "zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    workflow = storage.read_output_json("doc_1", "workflow-run.json")
+    normalized = storage.read_output_json("doc_1", "normalized-input.json")
+    layout_plan = storage.read_output_json("doc_1", "layout-intent-plan.json")
+
+    assert status.status == JobState.COMPLETED
+    assert workflow["status"] == "completed"
+    assert normalized["input_sources"][0]["input_type"] == "text"
+    assert layout_plan["blocks"]
+    assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
+
+
+def test_image_workflow_uses_deterministic_ocr_mock_and_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+    image_path = tmp_path / "layout.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        assert "deterministic summary" in html
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_image_document_job(
+            "job_1",
+            "doc_1",
+            "layout.png",
+            image_path,
+            "zh-CN",
+            "image/png",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    asset_ir = storage.read_output_json("doc_1", "asset-ir.json")
+    diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
+    html = storage.preview_html_path("doc_1").read_text(encoding="utf-8")
+
+    assert status.status == JobState.COMPLETED
+    assert asset_ir[0]["quality_flags"] == ["deterministic_ocr_mock", "ocr_uncertain"]
+    assert diagnostics["kind"] == "image_adapter_diagnostics"
+    assert 'data-asset-id="doc_1_asset_0001"' in html

@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from pdf_translator_schema import (
@@ -123,9 +124,14 @@ class OpenAICompatibleTranslator(Translator):
                 },
                 {"role": "user", "content": prompt},
             ],
-            "response_format": {"type": "json_object"},
             "temperature": 0.2,
         }
+        if _is_minimax_provider(self.base_url, self.model):
+            payload["reasoning_split"] = True
+            if _is_minimax_m3_model(self.model):
+                payload["thinking"] = {"type": "disabled"}
+        else:
+            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -153,19 +159,10 @@ class OpenAICompatibleTranslator(Translator):
     def _validate_or_repair_content(
         self,
         chunk: TranslationChunk,
-        content: str,
+        content: object,
         attempt: int,
     ) -> TranslationLayoutPlan:
-        try:
-            raw_payload = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise TranslationError(
-                f"Translator returned non-JSON content for {chunk.chunk_id}: {exc}"
-            ) from exc
-        if not isinstance(raw_payload, dict):
-            raise TranslationError(
-                f"Translator returned JSON that is not an object for {chunk.chunk_id}"
-            )
+        raw_payload = self._extract_layout_plan_payload(chunk, content)
 
         try:
             plan = TranslationLayoutPlan.model_validate(raw_payload)
@@ -261,20 +258,59 @@ class OpenAICompatibleTranslator(Translator):
             "blocks": repaired_blocks,
         }
 
-    def _extract_message_content(self, payload: dict[str, Any], chunk_id: str) -> str:
+    def _extract_message_content(self, payload: dict[str, Any], chunk_id: str) -> object:
         try:
             content = payload["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise TranslationError(
                 f"Translator response for {chunk_id} did not contain choices[0].message.content"
             ) from exc
-        if isinstance(content, str):
+        if isinstance(content, (str, dict)):
             return content
-        if isinstance(content, dict):
-            return json.dumps(content, ensure_ascii=False)
         raise TranslationError(
             "Translator response for "
             f"{chunk_id} had non-string message content: {type(content).__name__}"
+        )
+
+    def _extract_layout_plan_payload(
+        self,
+        chunk: TranslationChunk,
+        content: object,
+    ) -> dict[str, Any]:
+        if isinstance(content, dict):
+            return content
+        if not isinstance(content, str):
+            raise TranslationError(
+                "Translator response for "
+                f"{chunk.chunk_id} had unsupported message content: {type(content).__name__}"
+            )
+
+        try:
+            raw_payload = json.loads(content)
+        except json.JSONDecodeError:
+            raw_payload = None
+        if isinstance(raw_payload, dict):
+            return raw_payload
+        if raw_payload is not None:
+            raise TranslationError(
+                f"Translator returned JSON that is not an object for {chunk.chunk_id}"
+            )
+
+        sanitized_content = _strip_thinking_blocks(content)
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(sanitized_content):
+            if character != "{":
+                continue
+            try:
+                candidate, _end = decoder.raw_decode(sanitized_content, index)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and _looks_like_layout_plan_payload(candidate):
+                return candidate
+
+        raise TranslationError(
+            f"Translator returned content without a TranslationLayoutPlan JSON object "
+            f"for {chunk.chunk_id}"
         )
 
     def _build_prompt(
@@ -328,6 +364,36 @@ def build_translator(
         api_key=api_key,
         model=model,
         max_attempts=max_attempts,
+    )
+
+
+def _is_minimax_provider(base_url: str, model: str) -> bool:
+    hostname = (urlparse(base_url).hostname or "").lower()
+    normalized_model = model.lower()
+    return (
+        hostname in {"api.minimax.io", "api.minimaxi.com"}
+        or hostname.endswith(".minimax.io")
+        or hostname.endswith(".minimaxi.com")
+        or "minimax-m" in normalized_model
+        or "minimax/m" in normalized_model
+    )
+
+
+def _is_minimax_m3_model(model: str) -> bool:
+    normalized = model.lower()
+    return "minimax-m3" in normalized or "minimax/m3" in normalized
+
+
+def _strip_thinking_blocks(content: str) -> str:
+    return re.sub(r"<think\b[^>]*>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _looks_like_layout_plan_payload(payload: dict[str, Any]) -> bool:
+    return (
+        payload.get("schema_version") == "0.1"
+        and isinstance(payload.get("chunk_id"), str)
+        and isinstance(payload.get("target_lang"), str)
+        and isinstance(payload.get("blocks"), list)
     )
 
 

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from math import ceil
 from typing import Any
 
-from pdf_translator_schema import DocumentIR, TranslationLayoutPlan
+from pdf_translator_schema import DocumentIR, LayoutIntentPlan, TranslationLayoutPlan
 from pdf_translator_schema.models import (
     Asset,
     BlockRole,
@@ -350,6 +350,7 @@ class RenderDocument:
         plans: list[TranslationLayoutPlan],
         target_lang: str,
         render_defaults: RenderDefaults | None = None,
+        layout_intent_plan: LayoutIntentPlan | None = None,
     ) -> RenderDocument:
         defaults = (
             render_defaults.model_copy(update={"target_lang": target_lang}, deep=True)
@@ -365,25 +366,40 @@ class RenderDocument:
             for plan in plans
             for block in plan.blocks
         }
+        layout_intents = {
+            block.source_block_id: block
+            for block in (layout_intent_plan.blocks if layout_intent_plan else [])
+        }
+        asset_usages = {
+            asset.asset_id: asset.usage
+            for asset in (layout_intent_plan.assets if layout_intent_plan else [])
+        }
         pages: list[RenderPage] = []
         for page in document.pages:
             render_blocks: list[RenderBlock] = []
             continuation_blocks: list[RenderBlock] = []
             for block in page.blocks:
                 plan = translations.get(block.block_id)
+                layout_intent = layout_intents.get(block.block_id)
                 quality_flags: list[str]
                 if plan is None:
                     text = block.source_text
-                    render_intent = "normal"
+                    render_intent = (
+                        layout_intent.render_intent if layout_intent is not None else "normal"
+                    )
                     quality_flags = ["missing_translation"]
                 else:
                     text = plan.translated_text if plan.translated_text.strip() else block.source_text
-                    render_intent = plan.render_intent
+                    render_intent = (
+                        layout_intent.render_intent if layout_intent is not None else plan.render_intent
+                    )
                     quality_flags = list(plan.quality_flags)
                     if not plan.translated_text.strip():
                         quality_flags.append("empty_translation")
                     if plan.role != block.role:
                         quality_flags.append("role_mismatch")
+                if layout_intent is not None:
+                    quality_flags.extend(layout_intent.quality_flags)
 
                 font_scale = 1.0
                 if render_intent == "compact":
@@ -458,7 +474,7 @@ class RenderDocument:
                     page_id=page.page_id,
                     size=page.size,
                     blocks=render_blocks,
-                    assets=_render_assets(page.assets),
+                    assets=_render_assets(page.assets, asset_usages),
                 )
             )
             for index, continuation_block in enumerate(continuation_blocks, start=1):
@@ -479,10 +495,18 @@ class RenderDocument:
         )
 
 
-def _render_assets(assets: list[Asset]) -> list[RenderAsset]:
+def _render_assets(
+    assets: list[Asset],
+    asset_usages: dict[str, str] | None = None,
+) -> list[RenderAsset]:
     render_assets: list[RenderAsset] = []
     for asset in assets:
+        usage = (asset_usages or {}).get(asset.asset_id, "preserve")
+        if usage == "ignore":
+            continue
         quality_flags: list[str] = []
+        if usage != "preserve":
+            quality_flags.append(f"asset_usage_{usage}")
         if not asset.path:
             quality_flags.append("asset_missing_path")
         render_assets.append(

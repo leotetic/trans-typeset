@@ -445,6 +445,62 @@ def test_pdf_upload_queues_job(tmp_path: Path, monkeypatch) -> None:
     assert status.error is None
 
 
+def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+
+    captured = {}
+
+    async def noop_process(*args, **kwargs) -> None:
+        captured["args"] = args
+
+    monkeypatch.setattr(documents_route, "process_text_document_job", noop_process)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/workflows/text",
+        data={
+            "text": "Title\n\nA paragraph.",
+            "target_lang": "zh-CN",
+            "output_kind": "typeset_document",
+            "style_intent": "academic",
+            "instruction": "按照gb-GB/T 7713.1 进行排版",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    status = storage.load_status(payload["job_id"])
+    assert status.status == "queued"
+    assert status.filename == "text-input.txt"
+    assert captured["args"][5].instruction == "按照gb-GB/T 7713.1 进行排版"
+
+
+def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+
+    async def noop_process(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(documents_route, "process_image_document_job", noop_process)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/workflows/image",
+        data={
+            "target_lang": "zh-CN",
+            "instruction": "按照gb-GB/T 7713.1 进行排版",
+        },
+        files={"file": ("layout.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert storage.load_status(payload["job_id"]).filename == "layout.png"
+    assert storage.find_upload(payload["doc_id"]) is not None
+
+
 def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
@@ -639,6 +695,8 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
 
     assert summary.status_code == 200
     artifacts = {item["name"]: item for item in summary.json()["artifacts"]}
+    assert artifacts["normalized-input"]["available"] is False
+    assert artifacts["workflow-run"]["available"] is False
     assert artifacts["document-ir"]["available"] is True
     assert artifacts["translation-chunks"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False

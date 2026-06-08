@@ -78,7 +78,7 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 
 前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不匹配、溢出等 quality flags。
 
-真实模型返回会先经过严格 schema 校验。可修复的 chunk 级问题，例如误带坐标字段、缺失 block 或遗漏 preserve token，会被后端修复为合法 `TranslationLayoutPlan` 并写入 `quality_flags`；不可解析或请求失败会按 chunk 重试后落到任务错误状态。`TRANSLATION_CONCURRENCY` 控制 chunk 并发翻译，`TRANSLATOR_MAX_ATTEMPTS` 控制每个 chunk 的模型调用尝试次数。
+真实模型返回会先提取 `TranslationLayoutPlan` JSON object，再经过严格 schema 校验。OpenAI-compatible endpoint 不一定保证 `message.content` 是纯 JSON；后端会处理 prose、markdown fence 或 thinking 包裹后的 plan JSON，MiniMax-M3 会额外关闭 thinking 并启用 reasoning split。可修复的 chunk 级问题，例如误带坐标字段、缺失 block 或遗漏 preserve token，会被后端修复为合法 `TranslationLayoutPlan` 并写入 `quality_flags`；不可提取、不可解析或请求失败会按 chunk 重试后落到任务错误状态。`TRANSLATION_CONCURRENCY` 控制 chunk 并发翻译，`TRANSLATOR_MAX_ATTEMPTS` 控制每个 chunk 的模型调用尝试次数。
 
 `GET/PUT /api/config` 支持持久化本地运行配置，包括 provider/base URL/model/API key、默认语言、并发、重试和 `RenderDefaults`。API key 只写入本地 `data/config/runtime-config.json`，不会在响应中返回。前端配置面板可编辑字体栈、行高、段距和 overflow 最小字号缩放；chunker 和 renderer 使用同一份已持久化的 `RenderDefaults`，保证 prompt 中的 render defaults 与最终 HTML/PDF 一致。
 
@@ -119,7 +119,7 @@ npm run acceptance
 ## Known Limitations
 
 - PDF 解析依赖 PyMuPDF 的文本层；当前没有 OCR，扫描版 PDF 会明确失败并输出 `parser-diagnostics`，建议先使用 OCR 工具生成带文本层 PDF 后再上传。
-- 真实模型调用使用 OpenAI-compatible `/chat/completions` JSON object 响应；未配置 `OPENAI_API_KEY` 时只生成占位译文。
+- 真实模型调用使用 OpenAI-compatible `/chat/completions`，并从响应内容提取 `TranslationLayoutPlan` JSON object；未配置 `OPENAI_API_KEY` 时只生成占位译文。
 - `TranslationLayoutPlan@0.1` 是 LLM 输出 contract；schema 会拒绝 `bbox`、`x`、`y`、`page` 等布局坐标字段。
 - PDF 导出依赖 Playwright Chromium；首次运行前需要执行 `.venv/bin/python -m playwright install chromium`。
 - Renderer 负责 HTML/CSS 分页和 PDF 导出；当前支持提取并保留栅格图片资产、保留表格/公式文本块、保留 vector drawing placeholder bbox 和输出 fallback diagnostics，但复杂表格重建、公式矢量图 rasterization 和高度保真多栏版式仍在后续增强范围。

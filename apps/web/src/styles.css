@@ -24,21 +24,24 @@ body {
 
 button,
 select,
-input {
+input,
+textarea {
   font: inherit;
 }
 
 button,
 a,
 select,
-input {
+input,
+textarea {
   -webkit-tap-highlight-color: transparent;
 }
 
 button:focus-visible,
 a:focus-visible,
 select:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
   outline: 3px solid rgba(28, 112, 132, 0.25);
   outline-offset: 2px;
 }
@@ -132,6 +135,52 @@ input:focus-visible {
 .section-title svg {
   color: #2c6571;
   flex: 0 0 auto;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  min-width: 0;
+}
+
+.segmented button {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid #c6d1d6;
+  background: #ffffff;
+  color: #43525a;
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 13px;
+  font-weight: 740;
+}
+
+.segmented button.active {
+  border-color: #2f7182;
+  background: #edf8fa;
+  color: #205663;
+}
+
+.text-input,
+.intent-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #b9c6cd;
+  background: #ffffff;
+  color: #172126;
+  resize: vertical;
+  padding: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.text-input {
+  min-height: 138px;
+}
+
+.intent-input {
+  min-height: 76px;
 }
 
 .upload-zone {

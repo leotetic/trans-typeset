@@ -3,20 +3,31 @@ from pydantic import ValidationError
 
 from pdf_translator_schema import (
     Asset,
+    AssetIR,
     BlockRole,
     BoundingBox,
     DocumentIR,
     DocumentPage,
+    InputSource,
     PageSize,
+    LayoutIntentBlock,
+    LayoutIntentPlan,
     SourceBlock,
     TranslationBlockPlan,
     TranslationChunk,
     TranslationLayoutPlan,
+    UserIntent,
+    WorkflowRun,
+    WorkflowStep,
+    validate_layout_intent_plan,
     validate_layout_plan,
 )
 from pdf_translator_schema.json_schema import export_schema
 from pdf_translator_schema.models import DocumentBlock, InlineItem
-from pdf_translator_schema.validation import LayoutPlanValidationError
+from pdf_translator_schema.validation import (
+    LayoutIntentPlanValidationError,
+    LayoutPlanValidationError,
+)
 
 
 def test_render_defaults_are_available_on_chunk() -> None:
@@ -33,6 +44,47 @@ def test_render_defaults_are_available_on_chunk() -> None:
     assert chunk.render_defaults.overflow_policy.min_font_scale == 0.86
     assert chunk.render_defaults.overflow_policy.allow_continuation_page is True
     assert chunk.render_defaults.preserve_policy.whitespace == "allow_reflow"
+
+
+def test_v2_workflow_contract_defaults_are_available() -> None:
+    source = InputSource(
+        source_id="source_1",
+        input_type="text",
+        size_bytes=12,
+        sha256="a" * 64,
+    )
+    asset = AssetIR(
+        asset_id="asset_1",
+        source_id="source_1",
+        kind="image",
+        quality_flags=["deterministic_ocr_mock"],
+    )
+    intent = UserIntent(
+        target_lang="zh-CN",
+        output_kind="typeset_document",
+        style_intent="academic",
+        instruction="按照gb-GB/T 7713.1 进行排版",
+    )
+    run = WorkflowRun(
+        workflow_id="workflow_1",
+        doc_id="doc_1",
+        input_sources=[source],
+        user_intent=intent,
+        steps=[
+            WorkflowStep(
+                step_id="step_1",
+                name="read_input",
+                status="completed",
+                output_artifacts=["normalized-input"],
+            )
+        ],
+    )
+
+    assert source.input_type == "text"
+    assert asset.quality_flags == ["deterministic_ocr_mock"]
+    assert intent.output_kind == "typeset_document"
+    assert intent.constraints.allow_continuation is True
+    assert run.steps[0].name == "read_input"
 
 
 def test_rejects_invalid_bbox() -> None:
@@ -183,6 +235,57 @@ def test_layout_plan_requires_preserve_tokens() -> None:
     assert validate_layout_plan(chunk, valid) is valid
 
 
+def test_layout_intent_plan_requires_all_document_blocks() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=0, x1=10, y1=10),
+                        reading_order=0,
+                    ),
+                    DocumentBlock(
+                        block_id="b2",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=20, x1=10, y1=30),
+                        reading_order=1,
+                    ),
+                ],
+            )
+        ],
+    )
+    plan = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        blocks=[
+            LayoutIntentBlock(
+                source_block_id="b1",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    with pytest.raises(LayoutIntentPlanValidationError):
+        validate_layout_intent_plan(document, plan)
+
+    valid = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        blocks=[
+            LayoutIntentBlock(source_block_id="b1", role=BlockRole.PARAGRAPH),
+            LayoutIntentBlock(source_block_id="b2", role=BlockRole.PARAGRAPH),
+        ],
+    )
+    assert validate_layout_intent_plan(document, valid) is valid
+
+
 @pytest.mark.parametrize(
     ("model_cls", "payload"),
     [
@@ -217,6 +320,25 @@ def test_layout_plan_requires_preserve_tokens() -> None:
                 "x": 10,
             },
         ),
+        (
+            LayoutIntentBlock,
+            {
+                "source_block_id": "b1",
+                "role": BlockRole.PARAGRAPH,
+                "x0": 10,
+            },
+        ),
+        (
+            LayoutIntentPlan,
+            {
+                "plan_id": "plan_1",
+                "doc_id": "doc_1",
+                "blocks": [
+                    {"source_block_id": "b1", "role": BlockRole.PARAGRAPH}
+                ],
+                "page_number": 1,
+            },
+        ),
     ],
 )
 def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) -> None:
@@ -229,6 +351,11 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
 
     for filename in (
         "document-ir.schema.json",
+        "input-source.schema.json",
+        "asset-ir.schema.json",
+        "user-intent.schema.json",
+        "workflow-run.schema.json",
+        "layout-intent-plan.schema.json",
         "translation-chunk.schema.json",
         "translation-layout-plan.schema.json",
     ):

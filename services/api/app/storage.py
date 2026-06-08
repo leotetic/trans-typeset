@@ -43,6 +43,25 @@ class Storage:
                 out.write(chunk)
         return path
 
+    async def save_upload_file(
+        self,
+        doc_id: str,
+        upload: UploadFile,
+        max_bytes: int,
+        default_suffix: str = ".bin",
+    ) -> Path:
+        suffix = Path(upload.filename or f"upload{default_suffix}").suffix or default_suffix
+        path = self.uploads / f"{doc_id}{suffix}"
+        total_bytes = 0
+        with path.open("wb") as out:
+            while chunk := await upload.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=413, detail="Upload is too large")
+                out.write(chunk)
+        return path
+
     def find_upload(self, doc_id: str) -> Path | None:
         for path in self.uploads.glob(f"{doc_id}.*"):
             if path.is_file():

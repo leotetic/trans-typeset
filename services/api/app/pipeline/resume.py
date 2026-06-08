@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-
+from ..jobs import schedule_job
 from ..models import JobState
 from ..storage import Storage
 from .orchestrator import process_document_job
@@ -28,14 +27,13 @@ async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
             storage.save_status(status)
             continue
         target_lang = status.target_lang or "zh-CN"
-        asyncio.create_task(
-            process_document_job(
-                status.job_id,
-                status.doc_id,
-                status.filename,
-                pdf_path,
-                target_lang,
-            )
+        schedule_job(
+            process_document_job,
+            status.job_id,
+            status.doc_id,
+            status.filename,
+            pdf_path,
+            target_lang,
         )
         resumed += 1
     return resumed

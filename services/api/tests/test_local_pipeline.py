@@ -79,6 +79,12 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     progress = storage.read_output_json("doc_1", "translation-progress.json")
     parser_diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
     renderer_diagnostics = storage.read_output_json("doc_1", "renderer-diagnostics.json")
+    workflow_run = storage.read_output_json("doc_1", "workflow-run.json")
+    normalized_input = storage.read_output_json("doc_1", "normalized-input.json")
+    user_intent = storage.read_output_json("doc_1", "user-intent.json")
+    layout_intent_plan = storage.read_output_json("doc_1", "layout-intent-plan.json")
+    render_evaluation = storage.read_output_json("doc_1", "render-evaluation.json")
+    validation_and_repair = storage.read_output_json("doc_1", "validation-and-repair.json")
     html = storage.preview_html_path("doc_1").read_text(encoding="utf-8")
 
     source_block_ids = {
@@ -112,6 +118,22 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     assert parser_diagnostics["text_block_count"] == len(source_block_ids)
     assert renderer_diagnostics["doc_id"] == "doc_1"
     assert renderer_diagnostics["page_count"] >= 1
+    assert workflow_run["status"] == "completed"
+    assert {step["name"] for step in workflow_run["steps"]} >= {
+        "read_input",
+        "analyze_intent",
+        "build_plan",
+        "validate_plan",
+        "translate",
+        "render",
+        "evaluate_render",
+        "complete",
+    }
+    assert normalized_input["kind"] == "normalized_input"
+    assert user_intent["target_lang"] == "zh-CN"
+    assert layout_intent_plan["doc_id"] == "doc_1"
+    assert render_evaluation["kind"] == "render_evaluation"
+    assert validation_and_repair["layout_intent_plan"]["status"] == "valid"
     assert len(progress) == len(chunks)
     assert "【译】" in html
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")

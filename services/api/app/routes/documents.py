@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..config import settings
@@ -16,17 +16,30 @@ from ..models import (
     RuntimeConfig,
     UpdateRuntimeConfig,
 )
-from ..pipeline.orchestrator import process_document_job
+from ..jobs import schedule_job
+from ..pipeline.orchestrator import (
+    process_document_job,
+    process_image_document_job,
+    process_text_document_job,
+)
+from ..pipeline.workflow import coerce_user_intent
 from ..runtime_config import effective_runtime_config, runtime_config_response
 from ..storage import storage
 
 router = APIRouter(prefix="/api", tags=["documents"])
 
 JSON_ARTIFACTS = {
+    "normalized-input": ("normalized-input.json", "normalized-input"),
+    "user-intent": ("user-intent.json", "user-intent"),
+    "workflow-run": ("workflow-run.json", "workflow-run"),
+    "layout-intent-plan": ("layout-intent-plan.json", "layout-intent-plan"),
+    "validation-and-repair": ("validation-and-repair.json", "validation-and-repair"),
+    "asset-ir": ("asset-ir.json", "asset-ir"),
     "document-ir": ("document_ir", "document-ir"),
     "translation-chunks": ("translation-chunks.json", "translation-chunks"),
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
     "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
+    "render-evaluation": ("render-evaluation.json", "render-evaluation"),
     "translation-progress": ("translation-progress.json", "translation-progress"),
     "parser-diagnostics": ("parser-diagnostics.json", "parser-diagnostics"),
 }
@@ -46,6 +59,17 @@ async def ensure_pdf_upload(file: UploadFile) -> None:
     await file.seek(0)
     if b"%PDF-" not in header:
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported")
+
+
+async def ensure_image_upload(file: UploadFile) -> None:
+    filename = file.filename or ""
+    suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    allowed_suffixes = {"png", "jpg", "jpeg", "webp"}
+    allowed_types = {"image/png", "image/jpeg", "image/webp", "application/octet-stream"}
+    if suffix not in allowed_suffixes:
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WebP images are supported")
+    if file.content_type and file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WebP images are supported")
 
 
 def ensure_target_lang(target_lang: str) -> None:
@@ -90,12 +114,15 @@ async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
 
 @router.post("/documents", response_model=CreateDocumentResponse)
 async def create_document(
-    background_tasks: BackgroundTasks,
     file: Annotated[UploadFile, File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    output_kind: Annotated[str, Form()] = "translation",
+    style_intent: Annotated[str, Form()] = "academic",
+    instruction: Annotated[str, Form()] = "",
 ) -> CreateDocumentResponse:
     ensure_target_lang(target_lang)
     await ensure_pdf_upload(file)
+    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
 
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
@@ -110,15 +137,95 @@ async def create_document(
         message="Queued",
     )
     storage.save_status(status)
-    background_tasks.add_task(
-        process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang
+    schedule_job(
+        process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang, user_intent
+    )
+    return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
+
+
+@router.post("/workflows/text", response_model=CreateDocumentResponse)
+async def create_text_workflow(
+    text: Annotated[str, Form()],
+    target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    output_kind: Annotated[str, Form()] = "typeset_document",
+    style_intent: Annotated[str, Form()] = "academic",
+    instruction: Annotated[str, Form()] = "",
+    filename: Annotated[str, Form()] = "text-input.txt",
+) -> CreateDocumentResponse:
+    ensure_target_lang(target_lang)
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Text input is empty")
+    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
+    doc_id = storage.new_doc_id()
+    job_id = storage.new_job_id()
+    storage.save_status(
+        JobStatus(
+            job_id=job_id,
+            doc_id=doc_id,
+            filename=filename,
+            target_lang=target_lang,
+            status=JobState.QUEUED,
+            progress=0,
+            message="Queued",
+        )
+    )
+    schedule_job(
+        process_text_document_job,
+        job_id,
+        doc_id,
+        filename,
+        text,
+        target_lang,
+        user_intent,
+    )
+    return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
+
+
+@router.post("/workflows/image", response_model=CreateDocumentResponse)
+async def create_image_workflow(
+    file: Annotated[UploadFile, File()],
+    target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    output_kind: Annotated[str, Form()] = "layout_reference",
+    style_intent: Annotated[str, Form()] = "academic",
+    instruction: Annotated[str, Form()] = "",
+) -> CreateDocumentResponse:
+    ensure_target_lang(target_lang)
+    await ensure_image_upload(file)
+    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
+    doc_id = storage.new_doc_id()
+    job_id = storage.new_job_id()
+    image_path = await storage.save_upload_file(
+        doc_id,
+        file,
+        settings.max_upload_bytes,
+        default_suffix=".png",
+    )
+    storage.save_status(
+        JobStatus(
+            job_id=job_id,
+            doc_id=doc_id,
+            filename=file.filename or "image-input.png",
+            target_lang=target_lang,
+            status=JobState.QUEUED,
+            progress=0,
+            message="Queued",
+        )
+    )
+    schedule_job(
+        process_image_document_job,
+        job_id,
+        doc_id,
+        file.filename or "image-input.png",
+        image_path,
+        target_lang,
+        file.content_type,
+        user_intent,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
 
 @router.post("/documents/batch", response_model=BatchCreateDocumentResponse)
 async def create_documents_batch(
-    background_tasks: BackgroundTasks,
     files: Annotated[list[UploadFile], File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
 ) -> BatchCreateDocumentResponse:
@@ -142,7 +249,7 @@ async def create_documents_batch(
             message="Queued",
         )
         storage.save_status(status)
-        background_tasks.add_task(
+        schedule_job(
             process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang
         )
         jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
@@ -186,7 +293,7 @@ async def cancel_job(job_id: str) -> JobStatus:
 
 
 @router.post("/jobs/{job_id}/retry", response_model=CreateDocumentResponse)
-async def retry_job(job_id: str, background_tasks: BackgroundTasks) -> CreateDocumentResponse:
+async def retry_job(job_id: str) -> CreateDocumentResponse:
     try:
         status = storage.load_status(job_id)
     except FileNotFoundError as exc:
@@ -209,7 +316,7 @@ async def retry_job(job_id: str, background_tasks: BackgroundTasks) -> CreateDoc
         message="Queued retry",
     )
     storage.save_status(next_status)
-    background_tasks.add_task(
+    schedule_job(
         process_document_job,
         next_job_id,
         status.doc_id,

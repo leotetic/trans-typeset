@@ -11,6 +11,38 @@ export type BlockRole =
   | "reference"
   | "unknown";
 
+export type InputKind = "text" | "image" | "pdf";
+
+export type OutputKind =
+  | "translation"
+  | "typeset_document"
+  | "layout_reference"
+  | "summary_layout";
+
+export type StyleIntent = "academic" | "report" | "handout" | "slide_like" | "plain";
+
+export type WorkflowStatus = "queued" | "running" | "completed" | "failed" | "canceled";
+
+export type WorkflowStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "repaired";
+
+export type WorkflowStepName =
+  | "read_input"
+  | "analyze_intent"
+  | "build_plan"
+  | "validate_plan"
+  | "translate"
+  | "render"
+  | "evaluate_render"
+  | "repair"
+  | "complete"
+  | "fail";
+
 export interface BoundingBox {
   x0: number;
   y0: number;
@@ -62,6 +94,111 @@ export interface DocumentPage {
 export interface DocumentIR {
   doc_id: string;
   pages: DocumentPage[];
+}
+
+export interface InputSource {
+  source_id: string;
+  input_type: InputKind;
+  filename?: string | null;
+  mime_type?: string | null;
+  size_bytes?: number;
+  sha256?: string | null;
+  artifact_path?: string | null;
+  quality_flags?: string[];
+}
+
+export interface AssetIR {
+  asset_id: string;
+  source_id: string;
+  kind?: "image" | "pdf_asset" | "reference" | "ocr_text" | "unknown";
+  mime_type?: string | null;
+  path?: string | null;
+  ocr_text?: string;
+  alt_text?: string | null;
+  source_block_ids?: string[];
+  confidence?: number | null;
+  quality_flags?: string[];
+}
+
+export interface UserConstraints {
+  page_width_pt?: number;
+  page_height_pt?: number;
+  target_font_size_pt?: number;
+  allow_continuation?: boolean;
+  preserve_images?: boolean;
+}
+
+export interface UserIntent {
+  target_lang?: string;
+  output_kind?: OutputKind;
+  style_intent?: StyleIntent;
+  instruction?: string;
+  preserve_policy?: Array<
+    "citations" | "formulas" | "tables" | "figures" | "reference_markers"
+  >;
+  reference_assets?: string[];
+  constraints?: UserConstraints;
+}
+
+export interface WorkflowStep {
+  step_id: string;
+  name: WorkflowStepName;
+  status: WorkflowStepStatus;
+  progress?: number;
+  attempt?: number;
+  message?: string;
+  input_artifacts?: string[];
+  output_artifacts?: string[];
+  diagnostics?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface WorkflowRun {
+  workflow_id: string;
+  job_id?: string | null;
+  doc_id: string;
+  status?: WorkflowStatus;
+  current_step?: WorkflowStepName;
+  progress?: number;
+  input_sources?: InputSource[];
+  user_intent?: UserIntent;
+  steps?: WorkflowStep[];
+  artifacts?: Record<string, string>;
+  diagnostics?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface LayoutIntentBlock extends NoLayoutCoordinates {
+  source_block_id: string;
+  role: BlockRole;
+  priority?: number;
+  render_intent?:
+    | "normal"
+    | "compact"
+    | "emphasis"
+    | "preserve_asset"
+    | "callout"
+    | "reference_layout";
+  asset_refs?: string[];
+  quality_flags?: string[];
+}
+
+export interface LayoutIntentAsset extends NoLayoutCoordinates {
+  asset_id: string;
+  usage?: "preserve" | "inline_reference" | "background_reference" | "ignore";
+  quality_flags?: string[];
+}
+
+export interface LayoutIntentPlan extends NoLayoutCoordinates {
+  schema_version?: "0.1";
+  plan_id: string;
+  doc_id: string;
+  target_lang?: string;
+  output_kind?: OutputKind;
+  style_intent?: StyleIntent;
+  blocks?: LayoutIntentBlock[];
+  assets?: LayoutIntentAsset[];
+  quality_flags?: string[];
 }
 
 export type TextAlignment = "left" | "center" | "right" | "justify";
