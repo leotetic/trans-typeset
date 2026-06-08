@@ -12,6 +12,11 @@ app/pipeline/parser.py
 app/pipeline/resume.py
 app/pipeline/translator.py
 app/pipeline/workflow.py
+app/pipeline/agents/__init__.py
+app/pipeline/agents/graph.py
+app/pipeline/agents/llm.py
+app/pipeline/agents/nodes.py
+app/pipeline/agents/state.py
 app/routes/documents.py
 tests/test_api.py
 tests/test_chunker.py
