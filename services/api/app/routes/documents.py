@@ -6,11 +6,30 @@ from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Uploa
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..config import settings
-from ..models import CreateDocumentResponse, JobState, JobStatus
+from ..models import (
+    ArtifactSummary,
+    BatchCreateDocumentResponse,
+    CreateDocumentResponse,
+    DocumentArtifacts,
+    JobState,
+    JobStatus,
+    RuntimeConfig,
+    UpdateRuntimeConfig,
+)
 from ..pipeline.orchestrator import process_document_job
+from ..runtime_config import effective_runtime_config, runtime_config_response
 from ..storage import storage
 
 router = APIRouter(prefix="/api", tags=["documents"])
+
+JSON_ARTIFACTS = {
+    "document-ir": ("document_ir", "document-ir"),
+    "translation-chunks": ("translation-chunks.json", "translation-chunks"),
+    "translation-plans": ("translation-plans.json", "translation-layout-plans"),
+    "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
+    "translation-progress": ("translation-progress.json", "translation-progress"),
+    "parser-diagnostics": ("parser-diagnostics.json", "parser-diagnostics"),
+}
 
 
 async def ensure_pdf_upload(file: UploadFile) -> None:
@@ -38,6 +57,37 @@ def ensure_target_lang(target_lang: str) -> None:
         )
 
 
+@router.get("/config", response_model=RuntimeConfig)
+async def get_config() -> RuntimeConfig:
+    return runtime_config_response(storage)
+
+
+@router.put("/config", response_model=RuntimeConfig)
+async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
+    current = effective_runtime_config(storage)
+    updates = payload.model_dump(exclude_none=True)
+    if "default_target_lang" in updates:
+        ensure_target_lang(updates["default_target_lang"])
+    if "openai_base_url" in updates:
+        updates["openai_base_url"] = str(updates["openai_base_url"]).rstrip("/")
+    if "openai_api_key" in updates and updates["openai_api_key"] == "":
+        updates["openai_api_key"] = ""
+    if "render_defaults" in updates:
+        render_defaults = updates["render_defaults"]
+        if "default_target_lang" in updates:
+            render_defaults["target_lang"] = updates["default_target_lang"]
+        updates["render_defaults"] = render_defaults
+    current["render_defaults"] = current["render_defaults"].model_dump()
+    if "default_target_lang" in updates and "render_defaults" not in updates:
+        current["render_defaults"]["target_lang"] = updates["default_target_lang"]
+    current.update(updates)
+    current["render_defaults"] = UpdateRuntimeConfig(
+        render_defaults=current["render_defaults"]
+    ).render_defaults.model_dump()
+    storage.write_runtime_config(current)
+    return runtime_config_response(storage)
+
+
 @router.post("/documents", response_model=CreateDocumentResponse)
 async def create_document(
     background_tasks: BackgroundTasks,
@@ -54,6 +104,7 @@ async def create_document(
         job_id=job_id,
         doc_id=doc_id,
         filename=file.filename,
+        target_lang=target_lang,
         status=JobState.QUEUED,
         progress=0,
         message="Queued",
@@ -65,12 +116,108 @@ async def create_document(
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
 
+@router.post("/documents/batch", response_model=BatchCreateDocumentResponse)
+async def create_documents_batch(
+    background_tasks: BackgroundTasks,
+    files: Annotated[list[UploadFile], File()],
+    target_lang: Annotated[str, Form()] = settings.default_target_lang,
+) -> BatchCreateDocumentResponse:
+    ensure_target_lang(target_lang)
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one PDF is required")
+
+    jobs: list[CreateDocumentResponse] = []
+    for file in files:
+        await ensure_pdf_upload(file)
+        doc_id = storage.new_doc_id()
+        job_id = storage.new_job_id()
+        pdf_path = await storage.save_upload(doc_id, file, settings.max_upload_bytes)
+        status = JobStatus(
+            job_id=job_id,
+            doc_id=doc_id,
+            filename=file.filename,
+            target_lang=target_lang,
+            status=JobState.QUEUED,
+            progress=0,
+            message="Queued",
+        )
+        storage.save_status(status)
+        background_tasks.add_task(
+            process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang
+        )
+        jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
+    return BatchCreateDocumentResponse(jobs=jobs)
+
+
 @router.get("/jobs/{job_id}", response_model=JobStatus)
 async def get_job(job_id: str) -> JobStatus:
     try:
         return storage.load_status(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Job not found") from exc
+
+
+@router.get("/jobs", response_model=list[JobStatus])
+async def list_jobs(limit: int = 25) -> list[JobStatus]:
+    bounded_limit = min(max(limit, 1), 100)
+    return storage.list_statuses(bounded_limit)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobStatus)
+async def cancel_job(job_id: str) -> JobStatus:
+    try:
+        status = storage.load_status(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    if status.status in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELED}:
+        return status
+    canceled = JobStatus(
+        job_id=status.job_id,
+        doc_id=status.doc_id,
+        filename=status.filename,
+        target_lang=status.target_lang,
+        status=JobState.CANCELED,
+        progress=1,
+        message="Canceled",
+        chunks=status.chunks,
+    )
+    storage.save_status(canceled)
+    return canceled
+
+
+@router.post("/jobs/{job_id}/retry", response_model=CreateDocumentResponse)
+async def retry_job(job_id: str, background_tasks: BackgroundTasks) -> CreateDocumentResponse:
+    try:
+        status = storage.load_status(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    if not status.doc_id:
+        raise HTTPException(status_code=400, detail="Job has no document to retry")
+    pdf_path = storage.find_upload(status.doc_id)
+    if pdf_path is None:
+        raise HTTPException(status_code=404, detail="Original upload not found")
+    target_lang = status.target_lang or settings.default_target_lang
+    ensure_target_lang(target_lang)
+    next_job_id = storage.new_job_id()
+    next_status = JobStatus(
+        job_id=next_job_id,
+        doc_id=status.doc_id,
+        filename=status.filename,
+        target_lang=target_lang,
+        status=JobState.QUEUED,
+        progress=0,
+        message="Queued retry",
+    )
+    storage.save_status(next_status)
+    background_tasks.add_task(
+        process_document_job,
+        next_job_id,
+        status.doc_id,
+        status.filename,
+        pdf_path,
+        target_lang,
+    )
+    return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
 
 
 @router.get("/documents/{doc_id}/preview", response_class=HTMLResponse)
@@ -103,3 +250,53 @@ async def head_download(doc_id: str) -> Response:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Translated PDF not found")
     return Response(media_type="application/pdf")
+
+
+@router.get("/documents/{doc_id}/assets/{filename}")
+async def get_document_asset(doc_id: str, filename: str) -> FileResponse:
+    asset_id = filename.rsplit(".", 1)[0]
+    path = storage.find_asset_file(doc_id, asset_id)
+    if path is None or path.name != filename:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    media_type = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+    if path.suffix.lower() == ".webp":
+        media_type = "image/webp"
+    return FileResponse(path, media_type=media_type)
+
+
+@router.get("/documents/{doc_id}/artifacts", response_model=DocumentArtifacts)
+async def list_document_artifacts(doc_id: str) -> DocumentArtifacts:
+    artifacts: list[ArtifactSummary] = []
+    for name, (filename, kind) in JSON_ARTIFACTS.items():
+        available = (
+            (storage.documents / f"{doc_id}.json").exists()
+            if name == "document-ir"
+            else storage.output_json_path(doc_id, filename).exists()
+        )
+        artifacts.append(
+            ArtifactSummary(
+                name=name,
+                kind=kind,
+                available=available,
+                href=f"/api/documents/{doc_id}/artifacts/{name}",
+            )
+        )
+    return DocumentArtifacts(doc_id=doc_id, artifacts=artifacts)
+
+
+@router.get("/documents/{doc_id}/artifacts/{artifact_name}")
+async def get_document_artifact(doc_id: str, artifact_name: str) -> object:
+    if artifact_name not in JSON_ARTIFACTS:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    if artifact_name == "document-ir":
+        try:
+            return storage.load_document_ir(doc_id).model_dump()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Artifact not found") from exc
+
+    filename, _ = JSON_ARTIFACTS[artifact_name]
+    try:
+        return storage.read_output_json(doc_id, filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found") from exc

@@ -5,6 +5,7 @@
 !.env.example
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
@@ -16,5 +17,6 @@ coverage/
 data/
 .worktrees/
 *.tsbuildinfo
+*.pdf
 playwright-report/
 test-results/

@@ -1,12 +1,51 @@
-import type { JobStatus } from "@trans-typesetting/schema";
+import type { JobStatus, RenderDefaults } from "@trans-typesetting/schema";
 
 export interface CreateDocumentResponse {
   job_id: string;
   doc_id: string;
 }
 
+export interface BatchCreateDocumentResponse {
+  jobs: CreateDocumentResponse[];
+}
+
 export interface HealthResponse {
   status: "ok";
+}
+
+export interface RuntimeConfig {
+  default_target_lang: string;
+  allowed_target_langs: string[];
+  max_upload_bytes: number;
+  translator_provider: "deterministic" | "openai-compatible" | string;
+  openai_base_url: string;
+  openai_model: string;
+  openai_api_key_configured: boolean;
+  translation_concurrency: number;
+  translator_max_attempts: number;
+  render_defaults: RenderDefaults;
+}
+
+export interface UpdateRuntimeConfig {
+  default_target_lang?: string;
+  openai_base_url?: string;
+  openai_model?: string;
+  openai_api_key?: string;
+  translation_concurrency?: number;
+  translator_max_attempts?: number;
+  render_defaults?: RenderDefaults;
+}
+
+export interface ArtifactSummary {
+  name: string;
+  kind: string;
+  available: boolean;
+  href?: string | null;
+}
+
+export interface DocumentArtifacts {
+  doc_id: string;
+  artifacts: ArtifactSummary[];
 }
 
 export type ApiErrorKind = "http" | "network" | "timeout" | "abort" | "parse";
@@ -29,7 +68,8 @@ const jobStatusValues = new Set<JobStatus["status"]>([
   "translating",
   "rendering",
   "completed",
-  "failed"
+  "failed",
+  "canceled"
 ]);
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -64,9 +104,90 @@ export async function createDocument(
   });
 }
 
+export async function createDocumentsBatch(
+  files: File[],
+  targetLang: string,
+  options: ApiRequestInit = {}
+) {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append("files", file);
+  }
+  formData.append("target_lang", targetLang);
+
+  return requestJson("/api/documents/batch", parseBatchCreateDocumentResponse, {
+    method: "POST",
+    body: formData,
+    timeoutMs: 90_000,
+    ...options
+  });
+}
+
 export async function getJob(jobId: string, options: ApiRequestInit = {}) {
   return requestJson(`/api/jobs/${jobId}`, parseJobStatus, {
     retries: 1,
+    ...options
+  });
+}
+
+export async function cancelJob(jobId: string, options: ApiRequestInit = {}) {
+  return requestJson(`/api/jobs/${jobId}/cancel`, parseJobStatus, {
+    method: "POST",
+    retries: 1,
+    ...options
+  });
+}
+
+export async function retryJob(jobId: string, options: ApiRequestInit = {}) {
+  return requestJson(`/api/jobs/${jobId}/retry`, parseCreateDocumentResponse, {
+    method: "POST",
+    retries: 1,
+    ...options
+  });
+}
+
+export async function getRuntimeConfig(options: ApiRequestInit = {}) {
+  return requestJson("/api/config", parseRuntimeConfig, {
+    retries: 1,
+    ...options
+  });
+}
+
+export async function updateRuntimeConfig(
+  payload: UpdateRuntimeConfig,
+  options: ApiRequestInit = {}
+) {
+  return requestJson("/api/config", parseRuntimeConfig, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    retries: 1,
+    ...options
+  });
+}
+
+export async function listJobs(options: ApiRequestInit = {}) {
+  return requestJson("/api/jobs", parseJobList, {
+    retries: 1,
+    ...options
+  });
+}
+
+export async function listDocumentArtifacts(docId: string, options: ApiRequestInit = {}) {
+  return requestJson(`/api/documents/${docId}/artifacts`, parseDocumentArtifacts, {
+    retries: 1,
+    ...options
+  });
+}
+
+export async function getDocumentArtifact(
+  docId: string,
+  artifactName: string,
+  options: ApiRequestInit = {}
+) {
+  return requestJson(`/api/documents/${docId}/artifacts/${artifactName}`, (payload) => payload, {
+    retries: 1,
+    timeoutMs: 20_000,
     ...options
   });
 }
@@ -227,6 +348,15 @@ function parseCreateDocumentResponse(payload: unknown): CreateDocumentResponse {
   };
 }
 
+function parseBatchCreateDocumentResponse(payload: unknown): BatchCreateDocumentResponse {
+  if (!isRecord(payload) || !Array.isArray(payload.jobs)) {
+    throw new Error("批量上传接口返回缺少任务信息。");
+  }
+  return {
+    jobs: payload.jobs.map(parseCreateDocumentResponse)
+  };
+}
+
 function parseJobStatus(payload: unknown): JobStatus {
   if (
     !isRecord(payload) ||
@@ -244,10 +374,154 @@ function parseJobStatus(payload: unknown): JobStatus {
     job_id: payload.job_id,
     doc_id: typeof payload.doc_id === "string" || payload.doc_id === null ? payload.doc_id : undefined,
     filename: payload.filename,
+    target_lang: typeof payload.target_lang === "string" || payload.target_lang === null ? payload.target_lang : undefined,
     status: payload.status as JobStatus["status"],
     progress: payload.progress,
     message: payload.message,
+    error: typeof payload.error === "string" || payload.error === null ? payload.error : undefined,
+    chunks: Array.isArray(payload.chunks) ? payload.chunks.map(parseChunkProgress) : []
+  };
+}
+
+function parseJobList(payload: unknown): JobStatus[] {
+  if (!Array.isArray(payload)) {
+    throw new Error("任务历史返回结构不正确。");
+  }
+  return payload.map(parseJobStatus);
+}
+
+function parseRuntimeConfig(payload: unknown): RuntimeConfig {
+  if (
+    !isRecord(payload) ||
+    typeof payload.default_target_lang !== "string" ||
+    !Array.isArray(payload.allowed_target_langs) ||
+    !payload.allowed_target_langs.every((item) => typeof item === "string") ||
+    typeof payload.max_upload_bytes !== "number" ||
+    typeof payload.translator_provider !== "string" ||
+    typeof payload.openai_base_url !== "string" ||
+    typeof payload.openai_model !== "string" ||
+    typeof payload.openai_api_key_configured !== "boolean" ||
+    typeof payload.translation_concurrency !== "number" ||
+    typeof payload.translator_max_attempts !== "number" ||
+    !isRecord(payload.render_defaults)
+  ) {
+    throw new Error("运行配置返回结构不正确。");
+  }
+
+  const renderDefaults = parseRenderDefaults(payload.render_defaults);
+  return {
+    default_target_lang: payload.default_target_lang,
+    allowed_target_langs: payload.allowed_target_langs,
+    max_upload_bytes: payload.max_upload_bytes,
+    translator_provider: payload.translator_provider,
+    openai_base_url: payload.openai_base_url,
+    openai_model: payload.openai_model,
+    openai_api_key_configured: payload.openai_api_key_configured,
+    translation_concurrency: payload.translation_concurrency,
+    translator_max_attempts: payload.translator_max_attempts,
+    render_defaults: renderDefaults
+  };
+}
+
+function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
+  const fontStack = Array.isArray(payload.font_stack)
+    ? payload.font_stack.filter((item): item is string => typeof item === "string")
+    : [];
+  if (
+    typeof payload.target_lang !== "string" ||
+    !fontStack.length ||
+    typeof payload.line_height !== "number" ||
+    typeof payload.paragraph_spacing_em !== "number" ||
+    !isRecord(payload.overflow_policy)
+  ) {
+    throw new Error("运行配置缺少渲染默认值。");
+  }
+
+  return {
+    target_lang: payload.target_lang,
+    font_stack: fontStack,
+    line_height: payload.line_height,
+    paragraph_spacing_em: payload.paragraph_spacing_em,
+    alignment: isRecord(payload.alignment)
+      ? (payload.alignment as RenderDefaults["alignment"])
+      : undefined,
+    overflow_policy: {
+      strategy:
+        typeof payload.overflow_policy.strategy === "string"
+          ? (payload.overflow_policy.strategy as NonNullable<RenderDefaults["overflow_policy"]>["strategy"])
+          : undefined,
+      min_font_scale:
+        typeof payload.overflow_policy.min_font_scale === "number"
+          ? payload.overflow_policy.min_font_scale
+          : undefined,
+      max_font_scale:
+        typeof payload.overflow_policy.max_font_scale === "number"
+          ? payload.overflow_policy.max_font_scale
+          : undefined,
+      allow_box_expansion:
+        typeof payload.overflow_policy.allow_box_expansion === "boolean"
+          ? payload.overflow_policy.allow_box_expansion
+          : undefined,
+      allow_continuation_page:
+        typeof payload.overflow_policy.allow_continuation_page === "boolean"
+          ? payload.overflow_policy.allow_continuation_page
+          : undefined
+    },
+    preserve_policy: isRecord(payload.preserve_policy)
+      ? (payload.preserve_policy as RenderDefaults["preserve_policy"])
+      : undefined
+  };
+}
+
+function parseChunkProgress(payload: unknown) {
+  if (
+    !isRecord(payload) ||
+    typeof payload.chunk_id !== "string" ||
+    typeof payload.index !== "number" ||
+    typeof payload.total !== "number" ||
+    typeof payload.status !== "string" ||
+    typeof payload.progress !== "number" ||
+    typeof payload.message !== "string"
+  ) {
+    throw new Error("chunk 进度返回结构不正确。");
+  }
+  return {
+    chunk_id: payload.chunk_id,
+    index: payload.index,
+    total: payload.total,
+    status: payload.status,
+    progress: payload.progress,
+    message: payload.message,
+    quality_flags: Array.isArray(payload.quality_flags)
+      ? payload.quality_flags.filter((flag): flag is string => typeof flag === "string")
+      : [],
     error: typeof payload.error === "string" || payload.error === null ? payload.error : undefined
+  };
+}
+
+function parseDocumentArtifacts(payload: unknown): DocumentArtifacts {
+  if (!isRecord(payload) || typeof payload.doc_id !== "string" || !Array.isArray(payload.artifacts)) {
+    throw new Error("调试 artifact 返回结构不正确。");
+  }
+
+  return {
+    doc_id: payload.doc_id,
+    artifacts: payload.artifacts.map((item) => {
+      if (
+        !isRecord(item) ||
+        typeof item.name !== "string" ||
+        typeof item.kind !== "string" ||
+        typeof item.available !== "boolean"
+      ) {
+        throw new Error("调试 artifact 条目结构不正确。");
+      }
+      return {
+        name: item.name,
+        kind: item.kind,
+        available: item.available,
+        href: typeof item.href === "string" || item.href === null ? item.href : undefined
+      };
+    })
   };
 }
 

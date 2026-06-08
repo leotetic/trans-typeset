@@ -10,10 +10,11 @@
   "scripts": {
     "dev:web": "npm --workspace apps/web run dev",
     "build:web": "npm --workspace apps/web run build",
-    "typecheck:web": "npm --workspace apps/web run typecheck"
+    "typecheck:web": "npm --workspace apps/web run typecheck",
+    "visual-regression": "bash scripts/visual-regression.sh",
+    "acceptance": "scripts/acceptance.sh"
   },
   "engines": {
     "node": ">=20"
   }
 }
-

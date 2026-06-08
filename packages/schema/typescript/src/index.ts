@@ -176,12 +176,32 @@ export interface TranslationLayoutPlan extends NoLayoutCoordinates {
   blocks: TranslationBlockPlan[];
 }
 
+export interface ChunkProgress {
+  chunk_id: string;
+  index: number;
+  total: number;
+  status: string;
+  progress: number;
+  message: string;
+  quality_flags?: string[];
+  error?: string | null;
+}
+
 export interface JobStatus {
   job_id: string;
   doc_id?: string | null;
   filename: string;
-  status: "queued" | "parsing" | "translating" | "rendering" | "completed" | "failed";
+  target_lang?: string | null;
+  status:
+    | "queued"
+    | "parsing"
+    | "translating"
+    | "rendering"
+    | "completed"
+    | "failed"
+    | "canceled";
   progress: number;
   message: string;
   error?: string | null;
+  chunks?: ChunkProgress[];
 }

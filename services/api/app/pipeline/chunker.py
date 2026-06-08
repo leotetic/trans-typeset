@@ -63,28 +63,81 @@ def _make_chunk(
     target_lang: str,
     blocks: list[SourceBlock],
     render_defaults: RenderDefaults,
+    context: str,
+    glossary: dict[str, str],
 ) -> TranslationChunk:
     return TranslationChunk(
         chunk_id=f"{document.doc_id}_chunk_{index:04d}",
         target_lang=target_lang,
         source_blocks=blocks,
-        context="Academic paper translation chunk.",
+        context=context,
+        glossary=glossary,
         render_defaults=render_defaults,
         constraints=TranslationConstraints(),
     )
+
+
+def _summarize_blocks(blocks: list[SourceBlock], limit: int = 220) -> str:
+    text = " ".join(block.source_text for block in blocks).strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _chunk_context(
+    document: DocumentIR,
+    chunk_index: int,
+    blocks: list[SourceBlock],
+    previous_blocks: list[SourceBlock],
+) -> str:
+    title = next(
+        (
+            block.source_text
+            for page in document.pages
+            for block in sorted(page.blocks, key=lambda item: item.reading_order)
+            if block.role == BlockRole.TITLE and block.source_text.strip()
+        ),
+        "",
+    )
+    nearby_titles = []
+    for block in blocks:
+        for title_text in block.nearby_titles:
+            if title_text not in nearby_titles:
+                nearby_titles.append(title_text)
+    parts = [
+        "Academic paper translation chunk.",
+        f"Chunk index: {chunk_index}.",
+    ]
+    if title:
+        parts.append(f"Document title: {title}.")
+    if nearby_titles:
+        parts.append("Nearby titles: " + " > ".join(nearby_titles[-3:]) + ".")
+    if previous_blocks:
+        parts.append("Previous chunk tail: " + _summarize_blocks(previous_blocks[-2:]) + ".")
+    parts.append("Current chunk summary: " + _summarize_blocks(blocks) + ".")
+    return "\n".join(parts)
 
 
 def build_chunks(
     document: DocumentIR,
     target_lang: str,
     max_chars: int = 6000,
+    glossary: dict[str, str] | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[TranslationChunk]:
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
 
-    render_defaults = RenderDefaults(target_lang=target_lang)
+    render_defaults = (
+        render_defaults.model_copy(update={"target_lang": target_lang}, deep=True)
+        if render_defaults is not None
+        else RenderDefaults(target_lang=target_lang)
+    )
+    glossary = glossary or {}
     chunks: list[TranslationChunk] = []
     current_blocks: list[SourceBlock] = []
+    previous_chunk_blocks: list[SourceBlock] = []
     current_chars = 0
     ordered_document_blocks = [
         block
@@ -114,8 +167,16 @@ def build_chunks(
                         target_lang,
                         current_blocks,
                         render_defaults,
+                        _chunk_context(
+                            document,
+                            len(chunks) + 1,
+                            current_blocks,
+                            previous_chunk_blocks,
+                        ),
+                        glossary,
                     )
                 )
+                previous_chunk_blocks = current_blocks
                 current_blocks = []
                 current_chars = 0
             current_blocks.append(source_block)
@@ -129,6 +190,13 @@ def build_chunks(
                 target_lang,
                 current_blocks,
                 render_defaults,
+                _chunk_context(
+                    document,
+                    len(chunks) + 1,
+                    current_blocks,
+                    previous_chunk_blocks,
+                ),
+                glossary,
             )
         )
 

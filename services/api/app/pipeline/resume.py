@@ -1,0 +1,41 @@
+from __future__ import annotations
+
+import asyncio
+
+from ..models import JobState
+from ..storage import Storage
+from .orchestrator import process_document_job
+
+RESUMABLE_STATES = {
+    JobState.QUEUED,
+    JobState.PARSING,
+    JobState.TRANSLATING,
+    JobState.RENDERING,
+}
+
+
+async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
+    resumed = 0
+    for status in storage.list_statuses(limit):
+        if status.status not in RESUMABLE_STATES or not status.doc_id:
+            continue
+        pdf_path = storage.find_upload(status.doc_id)
+        if pdf_path is None:
+            status.status = JobState.FAILED
+            status.progress = 1
+            status.message = "Failed"
+            status.error = "Original upload not found during resume"
+            storage.save_status(status)
+            continue
+        target_lang = status.target_lang or "zh-CN"
+        asyncio.create_task(
+            process_document_job(
+                status.job_id,
+                status.doc_id,
+                status.filename,
+                pdf_path,
+                target_lang,
+            )
+        )
+        resumed += 1
+    return resumed

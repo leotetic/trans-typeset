@@ -1,6 +1,6 @@
 from app.pipeline.chunker import build_chunks, extract_preserve_tokens
 from pdf_translator_schema import BlockRole, BoundingBox, DocumentIR, DocumentPage, PageSize
-from pdf_translator_schema.models import DocumentBlock
+from pdf_translator_schema.models import DocumentBlock, RenderDefaults
 
 
 def make_block(
@@ -86,3 +86,44 @@ def test_build_chunks_nearby_titles_uses_previous_titles_in_reading_order() -> N
 
     body = chunks[0].source_blocks[2]
     assert body.nearby_titles == ["Main Title", "1 Introduction"]
+
+
+def test_build_chunks_adds_glossary_and_cross_chunk_context() -> None:
+    document = make_document(
+        [
+            make_block("title", "Paper About RAG", BlockRole.TITLE, reading_order=0),
+            make_block("p1_b1", "retrieval augmented generation", reading_order=1),
+            make_block("p1_b2", "second chunk body", reading_order=2),
+        ]
+    )
+
+    chunks = build_chunks(
+        document,
+        target_lang="zh-CN",
+        max_chars=48,
+        glossary={"retrieval augmented generation": "检索增强生成"},
+    )
+
+    assert len(chunks) == 2
+    assert chunks[0].glossary == {"retrieval augmented generation": "检索增强生成"}
+    assert "Document title: Paper About RAG." in chunks[0].context
+    assert "Previous chunk tail: Paper About RAG retrieval augmented generation." in chunks[1].context
+
+
+def test_build_chunks_uses_configured_render_defaults_with_target_language() -> None:
+    document = make_document([make_block("p1_b1", "Body")])
+    render_defaults = RenderDefaults(
+        target_lang="en-US",
+        font_stack=["Custom Font", "serif"],
+        line_height=1.6,
+    )
+
+    chunks = build_chunks(
+        document,
+        target_lang="zh-CN",
+        render_defaults=render_defaults,
+    )
+
+    assert chunks[0].render_defaults.target_lang == "zh-CN"
+    assert chunks[0].render_defaults.font_stack == ["Custom Font", "serif"]
+    assert chunks[0].render_defaults.line_height == 1.6

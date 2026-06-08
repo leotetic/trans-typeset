@@ -9,7 +9,9 @@ import {
   ExternalLink,
   FileText,
   Globe2,
+  History,
   Loader2,
+  Search,
   RefreshCw,
   Settings2,
   Upload,
@@ -19,12 +21,21 @@ import {
 import type { JobStatus } from "@trans-typesetting/schema";
 import {
   ApiError,
+  cancelJob,
   createDocument,
+  createDocumentsBatch,
+  getDocumentArtifact,
   getHealth,
   getJob,
+  getRuntimeConfig,
+  listDocumentArtifacts,
+  listJobs,
+  retryJob,
+  updateRuntimeConfig,
   verifyDownload,
   verifyPreview
 } from "./api";
+import type { ArtifactSummary, RuntimeConfig } from "./api";
 import "./styles.css";
 
 type UploadIssue = {
@@ -34,6 +45,7 @@ type UploadIssue = {
 
 type HealthState = "checking" | "online" | "offline";
 type PreviewState = "idle" | "loading" | "ready" | "error";
+type InspectorState = "idle" | "loading" | "ready" | "error";
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
@@ -44,6 +56,8 @@ const languageOptions = [
   { label: "한국어", value: "ko-KR" },
   { label: "English", value: "en-US" }
 ];
+
+const languageLabels = new Map(languageOptions.map((option) => [option.value, option.label]));
 
 const statuses: JobStatus["status"][] = [
   "queued",
@@ -59,7 +73,8 @@ const statusCopy: Record<JobStatus["status"], string> = {
   translating: "翻译",
   rendering: "排版",
   completed: "完成",
-  failed: "失败"
+  failed: "失败",
+  canceled: "已取消"
 };
 
 const statusDetail: Record<JobStatus["status"], string> = {
@@ -68,21 +83,46 @@ const statusDetail: Record<JobStatus["status"], string> = {
   translating: "生成译文内容",
   rendering: "生成预览与 PDF",
   completed: "译文 PDF 已就绪",
-  failed: "任务未完成"
+  failed: "任务未完成",
+  canceled: "任务已取消"
 };
 
 function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [targetLang, setTargetLang] = useState("zh-CN");
   const [job, setJob] = useState<JobStatus | null>(null);
   const [docId, setDocId] = useState<string | null>(null);
   const [healthState, setHealthState] = useState<HealthState>("checking");
   const [healthIssue, setHealthIssue] = useState<string | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
+  const [configDraft, setConfigDraft] = useState({
+    openai_base_url: "",
+    openai_model: "",
+    openai_api_key: "",
+    translation_concurrency: 2,
+    translator_max_attempts: 2,
+    render_font_stack: "Noto Sans CJK SC, Source Han Sans SC, Arial Unicode MS, sans-serif",
+    render_line_height: 1.35,
+    render_paragraph_spacing_em: 0.45,
+    render_min_font_scale: 0.86
+  });
+  const [configIssue, setConfigIssue] = useState<string | null>(null);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [jobHistory, setJobHistory] = useState<JobStatus[]>([]);
+  const [historyIssue, setHistoryIssue] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isCanceling, setIsCanceling] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isRetryingStatus, setIsRetryingStatus] = useState(false);
+  const [isRetryingJob, setIsRetryingJob] = useState(false);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
   const [previewIssue, setPreviewIssue] = useState<string | null>(null);
+  const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
+  const [artifactIssue, setArtifactIssue] = useState<string | null>(null);
+  const [selectedArtifact, setSelectedArtifact] = useState("renderer-diagnostics");
+  const [inspectorState, setInspectorState] = useState<InspectorState>("idle");
+  const [inspectorPayload, setInspectorPayload] = useState<string>("");
+  const [inspectorIssue, setInspectorIssue] = useState<string | null>(null);
   const [uploadIssue, setUploadIssue] = useState<UploadIssue | null>(null);
   const [taskIssue, setTaskIssue] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -100,10 +140,14 @@ function App() {
   const isTaskRunning = job
     ? ["queued", "parsing", "translating", "rendering"].includes(job.status)
     : false;
-  const canSubmit = Boolean(file) && !isUploading && !isTaskRunning && healthState === "online";
+  const canSubmit = files.length > 0 && !isUploading && !isTaskRunning && healthState === "online";
   const isComplete = job?.status === "completed" && Boolean(previewUrl);
   const hasBackendFailure = healthState === "offline";
   const artifactsReady = isComplete && previewState === "ready" && !previewIssue;
+  const configuredLanguages = runtimeConfig?.allowed_target_langs.length
+    ? runtimeConfig.allowed_target_langs
+    : languageOptions.map((option) => option.value);
+  const maxUploadBytes = runtimeConfig?.max_upload_bytes ?? MAX_UPLOAD_BYTES;
 
   const checkHealth = useCallback(async () => {
     setHealthIssue(null);
@@ -119,6 +163,45 @@ function App() {
     }
   }, []);
 
+  const refreshConfig = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const config = await getRuntimeConfig({ signal });
+      setRuntimeConfig(config);
+      setConfigDraft({
+        openai_base_url: config.openai_base_url,
+        openai_model: config.openai_model,
+        openai_api_key: "",
+        translation_concurrency: config.translation_concurrency,
+        translator_max_attempts: config.translator_max_attempts,
+        render_font_stack: config.render_defaults.font_stack?.join(", ") ?? "",
+        render_line_height: config.render_defaults.line_height ?? 1.35,
+        render_paragraph_spacing_em: config.render_defaults.paragraph_spacing_em ?? 0.45,
+        render_min_font_scale: config.render_defaults.overflow_policy?.min_font_scale ?? 0.86
+      });
+      setConfigIssue(null);
+      if (!config.allowed_target_langs.includes(targetLang)) {
+        setTargetLang(config.default_target_lang);
+      }
+      return config;
+    } catch (reason) {
+      const message = apiMessage(reason, "无法读取运行配置。");
+      setConfigIssue(message);
+      return null;
+    }
+  }, [targetLang]);
+
+  const refreshHistory = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const history = await listJobs({ signal });
+      setJobHistory(history);
+      setHistoryIssue(null);
+      return history;
+    } catch (reason) {
+      setHistoryIssue(apiMessage(reason, "无法读取任务历史。"));
+      return [];
+    }
+  }, []);
+
   const refreshJob = useCallback(async (jobId: string, signal?: AbortSignal) => {
     const nextJob = await getJob(jobId, { signal });
     setJob(nextJob);
@@ -131,6 +214,13 @@ function App() {
   useEffect(() => {
     void checkHealth();
   }, [checkHealth]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void refreshConfig(controller.signal);
+    void refreshHistory(controller.signal);
+    return () => controller.abort();
+  }, [refreshConfig, refreshHistory]);
 
   useEffect(() => {
     if (!job || job.status === "completed" || job.status === "failed") {
@@ -188,6 +278,8 @@ function App() {
 
   useEffect(() => {
     if (!isComplete || !activeDocId) {
+      setArtifacts([]);
+      setArtifactIssue(null);
       return;
     }
 
@@ -201,9 +293,53 @@ function App() {
         setPreviewIssue(previewMessage(reason));
       }
     });
+    void listDocumentArtifacts(activeDocId, { signal: controller.signal })
+      .then((payload) => {
+        setArtifacts(payload.artifacts);
+        setArtifactIssue(null);
+        const selected = payload.artifacts.find(
+          (artifact) => artifact.name === selectedArtifact && artifact.available
+        );
+        if (!selected) {
+          setSelectedArtifact(
+            payload.artifacts.find((artifact) => artifact.available)?.name ?? "renderer-diagnostics"
+          );
+        }
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setArtifactIssue(apiMessage(reason, "无法读取调试 artifact。"));
+        }
+      });
 
     return () => controller.abort();
-  }, [activeDocId, isComplete]);
+  }, [activeDocId, isComplete, selectedArtifact]);
+
+  useEffect(() => {
+    if (!activeDocId || !isComplete || !artifacts.some((artifact) => artifact.name === selectedArtifact && artifact.available)) {
+      setInspectorState("idle");
+      setInspectorPayload("");
+      setInspectorIssue(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    setInspectorState("loading");
+    setInspectorIssue(null);
+    void getDocumentArtifact(activeDocId, selectedArtifact, { signal: controller.signal })
+      .then((payload) => {
+        setInspectorPayload(JSON.stringify(payload, null, 2));
+        setInspectorState("ready");
+      })
+      .catch((reason) => {
+        if (!controller.signal.aborted) {
+          setInspectorState("error");
+          setInspectorIssue(apiMessage(reason, "无法读取调试 artifact。"));
+        }
+      });
+
+    return () => controller.abort();
+  }, [activeDocId, artifacts, isComplete, selectedArtifact]);
 
   function resetFileInput() {
     if (inputRef.current) {
@@ -212,35 +348,44 @@ function App() {
   }
 
   function clearFile() {
-    setFile(null);
+    setFiles([]);
     setUploadIssue(null);
     resetFileInput();
   }
 
-  function handleFile(nextFile: File | undefined) {
-    if (!nextFile) {
+  function handleFiles(nextFiles: FileList | File[] | null | undefined) {
+    const selectedFiles = Array.from(nextFiles ?? []);
+    if (!selectedFiles.length) {
       return;
     }
 
-    if (!isPdfFile(nextFile)) {
-      setFile(null);
+    const invalidFile = selectedFiles.find((nextFile) => !isPdfFile(nextFile));
+    if (invalidFile) {
+      setFiles([]);
       setUploadIssue({ kind: "error", message: "仅支持 PDF 文件，请重新选择。" });
       resetFileInput();
       return;
     }
 
-    if (nextFile.size > MAX_UPLOAD_BYTES) {
-      setFile(null);
+    const oversizedFile = selectedFiles.find((nextFile) => nextFile.size > maxUploadBytes);
+    if (oversizedFile) {
+      setFiles([]);
       setUploadIssue({
         kind: "error",
-        message: `PDF 文件不能超过 ${formatFileSize(MAX_UPLOAD_BYTES)}。`
+        message: `PDF 文件不能超过 ${formatFileSize(maxUploadBytes)}。`
       });
       resetFileInput();
       return;
     }
 
-    setFile(nextFile);
-    setUploadIssue({ kind: "info", message: "已选择 PDF，可以开始翻译。" });
+    setFiles(selectedFiles);
+    setUploadIssue({
+      kind: "info",
+      message:
+        selectedFiles.length === 1
+          ? "已选择 PDF，可以开始翻译。"
+          : `已选择 ${selectedFiles.length} 个 PDF，可以批量翻译。`
+    });
     setTaskIssue(null);
   }
 
@@ -260,7 +405,7 @@ function App() {
   function handleDrop(event: React.DragEvent<HTMLButtonElement>) {
     event.preventDefault();
     setIsDraggingFile(false);
-    handleFile(event.dataTransfer.files?.[0]);
+    handleFiles(event.dataTransfer.files);
   }
 
   async function retryStatus() {
@@ -280,14 +425,71 @@ function App() {
     }
   }
 
+  async function cancelCurrentJob() {
+    if (!job || !isTaskRunning) {
+      return;
+    }
+    setIsCanceling(true);
+    try {
+      const canceled = await cancelJob(job.job_id);
+      setJob(canceled);
+      setTaskIssue(null);
+      await refreshHistory();
+    } catch (reason) {
+      setTaskIssue(apiMessage(reason, "取消任务失败。"));
+    } finally {
+      setIsCanceling(false);
+    }
+  }
+
+  async function retryCurrentJob() {
+    if (!job || !["failed", "canceled"].includes(job.status)) {
+      return;
+    }
+    setIsRetryingJob(true);
+    try {
+      const payload = await retryJob(job.job_id);
+      setDocId(payload.doc_id);
+      await refreshJob(payload.job_id);
+      await refreshHistory();
+      setTaskIssue(null);
+    } catch (reason) {
+      setTaskIssue(apiMessage(reason, "重新排队失败。"));
+    } finally {
+      setIsRetryingJob(false);
+    }
+  }
+
+  async function saveRuntimeConfig() {
+    setIsSavingConfig(true);
+    try {
+      const config = await updateRuntimeConfig({
+        default_target_lang: targetLang,
+        openai_base_url: configDraft.openai_base_url,
+        openai_model: configDraft.openai_model,
+        openai_api_key: configDraft.openai_api_key || undefined,
+        translation_concurrency: configDraft.translation_concurrency,
+        translator_max_attempts: configDraft.translator_max_attempts,
+        render_defaults: buildRenderDefaultsPayload(runtimeConfig, configDraft, targetLang)
+      });
+      setRuntimeConfig(config);
+      setConfigDraft((draft) => ({ ...draft, openai_api_key: "" }));
+      setConfigIssue(null);
+    } catch (reason) {
+      setConfigIssue(apiMessage(reason, "保存运行配置失败。"));
+    } finally {
+      setIsSavingConfig(false);
+    }
+  }
+
   async function submit() {
-    if (!file) {
+    if (!files.length) {
       setUploadIssue({ kind: "error", message: "请选择一个英文 PDF 文件。" });
       return;
     }
 
-    if (!isPdfFile(file) || file.size > MAX_UPLOAD_BYTES) {
-      handleFile(file);
+    if (files.some((selectedFile) => !isPdfFile(selectedFile) || selectedFile.size > maxUploadBytes)) {
+      handleFiles(files);
       return;
     }
 
@@ -301,9 +503,18 @@ function App() {
       if (!(await checkHealth())) {
         throw new Error("后端服务不可用，请先启动 API。");
       }
-      const payload = await createDocument(file, targetLang);
-      setDocId(payload.doc_id);
-      await refreshJob(payload.job_id);
+      if (files.length === 1) {
+        const payload = await createDocument(files[0], targetLang);
+        setDocId(payload.doc_id);
+        await refreshJob(payload.job_id);
+      } else {
+        const payload = await createDocumentsBatch(files, targetLang);
+        if (payload.jobs[0]) {
+          setDocId(payload.jobs[0].doc_id);
+          await refreshJob(payload.jobs[0].job_id);
+        }
+      }
+      await refreshHistory();
     } catch (reason) {
       setTaskIssue(apiMessage(reason, "上传失败。"));
     } finally {
@@ -328,7 +539,7 @@ function App() {
           <section className="tool-section" aria-labelledby="upload-heading">
             <SectionTitle id="upload-heading" icon={<Upload size={16} />} title="上传" />
             <button
-              className={`upload-zone${file ? " has-file" : ""}${isDraggingFile ? " is-dragging" : ""}${uploadIssue?.kind === "error" ? " has-error" : ""}`}
+              className={`upload-zone${files.length ? " has-file" : ""}${isDraggingFile ? " is-dragging" : ""}${uploadIssue?.kind === "error" ? " has-error" : ""}`}
               type="button"
               aria-describedby="upload-feedback"
               onClick={() => inputRef.current?.click()}
@@ -340,10 +551,16 @@ function App() {
                 <FileText size={28} />
               </span>
               <span className="upload-main">
-                {file ? (
+                {files.length ? (
                   <>
-                    <span className="file-name">{file.name}</span>
-                    <span className="file-meta">{formatFileSize(file.size)}</span>
+                    <span className="file-name">
+                      {files.length === 1 ? files[0].name : `${files.length} 个 PDF 文件`}
+                    </span>
+                    <span className="file-meta">
+                      {files.length === 1
+                        ? formatFileSize(files[0].size)
+                        : formatFileSize(files.reduce((total, selectedFile) => total + selectedFile.size, 0))}
+                    </span>
                   </>
                 ) : (
                   <>
@@ -353,7 +570,7 @@ function App() {
                 )}
               </span>
               <span className="upload-action">
-                {file ? "更换" : "浏览"}
+                {files.length ? "更换" : "浏览"}
                 <ChevronRight size={16} />
               </span>
             </button>
@@ -361,12 +578,13 @@ function App() {
               ref={inputRef}
               className="hidden-input"
               type="file"
+              multiple
               accept="application/pdf,.pdf"
-              onChange={(event) => handleFile(event.target.files?.[0])}
+              onChange={(event) => handleFiles(event.target.files)}
             />
             <div className="upload-footer" id="upload-feedback">
               <InlineNotice issue={uploadIssue} />
-              {file ? (
+              {files.length ? (
                 <button className="ghost-button" type="button" onClick={clearFile}>
                   <X size={15} />
                   移除文件
@@ -383,20 +601,38 @@ function App() {
                 目标语言
               </span>
               <select value={targetLang} onChange={(event) => setTargetLang(event.target.value)}>
-                {languageOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
+                {configuredLanguages.map((lang) => (
+                  <option key={lang} value={lang}>
+                    {languageLabels.get(lang) ?? lang}
                   </option>
                 ))}
               </select>
             </label>
-            <div className="model-slot" aria-label="Future model configuration">
-              <div>
-                <span className="model-slot-label">模型配置</span>
-                <strong>后续接入</strong>
-              </div>
-              <span className="slot-badge">预留</span>
-            </div>
+            <RuntimeConfigCard
+              config={runtimeConfig}
+              draft={configDraft}
+              issue={configIssue}
+              isSaving={isSavingConfig}
+              onDraftChange={setConfigDraft}
+              onSave={saveRuntimeConfig}
+            />
+          </section>
+
+          <section className="tool-section" aria-labelledby="history-heading">
+            <SectionTitle id="history-heading" icon={<History size={16} />} title="历史" />
+            <HistoryList
+              jobs={jobHistory}
+              issue={historyIssue}
+              activeJobId={job?.job_id ?? null}
+              onRefresh={() => void refreshHistory()}
+              onRestore={(historyJob) => {
+                setJob(historyJob);
+                setDocId(historyJob.doc_id ?? null);
+                setTaskIssue(historyJob.error ?? null);
+                setPreviewIssue(null);
+                setPreviewState(historyJob.status === "completed" ? "loading" : "idle");
+              }}
+            />
           </section>
 
           <section className="tool-section task-section" aria-labelledby="task-heading">
@@ -414,8 +650,12 @@ function App() {
               job={job}
               isUploading={isUploading}
               isRetryingStatus={isRetryingStatus}
+              isCanceling={isCanceling}
+              isRetryingJob={isRetryingJob}
               issue={taskIssue}
               onRetryStatus={retryStatus}
+              onCancel={cancelCurrentJob}
+              onRetryJob={retryCurrentJob}
             />
             {artifactsReady && downloadUrl ? (
               <a className="download" href={downloadUrl}>
@@ -473,6 +713,15 @@ function App() {
               />
             )}
           </div>
+          <SchemaInspector
+            artifacts={artifacts}
+            issue={artifactIssue}
+            selectedArtifact={selectedArtifact}
+            state={inspectorState}
+            payload={inspectorPayload}
+            payloadIssue={inspectorIssue}
+            onSelect={setSelectedArtifact}
+          />
         </section>
       </section>
     </main>
@@ -539,35 +788,269 @@ function InlineNotice({ issue }: { issue: UploadIssue | null }) {
   );
 }
 
+function RuntimeConfigCard({
+  config,
+  draft,
+  issue,
+  isSaving,
+  onDraftChange,
+  onSave
+}: {
+  config: RuntimeConfig | null;
+  draft: {
+    openai_base_url: string;
+    openai_model: string;
+    openai_api_key: string;
+    translation_concurrency: number;
+    translator_max_attempts: number;
+    render_font_stack: string;
+    render_line_height: number;
+    render_paragraph_spacing_em: number;
+    render_min_font_scale: number;
+  };
+  issue: string | null;
+  isSaving: boolean;
+  onDraftChange: React.Dispatch<React.SetStateAction<{
+    openai_base_url: string;
+    openai_model: string;
+    openai_api_key: string;
+    translation_concurrency: number;
+    translator_max_attempts: number;
+    render_font_stack: string;
+    render_line_height: number;
+    render_paragraph_spacing_em: number;
+    render_min_font_scale: number;
+  }>>;
+  onSave: () => void;
+}) {
+  const provider = config?.translator_provider ?? "deterministic";
+  const isConfigured = config?.openai_api_key_configured ?? false;
+  return (
+    <div className={`model-slot config-editor${issue ? " warning" : ""}`} aria-label="Model configuration">
+      <div className="config-summary">
+        <div>
+          <span className="model-slot-label">模型配置</span>
+          <strong>{issue ? issue : provider === "deterministic" ? "Deterministic 本地模式" : config?.openai_model}</strong>
+          <small>
+            {config
+              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · 尝试 ${config.translator_max_attempts} · 行高 ${config.render_defaults.line_height}`
+              : "读取后端配置中"}
+          </small>
+        </div>
+        <span className={`slot-badge${isConfigured ? " active" : ""}`}>
+          {isConfigured ? "已配置" : "本地"}
+        </span>
+      </div>
+      <label>
+        <span>Base URL</span>
+        <input
+          value={draft.openai_base_url}
+          onChange={(event) =>
+            onDraftChange((current) => ({ ...current, openai_base_url: event.target.value }))
+          }
+        />
+      </label>
+      <label>
+        <span>Model</span>
+        <input
+          value={draft.openai_model}
+          onChange={(event) =>
+            onDraftChange((current) => ({ ...current, openai_model: event.target.value }))
+          }
+        />
+      </label>
+      <label>
+        <span>API Key</span>
+        <input
+          type="password"
+          value={draft.openai_api_key}
+          placeholder={isConfigured ? "留空保持不变" : ""}
+          onChange={(event) =>
+            onDraftChange((current) => ({ ...current, openai_api_key: event.target.value }))
+          }
+        />
+      </label>
+      <div className="config-numbers">
+        <label>
+          <span>并发</span>
+          <input
+            type="number"
+            min={1}
+            max={16}
+            value={draft.translation_concurrency}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                translation_concurrency: clampInt(event.target.value, 1, 16)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>尝试</span>
+          <input
+            type="number"
+            min={1}
+            max={5}
+            value={draft.translator_max_attempts}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                translator_max_attempts: clampInt(event.target.value, 1, 5)
+              }))
+            }
+          />
+        </label>
+      </div>
+      <label>
+        <span>字体栈</span>
+        <input
+          value={draft.render_font_stack}
+          onChange={(event) =>
+            onDraftChange((current) => ({ ...current, render_font_stack: event.target.value }))
+          }
+        />
+      </label>
+      <div className="config-numbers">
+        <label>
+          <span>行高</span>
+          <input
+            type="number"
+            min={1}
+            max={2}
+            step={0.05}
+            value={draft.render_line_height}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                render_line_height: clampNumber(event.target.value, 1, 2)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>段距</span>
+          <input
+            type="number"
+            min={0}
+            max={2}
+            step={0.05}
+            value={draft.render_paragraph_spacing_em}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                render_paragraph_spacing_em: clampNumber(event.target.value, 0, 2)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>最小缩放</span>
+          <input
+            type="number"
+            min={0.5}
+            max={1}
+            step={0.01}
+            value={draft.render_min_font_scale}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                render_min_font_scale: clampNumber(event.target.value, 0.5, 1)
+              }))
+            }
+          />
+        </label>
+      </div>
+      <button className="secondary-action" type="button" onClick={onSave} disabled={isSaving || !config}>
+        {isSaving ? <Loader2 className="spin" size={15} /> : <Settings2 size={15} />}
+        <span>{isSaving ? "保存中" : "保存配置"}</span>
+      </button>
+    </div>
+  );
+}
+
+function HistoryList({
+  jobs,
+  issue,
+  activeJobId,
+  onRefresh,
+  onRestore
+}: {
+  jobs: JobStatus[];
+  issue: string | null;
+  activeJobId: string | null;
+  onRefresh: () => void;
+  onRestore: (job: JobStatus) => void;
+}) {
+  return (
+    <div className="history-box">
+      <div className="history-head">
+        <span>{jobs.length ? `${jobs.length} 个任务` : "暂无任务"}</span>
+        <button type="button" onClick={onRefresh} aria-label="Refresh job history">
+          <RefreshCw size={14} />
+        </button>
+      </div>
+      {issue ? <p className="history-issue">{issue}</p> : null}
+      {jobs.length ? (
+        <ul className="history-list">
+          {jobs.slice(0, 5).map((historyJob) => (
+            <li key={historyJob.job_id}>
+              <button
+                type="button"
+                className={historyJob.job_id === activeJobId ? "active" : ""}
+                onClick={() => onRestore(historyJob)}
+              >
+                <span>{historyJob.filename}</span>
+                <small>{statusCopy[historyJob.status]} · {Math.round(normalizeProgress(historyJob.progress) * 100)}%</small>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 function JobProgress({
   job,
   isUploading,
   isRetryingStatus,
+  isCanceling,
+  isRetryingJob,
   issue,
-  onRetryStatus
+  onRetryStatus,
+  onCancel,
+  onRetryJob
 }: {
   job: JobStatus | null;
   isUploading: boolean;
   isRetryingStatus: boolean;
+  isCanceling: boolean;
+  isRetryingJob: boolean;
   issue: string | null;
   onRetryStatus: () => void;
+  onCancel: () => void;
+  onRetryJob: () => void;
 }) {
   const status = isUploading ? "queued" : job?.status;
   const progress = normalizeProgress(isUploading ? 0.04 : job?.progress ?? 0);
   const currentIndex = status ? statuses.indexOf(status) : -1;
   const visibleMessage = issue ?? job?.error ?? job?.message ?? (isUploading ? "正在提交文件。" : null);
   const isFailed = status === "failed" || Boolean(issue && !job);
-  const hasWarning = Boolean(issue && job && status !== "failed");
+  const isCanceled = status === "canceled";
+  const hasWarning = Boolean(issue && job && status !== "failed" && status !== "canceled");
   const isDone = status === "completed";
   const canRetryStatus = Boolean(job && issue && status !== "completed" && status !== "failed");
+  const canCancel = Boolean(job && ["queued", "parsing", "translating", "rendering"].includes(job.status));
+  const canRetryJob = Boolean(job && ["failed", "canceled"].includes(job.status));
 
   return (
-    <div className={`job-card${isFailed ? " failed" : ""}${hasWarning ? " warning" : ""}${isDone ? " completed" : ""}`} aria-live="polite">
+    <div className={`job-card${isFailed || isCanceled ? " failed" : ""}${hasWarning ? " warning" : ""}${isDone ? " completed" : ""}`} aria-live="polite">
       <div className="job-card-head">
         <div className="status-icon" aria-hidden="true">
           {isDone ? (
             <CheckCircle2 size={18} />
-          ) : isFailed ? (
+          ) : isFailed || isCanceled ? (
             <XCircle size={18} />
           ) : hasWarning ? (
             <AlertCircle size={18} />
@@ -611,9 +1094,29 @@ function JobProgress({
             <small>失败</small>
           </li>
         ) : null}
+        {status === "canceled" ? (
+          <li className="active failed-step">
+            <span aria-hidden="true" />
+            <small>取消</small>
+          </li>
+        ) : null}
       </ol>
 
+      {job?.chunks?.length ? <ChunkProgressList chunks={job.chunks} /> : null}
+
       {visibleMessage ? <p className="job-message">{visibleMessage}</p> : null}
+      {canCancel ? (
+        <button className="secondary-action danger" type="button" onClick={onCancel} disabled={isCanceling}>
+          {isCanceling ? <Loader2 className="spin" size={15} /> : <XCircle size={15} />}
+          <span>{isCanceling ? "取消中" : "取消任务"}</span>
+        </button>
+      ) : null}
+      {canRetryJob ? (
+        <button className="secondary-action" type="button" onClick={onRetryJob} disabled={isRetryingJob}>
+          {isRetryingJob ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
+          <span>{isRetryingJob ? "排队中" : "重新排队"}</span>
+        </button>
+      ) : null}
       {canRetryStatus ? (
         <button className="secondary-action" type="button" onClick={onRetryStatus} disabled={isRetryingStatus}>
           {isRetryingStatus ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}
@@ -621,6 +1124,97 @@ function JobProgress({
         </button>
       ) : null}
     </div>
+  );
+}
+
+function ChunkProgressList({ chunks }: { chunks: NonNullable<JobStatus["chunks"]> }) {
+  return (
+    <ul className="chunk-list" aria-label="Chunk progress">
+      {chunks.map((chunk) => (
+        <li key={chunk.chunk_id} className={chunk.status}>
+          <div>
+            <span>{chunk.index}/{chunk.total}</span>
+            <strong>{chunk.status}</strong>
+          </div>
+          <div
+            className="chunk-meter"
+            role="progressbar"
+            aria-label={`${chunk.chunk_id} progress`}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(normalizeProgress(chunk.progress) * 100)}
+          >
+            <span style={{ width: `${Math.round(normalizeProgress(chunk.progress) * 100)}%` }} />
+          </div>
+          {chunk.quality_flags?.length ? (
+            <small>{chunk.quality_flags.slice(0, 3).join(", ")}</small>
+          ) : chunk.error ? (
+            <small>{chunk.error}</small>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function SchemaInspector({
+  artifacts,
+  issue,
+  selectedArtifact,
+  state,
+  payload,
+  payloadIssue,
+  onSelect
+}: {
+  artifacts: ArtifactSummary[];
+  issue: string | null;
+  selectedArtifact: string;
+  state: InspectorState;
+  payload: string;
+  payloadIssue: string | null;
+  onSelect: (artifactName: string) => void;
+}) {
+  const availableArtifacts = artifacts.filter((artifact) => artifact.available);
+  return (
+    <aside className="schema-inspector" aria-label="Schema inspector">
+      <div className="inspector-head">
+        <div>
+          <span>Inspector</span>
+          <strong>Schema 与诊断</strong>
+        </div>
+        <Search size={18} aria-hidden="true" />
+      </div>
+      <div className="artifact-tabs" role="tablist" aria-label="Debug artifacts">
+        {artifacts.map((artifact) => (
+          <button
+            key={artifact.name}
+            type="button"
+            role="tab"
+            aria-selected={artifact.name === selectedArtifact}
+            disabled={!artifact.available}
+            className={artifact.name === selectedArtifact ? "active" : ""}
+            onClick={() => onSelect(artifact.name)}
+          >
+            {artifactLabel(artifact.name)}
+          </button>
+        ))}
+      </div>
+      <div className="artifact-body">
+        {issue ? (
+          <p className="artifact-message failed">{issue}</p>
+        ) : !availableArtifacts.length ? (
+          <p className="artifact-message">任务完成后显示 DocumentIR、chunks、plans 和 renderer diagnostics。</p>
+        ) : state === "loading" ? (
+          <p className="artifact-message">读取 artifact 中。</p>
+        ) : state === "error" ? (
+          <p className="artifact-message failed">{payloadIssue ?? "读取 artifact 失败。"}</p>
+        ) : payload ? (
+          <pre>{payload}</pre>
+        ) : (
+          <p className="artifact-message">选择可用 artifact。</p>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -681,6 +1275,60 @@ function normalizeProgress(progress: number) {
   return Math.min(1, Math.max(0, progress));
 }
 
+function clampInt(value: string, min: number, max: number) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function clampNumber(value: string, min: number, max: number) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, Number(parsed.toFixed(2))));
+}
+
+function parseFontStack(value: string) {
+  const fonts = value
+    .split(",")
+    .map((font) => font.trim())
+    .filter(Boolean);
+  return fonts.length ? fonts : ["Noto Sans CJK SC", "Source Han Sans SC", "Arial Unicode MS", "sans-serif"];
+}
+
+function buildRenderDefaultsPayload(
+  config: RuntimeConfig | null,
+  draft: {
+    render_font_stack: string;
+    render_line_height: number;
+    render_paragraph_spacing_em: number;
+    render_min_font_scale: number;
+  },
+  targetLang: string
+) {
+  const current = config?.render_defaults;
+  return {
+    ...current,
+    target_lang: targetLang,
+    font_stack: parseFontStack(draft.render_font_stack),
+    line_height: draft.render_line_height,
+    paragraph_spacing_em: draft.render_paragraph_spacing_em,
+    alignment: current?.alignment,
+    overflow_policy: {
+      strategy: "scale_then_expand_then_continue" as const,
+      max_font_scale: 1,
+      allow_box_expansion: true,
+      allow_continuation_page: true,
+      ...current?.overflow_policy,
+      min_font_scale: draft.render_min_font_scale
+    },
+    preserve_policy: current?.preserve_policy
+  };
+}
+
 function apiMessage(reason: unknown, fallback: string) {
   if (reason instanceof Error && reason.message) {
     return reason.message;
@@ -693,6 +1341,25 @@ function previewMessage(reason: unknown) {
     return "任务已完成，但预览或 PDF 文件不存在。";
   }
   return apiMessage(reason, "预览或下载资源不可用。");
+}
+
+function artifactLabel(name: string) {
+  switch (name) {
+    case "document-ir":
+      return "IR";
+    case "translation-chunks":
+      return "Chunks";
+    case "translation-plans":
+      return "Plans";
+    case "renderer-diagnostics":
+      return "Diagnostics";
+    case "translation-progress":
+      return "Progress";
+    case "parser-diagnostics":
+      return "Parser";
+    default:
+      return name;
+  }
 }
 
 createRoot(document.getElementById("root")!).render(
