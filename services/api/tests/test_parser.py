@@ -2,6 +2,7 @@ from app.pipeline.parser import (
     UnsupportedPdfError,
     build_parser_diagnostics,
     _extract_assets,
+    _extract_assets_from_page,
     _filter_header_footer_blocks,
     _header_footer_keys,
     _order_text_blocks,
@@ -104,6 +105,28 @@ def test_extract_assets_writes_image_and_records_api_path(tmp_path) -> None:
     asset = assets[0]
     assert asset.asset_id == _stable_asset_id("p0001", 1, (10, 20, 110, 90))
     assert asset.kind == "image"
+    assert asset.path == f"/api/documents/doc_1/assets/{asset.asset_id}.png"
+    assert (tmp_path / f"{asset.asset_id}.png").read_bytes() == b"image-bytes"
+
+
+def test_extract_assets_from_page_uses_image_info_without_text_dict_payload(tmp_path) -> None:
+    class FakeDocument:
+        def extract_image(self, xref: int) -> dict:
+            assert xref == 7
+            return {"image": b"image-bytes", "ext": "png"}
+
+    class FakePage:
+        parent = FakeDocument()
+
+        def get_image_info(self, xrefs: bool = False) -> list[dict]:
+            assert xrefs is True
+            return [{"xref": 7, "bbox": (10, 20, 110, 90)}]
+
+    assets = _extract_assets_from_page("doc_1", "p0001", FakePage(), tmp_path)
+
+    assert len(assets) == 1
+    asset = assets[0]
+    assert asset.asset_id == _stable_asset_id("p0001", 1, (10, 20, 110, 90))
     assert asset.path == f"/api/documents/doc_1/assets/{asset.asset_id}.png"
     assert (tmp_path / f"{asset.asset_id}.png").read_bytes() == b"image-bytes"
 

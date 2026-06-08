@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from typing import Any
 
 from pdf_translator_schema import (
     Asset,
@@ -13,10 +14,11 @@ from pdf_translator_schema import (
     PageSize,
     StyleSeed,
 )
-from pdf_translator_schema.models import DocumentBlock
+from pdf_translator_schema.models import DocumentBlock, TextLineIR, TextSpanIR
 
 HEADER_FOOTER_BAND_RATIO = 0.08
 MIN_TEXT_BLOCKS_FOR_DIGITAL_PDF = 1
+TEXT_DICT_FLAGS = 0
 
 
 class UnsupportedPdfError(ValueError):
@@ -208,6 +210,126 @@ def _stable_vector_asset_id(
     return f"{page_id}_v{digest[:12]}"
 
 
+def _text_dict_flags_without_images() -> int:
+    try:
+        import fitz
+    except Exception:
+        return TEXT_DICT_FLAGS
+
+    base_flags = int(getattr(fitz, "TEXTFLAGS_DICT", TEXT_DICT_FLAGS))
+    preserve_images = int(getattr(fitz, "TEXT_PRESERVE_IMAGES", 0))
+    return base_flags & ~preserve_images
+
+
+def _extract_assets_from_page(
+    doc_id: str,
+    page_id: str,
+    page: Any,
+    asset_output_dir: Path | None,
+) -> list[Asset]:
+    image_infos = []
+    try:
+        image_infos = page.get_image_info(xrefs=True)
+    except TypeError:
+        try:
+            image_infos = page.get_image_info()
+        except Exception:
+            image_infos = []
+    except Exception:
+        image_infos = []
+
+    assets: list[Asset] = []
+    seen_bboxes: set[tuple[float, float, float, float]] = set()
+    for image_index, info in enumerate(image_infos, start=1):
+        bbox = info.get("bbox") if isinstance(info, dict) else None
+        if bbox is None:
+            continue
+        bbox_tuple = _coerce_bbox_tuple(bbox)
+        if bbox_tuple is None:
+            continue
+        bbox_key = tuple(round(value, 1) for value in bbox_tuple)
+        if bbox_key in seen_bboxes:
+            continue
+        seen_bboxes.add(bbox_key)
+        asset_id = _stable_asset_id(page_id, image_index, bbox_tuple)
+        asset_path: str | None = None
+        if asset_output_dir is not None:
+            image_bytes, extension = _extract_image_bytes(page.parent, info)
+            if image_bytes is not None:
+                asset_output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = asset_output_dir / f"{asset_id}.{extension}"
+                output_path.write_bytes(image_bytes)
+                asset_path = f"/api/documents/{doc_id}/assets/{output_path.name}"
+        assets.append(
+            Asset(
+                asset_id=asset_id,
+                page_id=page_id,
+                kind="image",
+                bbox=BoundingBox(
+                    x0=bbox_tuple[0],
+                    y0=bbox_tuple[1],
+                    x1=bbox_tuple[2],
+                    y1=bbox_tuple[3],
+                ),
+                path=asset_path,
+                alt_text="Extracted PDF image asset",
+            )
+        )
+    return assets
+
+
+def _coerce_bbox_tuple(value: object) -> tuple[float, float, float, float] | None:
+    try:
+        if hasattr(value, "x0"):
+            return (float(value.x0), float(value.y0), float(value.x1), float(value.y1))
+        if isinstance(value, (list, tuple)) and len(value) >= 4:
+            return (
+                float(value[0]),
+                float(value[1]),
+                float(value[2]),
+                float(value[3]),
+            )
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _bbox_from_tuple(value: tuple[float, float, float, float]) -> BoundingBox:
+    return BoundingBox(x0=value[0], y0=value[1], x1=value[2], y1=value[3])
+
+
+def _valid_bbox_tuple(value: tuple[float, float, float, float] | None) -> bool:
+    return value is not None and value[2] > value[0] and value[3] > value[1]
+
+
+def _bbox_union(values: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float] | None:
+    if not values:
+        return None
+    return (
+        min(value[0] for value in values),
+        min(value[1] for value in values),
+        max(value[2] for value in values),
+        max(value[3] for value in values),
+    )
+
+
+def _extract_image_bytes(document: Any, image_info: dict) -> tuple[bytes, str] | tuple[None, str]:
+    xref = image_info.get("xref")
+    if not isinstance(xref, int) or xref <= 0:
+        return None, "png"
+    try:
+        extracted = document.extract_image(xref)
+    except Exception:
+        return None, "png"
+    image_bytes = extracted.get("image") if isinstance(extracted, dict) else None
+    extension = str(extracted.get("ext") if isinstance(extracted, dict) else "png").lower()
+    if extension not in {"png", "jpg", "jpeg", "webp"}:
+        extension = "png"
+    if not isinstance(image_bytes, bytes):
+        return None, extension
+    return image_bytes, extension
+
+
 def _extract_assets(
     doc_id: str,
     page_id: str,
@@ -293,10 +415,11 @@ def parse_pdf(
     import fitz
 
     document = fitz.open(pdf_path)
+    text_flags = _text_dict_flags_without_images()
     pages: list[DocumentPage] = []
     page_dicts: list[dict] = []
     for page in document:
-        page_dict = page.get_text("dict")
+        page_dict = page.get_text("dict", flags=text_flags)
         page_dict["height"] = page.rect.height
         page_dict["width"] = page.rect.width
         page_dicts.append(page_dict)
@@ -306,7 +429,7 @@ def parse_pdf(
         page_id = f"p{page_index + 1:04d}"
         page_dict = page_dicts[page_index]
         page_blocks: list[DocumentBlock] = []
-        page_assets = _extract_assets(doc_id, page_id, page_dict, asset_output_dir)
+        page_assets = _extract_assets_from_page(doc_id, page_id, page, asset_output_dir)
         page_assets.extend(_extract_vector_assets(page, page_id))
 
         text_blocks = _order_text_blocks(
@@ -316,7 +439,6 @@ def parse_pdf(
 
         for block_index, block in enumerate(text_blocks):
             text_parts: list[str] = []
-            span_refs: list[str] = []
             font_sizes: list[float] = []
             font_names: list[str] = []
             is_bold = False
@@ -327,7 +449,6 @@ def parse_pdf(
                 for span_index, span in enumerate(line.get("spans", [])):
                     text = span.get("text", "")
                     line_text += text
-                    span_refs.append(f"{page_id}:b{block_index}:l{line_index}:s{span_index}")
                     size = span.get("size")
                     if isinstance(size, (int, float)):
                         font_sizes.append(float(size))
@@ -350,6 +471,61 @@ def parse_pdf(
             bbox = block["bbox"]
             avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 10.0
             block_id = _stable_block_id(page_id, source_text, tuple(float(value) for value in bbox))
+            lines: list[TextLineIR] = []
+            spans: list[TextSpanIR] = []
+            span_refs: list[str] = []
+            for line_index, line in enumerate(block.get("lines", [])):
+                line_text = ""
+                line_span_ids: list[str] = []
+                line_bboxes: list[tuple[float, float, float, float]] = []
+                for span_index, span in enumerate(line.get("spans", [])):
+                    text = str(span.get("text", ""))
+                    span_bbox_tuple = _coerce_bbox_tuple(span.get("bbox"))
+                    if not _valid_bbox_tuple(span_bbox_tuple):
+                        continue
+                    span_id = f"{page_id}:{block_id}:l{line_index}:s{span_index}"
+                    line_id = f"{page_id}:{block_id}:l{line_index}"
+                    size = span.get("size")
+                    flags = span.get("flags")
+                    color = span.get("color")
+                    origin_value = span.get("origin")
+                    origin: tuple[float, float] | None = None
+                    if isinstance(origin_value, (list, tuple)) and len(origin_value) >= 2:
+                        try:
+                            origin = (float(origin_value[0]), float(origin_value[1]))
+                        except (TypeError, ValueError):
+                            origin = None
+                    spans.append(
+                        TextSpanIR(
+                            span_id=span_id,
+                            page_id=page_id,
+                            block_id=block_id,
+                            line_id=line_id,
+                            text=text,
+                            bbox=_bbox_from_tuple(span_bbox_tuple),
+                            font_name=str(span.get("font", "")) or None,
+                            font_size=float(size) if isinstance(size, (int, float)) else None,
+                            flags=int(flags) if isinstance(flags, int) else None,
+                            color=f"#{int(color):06x}" if isinstance(color, int) else None,
+                            origin=origin,
+                        )
+                    )
+                    span_refs.append(span_id)
+                    line_span_ids.append(span_id)
+                    line_bboxes.append(span_bbox_tuple)
+                    line_text += text
+                line_bbox_tuple = _coerce_bbox_tuple(line.get("bbox")) or _bbox_union(line_bboxes)
+                if line_text.strip() and _valid_bbox_tuple(line_bbox_tuple):
+                    lines.append(
+                        TextLineIR(
+                            line_id=f"{page_id}:{block_id}:l{line_index}",
+                            page_id=page_id,
+                            block_id=block_id,
+                            text=line_text.strip(),
+                            bbox=_bbox_from_tuple(line_bbox_tuple),
+                            span_ids=line_span_ids,
+                        )
+                    )
             page_blocks.append(
                 DocumentBlock(
                     block_id=block_id,

@@ -9,6 +9,7 @@ from .models import (
     FormulaRecognitionResult,
     InputSource,
     LayoutIntentPlan,
+    OCRRecognitionResult,
     SemanticLayoutAnalysis,
     TranslationChunk,
     TranslationLayoutPlan,
@@ -37,6 +38,9 @@ def export_schema(output_dir: Path) -> None:
         "asset-ir.schema.json": _with_metadata(AssetIR.model_json_schema()),
         "formula-recognition.schema.json": _with_metadata(
             FormulaRecognitionResult.model_json_schema()
+        ),
+        "ocr-recognition.schema.json": _with_metadata(
+            OCRRecognitionResult.model_json_schema()
         ),
         "user-intent.schema.json": _with_metadata(UserIntent.model_json_schema()),
         "workflow-run.schema.json": _with_metadata(WorkflowRun.model_json_schema()),

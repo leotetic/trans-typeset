@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import sys
+
 from pdf_translator_schema import (
     DEFAULT_RENDER_DEFAULTS,
     LayoutMode,
@@ -20,6 +23,11 @@ _LEGACY_SANS_FONT_STACK = [
     "sans-serif",
 ]
 _GBT_FONT_STACK = list(DEFAULT_RENDER_DEFAULTS["font_stack"])
+_DETERMINISTIC_CHUNK_MAX_CHARS = 6000
+_MODEL_CHUNK_MAX_CHARS = 3500
+_MODEL_TRANSLATION_CONCURRENCY_LIMIT = 4
+_LEGACY_DEFAULT_OCR_PROVIDER_ORDER = ["pix2text", "openai_vision", "deterministic"]
+logger = logging.getLogger(__name__)
 
 
 def _render_defaults_from_payload(payload: object, target_lang: str | None = None) -> RenderDefaults:
@@ -52,6 +60,18 @@ def _bool_from_payload(value: object, fallback: bool) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return fallback
+
+
+def _ocr_provider_order_from_payload(payload: object) -> list[str]:
+    if isinstance(payload, str):
+        configured = [item.strip() for item in payload.split(",") if item.strip()]
+    elif isinstance(payload, (list, tuple)):
+        configured = [str(item).strip() for item in payload if str(item).strip()]
+    else:
+        configured = list(settings.ocr_provider_order)
+    if not configured or configured == _LEGACY_DEFAULT_OCR_PROVIDER_ORDER:
+        return list(settings.ocr_provider_order)
+    return configured
 
 
 def effective_runtime_config(storage: Storage) -> dict:
@@ -94,15 +114,40 @@ def effective_runtime_config(storage: Storage) -> dict:
             "vision_analyzer_model": settings.vision_analyzer_model or settings.openai_model,
         }
 
-    return {
+    has_model_key = bool(provider_config["openai_api_key"])
+    configured_concurrency = int(
+        persisted.get("translation_concurrency", settings.translation_concurrency)
+    )
+    translation_concurrency = (
+        min(configured_concurrency, _MODEL_TRANSLATION_CONCURRENCY_LIMIT)
+        if has_model_key
+        else configured_concurrency
+    )
+    configured_chunk_max_chars = int(
+        persisted.get(
+            "translation_chunk_max_chars",
+            settings.translation_chunk_max_chars,
+        )
+        or 0
+    )
+    translation_chunk_max_chars = (
+        configured_chunk_max_chars
+        if configured_chunk_max_chars > 0
+        else (
+            _MODEL_CHUNK_MAX_CHARS
+            if has_model_key
+            else _DETERMINISTIC_CHUNK_MAX_CHARS
+        )
+    )
+
+    config = {
         "default_target_lang": default_target_lang,
         **provider_config,
-        "translation_concurrency": int(
-            persisted.get("translation_concurrency", settings.translation_concurrency)
-        ),
+        "translation_concurrency": translation_concurrency,
         "translator_max_attempts": int(
             persisted.get("translator_max_attempts", settings.translator_max_attempts)
         ),
+        "translation_chunk_max_chars": translation_chunk_max_chars,
         "agent_max_repair_attempts": int(
             persisted.get(
                 "agent_max_repair_attempts",
@@ -116,8 +161,37 @@ def effective_runtime_config(storage: Storage) -> dict:
             ),
             settings.agent_enable_vision_analysis,
         ),
+        "ocr_provider_order": _ocr_provider_order_from_payload(
+            persisted.get("ocr_provider_order", settings.ocr_provider_order)
+        ),
+        "ocr_min_confidence": float(
+            persisted.get("ocr_min_confidence", settings.ocr_min_confidence)
+            or settings.ocr_min_confidence
+        ),
+        "ocr_provider_timeout_seconds": float(
+            persisted.get(
+                "ocr_provider_timeout_seconds",
+                settings.ocr_provider_timeout_seconds,
+            )
+            or settings.ocr_provider_timeout_seconds
+        ),
+        "ocr_max_visual_candidates": int(
+            persisted.get("ocr_max_visual_candidates", settings.ocr_max_visual_candidates)
+            or settings.ocr_max_visual_candidates
+        ),
         "render_defaults": render_defaults,
     }
+    if (
+        sys.version_info >= (3, 14)
+        and "pix2text" in config["ocr_provider_order"]
+    ):
+        logger.warning(
+            "Pix2Text OCR is enabled on Python %s.%s; Python 3.11/3.12 is recommended "
+            "for this optional provider.",
+            sys.version_info.major,
+            sys.version_info.minor,
+        )
+    return config
 
 
 def render_defaults_for_target(storage: Storage, target_lang: str) -> RenderDefaults:
@@ -153,9 +227,14 @@ def runtime_config_response(storage: Storage) -> RuntimeConfig:
         openai_api_key_configured=bool(effective["openai_api_key"]),
         translation_concurrency=effective["translation_concurrency"],
         translator_max_attempts=effective["translator_max_attempts"],
+        translation_chunk_max_chars=effective["translation_chunk_max_chars"],
         agent_max_repair_attempts=effective["agent_max_repair_attempts"],
         agent_enable_vision_analysis=effective["agent_enable_vision_analysis"],
         layout_planner_model=effective["layout_planner_model"],
         vision_analyzer_model=effective["vision_analyzer_model"],
+        ocr_provider_order=list(effective["ocr_provider_order"]),
+        ocr_min_confidence=effective["ocr_min_confidence"],
+        ocr_provider_timeout_seconds=effective["ocr_provider_timeout_seconds"],
+        ocr_max_visual_candidates=effective["ocr_max_visual_candidates"],
         render_defaults=effective["render_defaults"],
     )

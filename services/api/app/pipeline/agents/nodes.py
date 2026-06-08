@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
@@ -141,12 +142,14 @@ async def _read_input(
                 else ["layout_source_fallback_to_content"],
             )
             try:
+                parse_started = time.perf_counter()
                 document = await asyncio.to_thread(
                     context.parse_pdf,
                     source_path,
                     doc_id,
                     context.storage.asset_dir(doc_id),
                 )
+                pdf_parse_ms = round((time.perf_counter() - parse_started) * 1000, 2)
             except UnsupportedPdfError as exc:
                 context.storage.write_json(doc_id, "parser-diagnostics.json", exc.diagnostics)
                 workflow = helpers["append_workflow_step"](
@@ -165,13 +168,35 @@ async def _read_input(
                 raise
             assets = []
             parser_diagnostics = context.build_parser_diagnostics(document)
+            parser_diagnostics["pdf_parse_ms"] = pdf_parse_ms
+            context.update_status(
+                job_id,
+                filename,
+                target_lang,
+                JobState.PARSING,
+                0.17,
+                "Recognizing formulas",
+                doc_id,
+            )
             try:
+                formula_started = time.perf_counter()
                 formula_result = await context.enrich_document_formulas(
                     document,
                     doc_id=doc_id,
                     pdf_path=source_path,
+                    job_id=job_id,
+                    filename=filename,
+                    target_lang=target_lang,
+                )
+                formula_enrichment_ms = round(
+                    (time.perf_counter() - formula_started) * 1000,
+                    2,
                 )
                 document = formula_result.document
+                formula_diagnostics = {
+                    **formula_result.diagnostics,
+                    "formula_enrichment_ms": formula_enrichment_ms,
+                }
                 context.storage.write_json(
                     doc_id,
                     "formula-recognition.json",
@@ -183,9 +208,37 @@ async def _read_input(
                 context.storage.write_json(
                     doc_id,
                     "formula-diagnostics.json",
-                    formula_result.diagnostics,
+                    formula_diagnostics,
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "formula-candidates.json",
+                    formula_result.candidates,
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "ocr-recognition.json",
+                    formula_result.ocr_records,
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "ocr-diagnostics.json",
+                    formula_result.diagnostics.get("ocr", {}),
                 )
                 parser_diagnostics["formula_count"] = len(formula_result.formulas)
+                parser_diagnostics["formula_candidate_count"] = (
+                    formula_result.diagnostics.get("candidate_count", 0)
+                )
+                parser_diagnostics["formula_enrichment_ms"] = formula_enrichment_ms
+                parser_diagnostics["visual_formula_recognition_enabled"] = (
+                    formula_result.diagnostics.get(
+                        "visual_formula_recognition_enabled",
+                        False,
+                    )
+                )
+                parser_diagnostics["formula_recognizer_type"] = (
+                    formula_result.diagnostics.get("recognizer_type", "unknown")
+                )
                 parser_diagnostics["fallback_flags"] = _unique(
                     [
                         *parser_diagnostics.get("fallback_flags", []),
@@ -205,10 +258,17 @@ async def _read_input(
                         "kind": "formula_diagnostics",
                         "candidate_count": 0,
                         "recognized_count": 0,
+                        "formula_enrichment_ms": 0,
+                        "recognizer_type": "unknown",
+                        "visual_formula_recognition_enabled": False,
                         "quality_flags": ["formula_enrichment_failed"],
                         "error": str(exc),
                     },
                 )
+                parser_diagnostics["formula_candidate_count"] = 0
+                parser_diagnostics["formula_enrichment_ms"] = 0
+                parser_diagnostics["visual_formula_recognition_enabled"] = False
+                parser_diagnostics["formula_recognizer_type"] = "unknown"
                 parser_diagnostics["fallback_flags"] = _unique(
                     [
                         *parser_diagnostics.get("fallback_flags", []),
@@ -602,6 +662,7 @@ async def _translate_chunks_node(
     chunks = context.build_chunks(
         document,
         target_lang=target_lang,
+        max_chars=runtime_config["translation_chunk_max_chars"],
         render_defaults=render_defaults,
     )
     if not chunks:

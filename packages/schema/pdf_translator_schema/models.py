@@ -134,13 +134,16 @@ class LayoutMode(StrEnum):
 
 class FormulaSourceKind(StrEnum):
     TEXT_LAYER = "text_layer"
+    INLINE_TEXT = "inline_text"
     VECTOR_CANDIDATE = "vector_candidate"
     IMAGE_CANDIDATE = "image_candidate"
+    OCR = "ocr"
     MOCK = "mock"
     UNKNOWN = "unknown"
 
 
 FormulaDisplayMode = Literal["inline", "display"]
+OCRRegionKind = Literal["formula", "text", "page"]
 
 
 class InputSource(StrictBaseModel):
@@ -371,6 +374,29 @@ class StyleSeed(StrictBaseModel):
     color: str = "#111111"
 
 
+class TextSpanIR(StrictBaseModel):
+    span_id: str = Field(min_length=1)
+    page_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1)
+    line_id: str = Field(min_length=1)
+    text: str = ""
+    bbox: BoundingBox
+    font_name: str | None = None
+    font_size: float | None = Field(default=None, gt=0)
+    flags: int | None = None
+    color: str | None = None
+    origin: tuple[float, float] | None = None
+
+
+class TextLineIR(StrictBaseModel):
+    line_id: str = Field(min_length=1)
+    page_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1)
+    text: str = ""
+    bbox: BoundingBox
+    span_ids: list[str] = Field(default_factory=list)
+
+
 class Asset(StrictBaseModel):
     asset_id: str = Field(min_length=1)
     page_id: str = Field(min_length=1)
@@ -390,6 +416,8 @@ class DocumentBlock(StrictBaseModel):
     reading_order: int = Field(ge=0)
     source_text: str = ""
     span_refs: list[str] = Field(default_factory=list)
+    lines: list[TextLineIR] = Field(default_factory=list)
+    spans: list[TextSpanIR] = Field(default_factory=list)
     style_seed: StyleSeed = Field(default_factory=StyleSeed)
     formula_id: str | None = None
 
@@ -398,17 +426,27 @@ class FormulaIR(StrictBaseModel):
     formula_id: str = Field(min_length=1)
     page_id: str = Field(min_length=1)
     source_block_id: str | None = None
+    anchor_block_id: str | None = None
     asset_id: str | None = None
     latex: str = ""
+    source_text: str = ""
+    source_text_range: tuple[int, int] | None = None
+    span_ids: list[str] = Field(default_factory=list)
     display_mode: FormulaDisplayMode = "display"
     confidence: float = Field(default=0.5, ge=0, le=1)
+    ocr_provider: str | None = None
+    ocr_confidence: float | None = Field(default=None, ge=0, le=1)
     source_kind: FormulaSourceKind = FormulaSourceKind.UNKNOWN
     quality_flags: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_source_ref(self) -> FormulaIR:
-        if not self.source_block_id and not self.asset_id:
-            raise ValueError("formula must reference a source block or asset")
+        if not self.source_block_id and not self.anchor_block_id and not self.asset_id:
+            raise ValueError("formula must reference a source block, anchor block, or asset")
+        if self.source_text_range is not None:
+            start, end = self.source_text_range
+            if start < 0 or end < start:
+                raise ValueError("formula source_text_range must be ordered")
         return self
 
 
@@ -416,6 +454,16 @@ class FormulaRecognitionResult(NoLayoutCoordinatesModel):
     latex: str
     display_mode: FormulaDisplayMode = "display"
     confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class OCRRecognitionResult(NoLayoutCoordinatesModel):
+    text: str = ""
+    latex: str = ""
+    region_kind: OCRRegionKind = "text"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    language: str | None = None
+    provider: str = "unknown"
     quality_flags: list[str] = Field(default_factory=list)
 
 
@@ -436,6 +484,17 @@ class DocumentPage(StrictBaseModel):
                     f"duplicate reading_order on page {self.page_id}: {block.reading_order}"
                 )
             reading_orders.add(block.reading_order)
+            for line in block.lines:
+                if line.page_id != self.page_id or line.block_id != block.block_id:
+                    raise ValueError(f"line {line.line_id} points outside its block")
+            for span in block.spans:
+                if span.page_id != self.page_id or span.block_id != block.block_id:
+                    raise ValueError(f"span {span.span_id} points outside its block")
+            span_ids = {span.span_id for span in block.spans}
+            for line in block.lines:
+                for span_id in line.span_ids:
+                    if span_id not in span_ids:
+                        raise ValueError(f"line {line.line_id} points to unknown span")
         for asset in self.assets:
             if asset.page_id != self.page_id:
                 raise ValueError(f"asset {asset.asset_id} points to another page")
@@ -480,6 +539,10 @@ class DocumentIR(StrictBaseModel):
             if formula.source_block_id and formula.source_block_id not in block_ids:
                 raise ValueError(
                     f"formula {formula.formula_id} points to unknown source block"
+                )
+            if formula.anchor_block_id and formula.anchor_block_id not in block_ids:
+                raise ValueError(
+                    f"formula {formula.formula_id} points to unknown anchor block"
                 )
             if formula.asset_id and formula.asset_id not in asset_ids:
                 raise ValueError(f"formula {formula.formula_id} points to unknown asset")

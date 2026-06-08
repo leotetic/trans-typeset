@@ -26,10 +26,15 @@ class Settings:
     max_upload_bytes: int = 50 * 1024 * 1024
     translation_concurrency: int = 2
     translator_max_attempts: int = 2
+    translation_chunk_max_chars: int = 0
     agent_max_repair_attempts: int = 2
     agent_enable_vision_analysis: bool = False
     layout_planner_model: str = ""
     vision_analyzer_model: str = ""
+    ocr_provider_order: tuple[str, ...] = ("deterministic",)
+    ocr_min_confidence: float = 0.35
+    ocr_provider_timeout_seconds: float = 12.0
+    ocr_max_visual_candidates: int = 12
     render_font_stack: tuple[str, ...] = (
         "Times New Roman",
         "SimSun",
@@ -128,6 +133,10 @@ def load_settings() -> Settings:
         max_upload_bytes=parse_int(os.getenv("MAX_UPLOAD_BYTES", ""), 50 * 1024 * 1024),
         translation_concurrency=parse_int(os.getenv("TRANSLATION_CONCURRENCY", ""), 2),
         translator_max_attempts=parse_int(os.getenv("TRANSLATOR_MAX_ATTEMPTS", ""), 2),
+        translation_chunk_max_chars=parse_int(
+            os.getenv("TRANSLATION_CHUNK_MAX_CHARS", ""),
+            0,
+        ),
         agent_max_repair_attempts=parse_int(
             os.getenv("AGENT_MAX_REPAIR_ATTEMPTS", ""),
             2,
@@ -138,6 +147,21 @@ def load_settings() -> Settings:
         ),
         layout_planner_model=layout_planner_model,
         vision_analyzer_model=vision_analyzer_model,
+        ocr_provider_order=parse_csv(
+            os.getenv(
+                "OCR_PROVIDER_ORDER",
+                "deterministic",
+            )
+        ),
+        ocr_min_confidence=parse_float(os.getenv("OCR_MIN_CONFIDENCE", ""), 0.35),
+        ocr_provider_timeout_seconds=parse_float(
+            os.getenv("OCR_PROVIDER_TIMEOUT_SECONDS", ""),
+            12.0,
+        ),
+        ocr_max_visual_candidates=parse_int(
+            os.getenv("OCR_MAX_VISUAL_CANDIDATES", ""),
+            12,
+        ),
         render_font_stack=parse_csv(
             os.getenv(
                 "RENDER_FONT_STACK",

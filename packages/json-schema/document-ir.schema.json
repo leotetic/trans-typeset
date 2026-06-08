@@ -166,6 +166,20 @@
           "title": "Span Refs",
           "type": "array"
         },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/TextLineIR"
+          },
+          "title": "Lines",
+          "type": "array"
+        },
+        "spans": {
+          "items": {
+            "$ref": "#/$defs/TextSpanIR"
+          },
+          "title": "Spans",
+          "type": "array"
+        },
         "style_seed": {
           "$ref": "#/$defs/StyleSeed"
         },
@@ -249,6 +263,18 @@
           "default": null,
           "title": "Source Block Id"
         },
+        "anchor_block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Anchor Block Id"
+        },
         "asset_id": {
           "anyOf": [
             {
@@ -266,6 +292,40 @@
           "title": "Latex",
           "type": "string"
         },
+        "source_text": {
+          "default": "",
+          "title": "Source Text",
+          "type": "string"
+        },
+        "source_text_range": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "integer"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Text Range"
+        },
+        "span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Span Ids",
+          "type": "array"
+        },
         "display_mode": {
           "default": "display",
           "enum": [
@@ -281,6 +341,32 @@
           "minimum": 0,
           "title": "Confidence",
           "type": "number"
+        },
+        "ocr_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Provider"
+        },
+        "ocr_confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Confidence"
         },
         "source_kind": {
           "$ref": "#/$defs/FormulaSourceKind",
@@ -304,8 +390,10 @@
     "FormulaSourceKind": {
       "enum": [
         "text_layer",
+        "inline_text",
         "vector_candidate",
         "image_candidate",
+        "ocr",
         "mock",
         "unknown"
       ],
@@ -371,6 +459,162 @@
         }
       },
       "title": "StyleSeed",
+      "type": "object"
+    },
+    "TextLineIR": {
+      "additionalProperties": false,
+      "properties": {
+        "line_id": {
+          "minLength": 1,
+          "title": "Line Id",
+          "type": "string"
+        },
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "block_id": {
+          "minLength": 1,
+          "title": "Block Id",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox"
+        },
+        "span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Span Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "line_id",
+        "page_id",
+        "block_id",
+        "bbox"
+      ],
+      "title": "TextLineIR",
+      "type": "object"
+    },
+    "TextSpanIR": {
+      "additionalProperties": false,
+      "properties": {
+        "span_id": {
+          "minLength": 1,
+          "title": "Span Id",
+          "type": "string"
+        },
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "block_id": {
+          "minLength": 1,
+          "title": "Block Id",
+          "type": "string"
+        },
+        "line_id": {
+          "minLength": 1,
+          "title": "Line Id",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        },
+        "bbox": {
+          "$ref": "#/$defs/BoundingBox"
+        },
+        "font_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Name"
+        },
+        "font_size": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "flags": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flags"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin"
+        }
+      },
+      "required": [
+        "span_id",
+        "page_id",
+        "block_id",
+        "line_id",
+        "bbox"
+      ],
+      "title": "TextSpanIR",
       "type": "object"
     }
   },

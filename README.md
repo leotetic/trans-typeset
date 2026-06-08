@@ -12,6 +12,8 @@
 
 ## Quick Start
 
+推荐使用 Python 3.11 或 3.12 创建本地 `.venv`。Python 3.14 与可选 Pix2Text/RapidOCR/ONNX 公式 OCR 组合仍不稳定，可能导致模型初始化慢或进程退出时出现 semaphore 清理告警。
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -47,10 +49,15 @@ ALLOWED_TARGET_LANGS=zh-CN,zh-TW,ja-JP,ko-KR,en-US
 MAX_UPLOAD_BYTES=52428800
 TRANSLATION_CONCURRENCY=2
 TRANSLATOR_MAX_ATTEMPTS=2
+OCR_PROVIDER_ORDER=deterministic
+OCR_PROVIDER_TIMEOUT_SECONDS=12
+OCR_MAX_VISUAL_CANDIDATES=12
 VITE_DEV_HOST=127.0.0.1
 VITE_DEV_PORT=5173
 VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 ```
+
+公式 OCR 默认走 deterministic 本地路径，以保证数字版论文翻译主流程不会被可选视觉 OCR 阻塞。需要试用 Pix2Text 时可显式设置 `OCR_PROVIDER_ORDER=pix2text,deterministic`；后端会对 Pix2Text 初始化和识别设置 timeout，失败后继续 deterministic fallback。
 
 ## Troubleshooting
 
@@ -96,7 +103,7 @@ PDF export 会写入 `pdf-export-diagnostics.json`，记录 Playwright version�
 
 Parser 会从数字版 PDF 的 image block 提取栅格图片资产，写入 `DocumentIR.pages[].assets[]`，并保存到本地输出目录。Renderer 会按 `DocumentIR` 中的 asset bbox 在原页面位置保留图片；缺失 asset path 时输出 `asset_missing_path` 诊断和占位。
 
-Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本会标记为 `table`。公式会进入独立 enrichment：系统识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、公式 asset 和 `{{formula:formula_id}}` preserve token；未配置模型密钥时 deterministic recognizer 会保留文本层公式，并把视觉候选标记为 mock。Renderer 用 KaTeX-compatible HTML/CSS 渲染 LaTeX，失败时回退原文本/占位并输出公式质量 flag。
+Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本会标记为 `table`。公式会进入独立 enrichment：系统识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、公式 asset 和 `{{formula:formula_id}}` preserve token；默认 deterministic recognizer 会保留文本层公式，并把视觉候选标记为 mock。Pix2Text 是显式 opt-in 的可选 provider，运行在 worker thread 中并带 provider timeout，超时或失败会写入 OCR diagnostics 后继续 fallback。Renderer 用 KaTeX-compatible HTML/CSS 渲染 LaTeX，失败时回退原文本/占位并输出公式质量 flag。
 
 扫描版或 image-only PDF 会在 parser 阶段明确失败为 `unsupported_scanned_pdf`，并写入 `parser-diagnostics.json`，其中包含 `reason`、页数、文本块数、资产数和 `next_step`。当前 OCR 尚未实现；该 fallback 使前端能展示可恢复错误，而不是让任务在 chunking 阶段以模糊错误失败。
 

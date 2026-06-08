@@ -21,7 +21,7 @@ from pdf_translator_schema import (
     TranslationChunk,
     TranslationLayoutPlan,
 )
-from pdf_translator_schema.models import DocumentBlock, RenderDefaults
+from pdf_translator_schema.models import DocumentBlock, OCRRecognitionResult, RenderDefaults
 
 
 def test_process_document_job_persists_frontend_visible_error(
@@ -116,6 +116,7 @@ def test_process_document_job_persists_chunk_progress_artifact(
         {
             "translation_concurrency": 2,
             "translator_max_attempts": 3,
+            "translation_chunk_max_chars": 1800,
             "render_defaults": render_defaults,
         }
     )
@@ -186,6 +187,7 @@ def test_process_document_job_persists_chunk_progress_artifact(
 
     def fake_build_chunks(*_args, **kwargs):
         captured["chunk_render_defaults"] = kwargs["render_defaults"]
+        captured["chunk_max_chars"] = kwargs["max_chars"]
         return chunks
 
     real_from_ir_and_plans = RenderDocument.from_ir_and_plans
@@ -222,10 +224,16 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert progress[1]["quality_flags"] == ["repaired_layout_plan"]
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
     assert captured["chunk_render_defaults"].font_stack == ["Configured Sans", "serif"]
+    assert captured["chunk_max_chars"] == 1800
     assert captured["renderer_render_defaults"].line_height == 1.58
     assert captured["renderer_render_defaults"].overflow_policy.min_font_scale == 0.77
     assert formula_recognition == []
     assert formula_diagnostics["kind"] == "formula_diagnostics"
+    assert formula_diagnostics["recognizer_type"] == "deterministic"
+    assert formula_diagnostics["visual_formula_recognition_enabled"] is False
+    parser_diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
+    assert "pdf_parse_ms" in parser_diagnostics
+    assert parser_diagnostics["formula_recognizer_type"] == "deterministic"
 
 
 def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
@@ -299,6 +307,7 @@ def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
 
     def fake_build_chunks(*_args, **kwargs):
         captured["chunk_render_defaults"] = kwargs["render_defaults"]
+        captured["chunk_max_chars"] = kwargs["max_chars"]
         return chunks
 
     def fake_from_ir_and_plans(*_args, **kwargs):
@@ -339,7 +348,7 @@ def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
     ]
 
 
-def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnostics(
+def test_process_document_job_fails_with_unrecoverable_translation_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -415,23 +424,13 @@ def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnost
                         "content_length": 42,
                         "response_preview_length": 24,
                         "sanitized_response_preview": "plain text without JSON",
+                        "quality_flags": [
+                            "translator_response_unparseable",
+                            "translator_unrecoverable_response",
+                        ],
                     }
                 )
-                return TranslationLayoutPlan(
-                    chunk_id=chunk.chunk_id,
-                    blocks=[
-                        TranslationBlockPlan(
-                            source_block_id=block.block_id,
-                            translated_text=block.source_text,
-                            role=block.role,
-                            quality_flags=[
-                                "translator_response_unparseable",
-                                "source_text_fallback",
-                                "missing_translation",
-                            ],
-                        )
-                    ],
-                )
+                raise RuntimeError("translator_unrecoverable_response")
             return TranslationLayoutPlan(
                 chunk_id=chunk.chunk_id,
                 blocks=[
@@ -448,16 +447,9 @@ def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnost
             self._diagnostics.clear()
             return diagnostics
 
-    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
-        assert "translated Alpha" in html
-        assert "Beta [1]" in html
-        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
-        return output_path
-
     monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
     monkeypatch.setattr(orchestrator, "build_chunks", lambda *_args, **_kwargs: chunks)
     monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
-    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
 
     asyncio.run(
         orchestrator.process_document_job(
@@ -471,13 +463,17 @@ def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnost
 
     status = storage.load_status("job_1")
     progress = storage.read_output_json("doc_1", "translation-progress.json")
-    plans = storage.read_output_json("doc_1", "translation-plans.json")
     diagnostics = storage.read_output_json("doc_1", "translation-diagnostics.json")
 
-    assert status.status == JobState.COMPLETED
-    assert [chunk.status for chunk in status.chunks] == ["completed", "completed"]
-    assert "source_text_fallback" in progress[1]["quality_flags"]
-    assert plans[1]["blocks"][0]["translated_text"] == "Beta [1]"
+    assert status.status == JobState.FAILED
+    assert "translation chunk(s) failed" in status.error
+    assert [chunk.status for chunk in status.chunks] == ["completed", "failed"]
+    assert progress[1]["status"] == "failed"
+    assert progress[1]["error"] == "translator_unrecoverable_response"
+    assert progress[1]["quality_flags"] == [
+        "translator_response_unparseable",
+        "translator_unrecoverable_response",
+    ]
     assert diagnostics == [
         {
             "chunk_id": "chunk_2",
@@ -487,9 +483,12 @@ def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnost
             "content_length": 42,
             "response_preview_length": 24,
             "sanitized_response_preview": "plain text without JSON",
+            "quality_flags": [
+                "translator_response_unparseable",
+                "translator_unrecoverable_response",
+            ],
         }
     ]
-    assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
 
 
 def test_process_document_job_persists_pdf_export_diagnostics(
@@ -579,6 +578,130 @@ def test_process_document_job_persists_pdf_export_diagnostics(
     assert diagnostics["status"] == "completed"
     complete_steps = [step for step in workflow["steps"] if step["name"] == "complete"]
     assert "pdf-export-diagnostics" in complete_steps[-1]["output_artifacts"]
+
+
+def test_formula_enrichment_honors_disabled_vision_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    storage.write_runtime_config(
+        {
+            "openai_base_url": "https://models.example.test/v1",
+            "openai_api_key": "secret-key",
+            "openai_model": "paper-model",
+            "vision_analyzer_model": "vision-model",
+            "agent_enable_vision_analysis": False,
+        }
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="formula_1",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="E = mc^2",
+                    )
+                ],
+            )
+        ],
+    )
+
+    class ForbiddenRecognizer:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("vision recognizer should not be constructed")
+
+    monkeypatch.setattr(orchestrator, "OpenAIFormulaRecognizer", ForbiddenRecognizer)
+
+    result = asyncio.run(orchestrator._enrich_document_formulas(document, doc_id="doc_1"))
+
+    assert result.diagnostics["recognizer_type"] == "deterministic"
+    assert result.diagnostics["visual_formula_recognition_enabled"] is False
+    assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
+
+
+def test_formula_enrichment_reports_progress_and_falls_back_from_pix2text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    storage.save_status(
+        orchestrator.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=JobState.PARSING,
+            progress=0.17,
+            message="Recognizing formulas",
+        )
+    )
+    storage.write_runtime_config(
+        {
+            "ocr_provider_order": ["pix2text", "deterministic"],
+            "ocr_provider_timeout_seconds": 1,
+        }
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="formula_1",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="E = mc^2",
+                    )
+                ],
+            )
+        ],
+    )
+
+    class EmptyPix2TextProvider:
+        name = "pix2text"
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            return OCRRecognitionResult(
+                region_kind="formula",
+                provider="pix2text",
+                confidence=0,
+                quality_flags=["pix2text_formula_ocr_empty"],
+            )
+
+    monkeypatch.setattr(orchestrator, "Pix2TextOCRProvider", EmptyPix2TextProvider)
+
+    result = asyncio.run(
+        orchestrator._enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            job_id="job_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    assert status.message == "Recognizing formulas 1/1"
+    assert result.formulas[0].ocr_provider == "deterministic"
+    ocr_records = storage.read_output_json("doc_1", "ocr-recognition.json")
+    assert any(record["provider"] == "pix2text" for record in ocr_records)
 
 
 def test_process_document_job_rerenders_preview_after_repair(

@@ -11,6 +11,7 @@ from pdf_translator_schema import (
     FormulaIR,
     FormulaRecognitionResult,
     InputSource,
+    OCRRecognitionResult,
     PageSize,
     LayoutIntentBlock,
     LayoutIntentPlan,
@@ -28,7 +29,7 @@ from pdf_translator_schema import (
     validate_layout_plan,
 )
 from pdf_translator_schema.json_schema import export_schema
-from pdf_translator_schema.models import DocumentBlock, InlineItem
+from pdf_translator_schema.models import DocumentBlock, InlineItem, TextLineIR, TextSpanIR
 from pdf_translator_schema.validation import (
     LayoutIntentPlanValidationError,
     LayoutPlanValidationError,
@@ -267,6 +268,67 @@ def test_document_can_reference_formula_ir_from_block_and_asset() -> None:
     assert document.pages[0].assets[0].formula_id == "formula_1"
 
 
+def test_document_can_store_text_line_and_span_metadata_for_inline_formulas() -> None:
+    span = TextSpanIR(
+        span_id="s1",
+        page_id="p1",
+        block_id="b1",
+        line_id="l1",
+        text="E = mc^2",
+        bbox=BoundingBox(x0=20, y0=10, x1=60, y1=20),
+        font_name="Cambria Math",
+        font_size=9,
+        flags=0,
+        origin=(20, 18),
+    )
+    line = TextLineIR(
+        line_id="l1",
+        page_id="p1",
+        block_id="b1",
+        text="where E = mc^2 holds",
+        bbox=BoundingBox(x0=0, y0=8, x1=120, y1=22),
+        span_ids=["s1"],
+    )
+    block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=160, y1=40),
+        reading_order=0,
+        source_text="where {{formula:f_inline}} holds",
+        lines=[line],
+        spans=[span],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=200, height=200),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_inline",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                source_text_range=(6, 14),
+                span_ids=["s1"],
+                display_mode="inline",
+                source_kind="inline_text",
+                ocr_provider="deterministic",
+                ocr_confidence=0.96,
+            )
+        ],
+    )
+
+    assert document.pages[0].blocks[0].spans[0].font_name == "Cambria Math"
+    assert document.formulas_by_id()["f_inline"].display_mode == "inline"
+
+
 def test_document_rejects_invalid_formula_refs() -> None:
     block = DocumentBlock(
         block_id="b1",
@@ -501,6 +563,15 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
                 "page": 1,
             },
         ),
+        (
+            OCRRecognitionResult,
+            {
+                "text": "x = y + 1",
+                "latex": "x = y + 1",
+                "region_kind": "formula",
+                "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+            },
+        ),
     ],
 )
 def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) -> None:
@@ -516,6 +587,7 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
         "input-source.schema.json",
         "asset-ir.schema.json",
         "formula-recognition.schema.json",
+        "ocr-recognition.schema.json",
         "user-intent.schema.json",
         "workflow-run.schema.json",
         "layout-intent-plan.schema.json",

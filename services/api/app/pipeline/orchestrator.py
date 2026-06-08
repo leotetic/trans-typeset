@@ -29,6 +29,7 @@ from .formulas import (
     OpenAIFormulaRecognizer,
     enrich_document_formulas,
 )
+from .ocr import DeterministicOCRProvider, OCRService, OpenAIVisionOCRProvider, Pix2TextOCRProvider
 from .parser import UnsupportedPdfError, build_parser_diagnostics, parse_pdf
 from .translator import Translator, build_translator
 from .workflow import (
@@ -312,24 +313,83 @@ async def _enrich_document_formulas(
     *,
     doc_id: str,
     pdf_path: Path | None = None,
+    job_id: str | None = None,
+    filename: str = "",
+    target_lang: str = "",
 ) -> Any:
     runtime_config = effective_runtime_config(storage)
     recognizer: Any
-    if runtime_config["openai_api_key"]:
+    visual_enabled = bool(
+        runtime_config["openai_api_key"]
+        and runtime_config["agent_enable_vision_analysis"]
+    )
+    openai_ocr_provider: Any | None = None
+    if visual_enabled:
         recognizer = OpenAIFormulaRecognizer(
             base_url=runtime_config["openai_base_url"],
             api_key=runtime_config["openai_api_key"],
             model=runtime_config["vision_analyzer_model"],
             asset_base_path=storage.asset_dir(doc_id),
         )
+        openai_ocr_provider = OpenAIVisionOCRProvider(recognizer)
+        recognizer_type = "openai_vision"
     else:
         recognizer = DeterministicFormulaRecognizer()
+        recognizer_type = "deterministic"
+    provider_factories: dict[str, Any] = {
+        "pix2text": lambda: Pix2TextOCRProvider(
+            timeout_seconds=runtime_config.get("ocr_provider_timeout_seconds", 12.0)
+        ),
+        "deterministic": DeterministicOCRProvider,
+    }
+    ocr_providers: list[Any] = []
+    for provider_name in runtime_config.get("ocr_provider_order", []):
+        if provider_name == "openai_vision":
+            if openai_ocr_provider is not None:
+                ocr_providers.append(openai_ocr_provider)
+            continue
+        factory = provider_factories.get(str(provider_name))
+        if factory is not None:
+            ocr_providers.append(factory())
+    if not any(getattr(provider, "name", "") == "deterministic" for provider in ocr_providers):
+        ocr_providers.append(DeterministicOCRProvider())
+    live_ocr_records: list[dict[str, Any]] = []
+
+    def record_ocr_attempt(record: dict[str, Any]) -> None:
+        live_ocr_records.append(record)
+        storage.write_json(doc_id, "ocr-recognition.json", live_ocr_records)
+
+    def update_formula_progress(index: int, total: int, _candidate: Any) -> None:
+        if not job_id:
+            return
+        update_status(
+            job_id,
+            filename,
+            target_lang,
+            JobState.PARSING,
+            0.17,
+            f"Recognizing formulas {index}/{total}",
+            doc_id,
+        )
+
+    ocr_service = OCRService(
+        providers=ocr_providers,
+        asset_base_path=storage.asset_dir(doc_id),
+        min_confidence=runtime_config.get("ocr_min_confidence", 0.35),
+        provider_timeout_seconds=runtime_config.get("ocr_provider_timeout_seconds", 12.0),
+        max_visual_candidates=runtime_config.get("ocr_max_visual_candidates", 12),
+        on_record=record_ocr_attempt,
+    )
     return await enrich_document_formulas(
         document,
         doc_id=doc_id,
         asset_output_dir=storage.asset_dir(doc_id),
         pdf_path=pdf_path,
         recognizer=recognizer,
+        ocr_service=ocr_service,
+        recognizer_type=recognizer_type,
+        visual_formula_recognition_enabled=visual_enabled,
+        on_progress=update_formula_progress,
     )
 
 
@@ -402,6 +462,7 @@ async def _run_workflow_from_document(
     chunks = build_chunks(
         document,
         target_lang=target_lang,
+        max_chars=runtime_config["translation_chunk_max_chars"],
         render_defaults=render_defaults,
     )
     if not chunks:
@@ -651,6 +712,18 @@ async def _translate_chunks(
         translation_diagnostics.extend(diagnostics)
         storage.write_json(doc_id, "translation-diagnostics.json", translation_diagnostics)
 
+    def diagnostic_quality_flags_for_chunk(chunk_id: str) -> list[str]:
+        flags: list[str] = []
+        seen: set[str] = set()
+        for diagnostic in translation_diagnostics:
+            if diagnostic.get("chunk_id") != chunk_id:
+                continue
+            for flag in diagnostic.get("quality_flags", []):
+                if isinstance(flag, str) and flag and flag not in seen:
+                    flags.append(flag)
+                    seen.add(flag)
+        return flags
+
     async def translate_chunk(index: int) -> None:
         nonlocal completed_chunks
         chunk = chunks[index]
@@ -695,6 +768,9 @@ async def _translate_chunks(
             progress_entry.progress = 1
             progress_entry.message = "Failed"
             progress_entry.error = str(exc)
+            progress_entry.quality_flags = diagnostic_quality_flags_for_chunk(
+                chunk.chunk_id
+            )
             storage.write_json(
                 doc_id,
                 "translation-progress.json",
@@ -822,6 +898,8 @@ def _mark_failed(
     exc: Exception,
 ) -> None:
     workflow = _load_saved_workflow(doc_id, workflow)
+    if not status_chunks:
+        status_chunks = _load_saved_chunk_progress(doc_id)
     update_status(
         job_id,
         filename,
@@ -845,6 +923,22 @@ def _mark_failed(
         status=WorkflowStatus.FAILED,
     )
     _save_workflow(doc_id, workflow)
+
+
+def _load_saved_chunk_progress(doc_id: str) -> list[ChunkProgress]:
+    try:
+        payload = storage.read_output_json(doc_id, "translation-progress.json")
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    progress: list[ChunkProgress] = []
+    for item in payload:
+        try:
+            progress.append(ChunkProgress.model_validate(item))
+        except Exception:
+            continue
+    return progress
 
 
 def _save_workflow(doc_id: str, workflow: WorkflowRun) -> None:

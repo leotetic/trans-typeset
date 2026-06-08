@@ -258,6 +258,48 @@ def test_openai_translator_extracts_plan_from_wrapped_content() -> None:
     assert plan.chunk_id == chunk.chunk_id
 
 
+def test_openai_translator_salvages_translated_text_from_truncated_json() -> None:
+    chunk = make_chunk()
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+    truncated = (
+        '{"schema_version":"0.1","chunk_id":"doc_1_chunk_0001","target_lang":"zh-CN",'
+        '"blocks":['
+        '{"source_block_id":"b1","translated_text":"阿尔法 [1]","role":"paragraph"},'
+        '{"source_block_id":"b2","translated_text":"贝塔 y = f(x)","role":"paragraph"}'
+    )
+
+    plan = translator._validate_or_repair_content(chunk, truncated, attempt=1)
+
+    assert [block.translated_text for block in plan.blocks] == [
+        "阿尔法 [1]",
+        "贝塔 y = f(x)",
+    ]
+    assert all("translator_json_salvaged" in block.quality_flags for block in plan.blocks)
+
+
+def test_openai_translator_salvages_single_block_plain_text() -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="Alpha [1].",
+                preserve_tokens=["[1]"],
+            )
+        ],
+        render_defaults=RenderDefaults(target_lang="zh-CN"),
+        constraints=TranslationConstraints(),
+    )
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+
+    plan = translator._validate_or_repair_content(chunk, "阿尔法 [1]。", attempt=1)
+
+    assert plan.blocks[0].translated_text == "阿尔法 [1]。"
+    assert "translator_plain_text_salvaged" in plan.blocks[0].quality_flags
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -391,7 +433,7 @@ def test_openai_translator_retries_chunk_after_unrepairable_response(
     assert "Previous attempt failed validation" in calls[1]["messages"][1]["content"]
 
 
-def test_openai_translator_falls_back_after_repeated_unparseable_responses(
+def test_openai_translator_fails_after_repeated_unrecoverable_responses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     chunk = make_chunk()
@@ -438,29 +480,20 @@ def test_openai_translator_falls_back_after_repeated_unparseable_responses(
         "https://example.test/v1", "key", "model", max_attempts=2
     )
 
-    plan = asyncio.run(translator.translate(chunk))
+    with pytest.raises(TranslationError, match="not recoverable"):
+        asyncio.run(translator.translate(chunk))
     diagnostics = translator.drain_diagnostics()
 
     assert len(calls) == 2
-    assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
-    assert [block.translated_text for block in plan.blocks] == [
-        "Alpha [1].",
-        "Beta y = f(x).",
-    ]
-    assert all("translator_response_unparseable" in block.quality_flags for block in plan.blocks)
-    assert all("source_text_fallback" in block.quality_flags for block in plan.blocks)
-    assert all("missing_translation" in block.quality_flags for block in plan.blocks)
-    assert all("retry_attempt_2" in block.quality_flags for block in plan.blocks)
-    tokens = {
-        item.source_token
-        for block in plan.blocks
-        for item in block.inline_items
-    }
-    assert tokens == {"[1]", "y = f(x)"}
     assert len(diagnostics) == 2
     assert diagnostics[0]["chunk_id"] == chunk.chunk_id
     assert diagnostics[0]["attempt"] == 1
     assert diagnostics[0]["content_type"] == "str"
+    assert diagnostics[0]["quality_flags"] == ["translator_response_unparseable"]
+    assert diagnostics[1]["quality_flags"] == [
+        "translator_response_unparseable",
+        "translator_unrecoverable_response",
+    ]
     assert "<think>...</think>" in diagnostics[0]["sanitized_response_preview"]
     assert "sk-live-secret123456" not in diagnostics[0]["sanitized_response_preview"]
     assert "sk-[REDACTED]" in diagnostics[0]["sanitized_response_preview"]

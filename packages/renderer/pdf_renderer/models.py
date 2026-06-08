@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass, field
 from math import ceil
 from html import escape
+from functools import lru_cache
 from typing import Any
 
 from pdf_translator_schema import (
@@ -29,6 +31,7 @@ _CONTINUATION_MARGIN_PT = 54.0
 _MIN_FINAL_FRAGMENT_CHARS = 12
 _MIN_FINAL_FRAGMENT_LINES = 2
 _LOW_UTILIZATION_THRESHOLD = 0.18
+_KATEX_UNAVAILABLE = "__katex_unavailable__"
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -120,14 +123,76 @@ def _formula_html_for_text(
             parts.append(escape(match.group(0)))
             flags.append("formula_missing_latex")
         elif not _latex_looks_renderable(formula.latex):
-            parts.append(escape(formula.latex or match.group(0)))
-            flags.append("formula_render_failed")
+            fallback, fallback_flags = _formula_fallback_html(formula, document)
+            parts.append(fallback)
+            flags.extend(["formula_render_failed", *fallback_flags])
         else:
             display = formula.display_mode == "display" or role == BlockRole.FORMULA
-            parts.append(_katex_like_html(formula.latex, display=display))
+            rendered = _katex_html(formula.latex, display=display)
+            if rendered is None:
+                fallback, fallback_flags = _formula_fallback_html(formula, document)
+                parts.append(fallback)
+                flags.extend(["formula_render_failed", *fallback_flags])
+            else:
+                parts.append(rendered)
         last_index = match.end()
     parts.append(escape(text[last_index:]))
     return "".join(parts), _unique_flags(flags)
+
+
+@lru_cache(maxsize=512)
+def _katex_html(latex: str, *, display: bool) -> str | None:
+    rendered = _katex_render_to_string(latex, display=display)
+    if rendered == _KATEX_UNAVAILABLE:
+        return _katex_like_html(latex, display=display)
+    if rendered is not None:
+        return rendered
+    return None
+
+
+def _katex_render_to_string(latex: str, *, display: bool) -> str | None:
+    script = (
+        "let katex;try{katex=require('katex')}catch(error){process.exit(3);}"
+        "const latex=Buffer.from(process.argv[1],'base64').toString('utf8');"
+        "try{process.stdout.write(katex.renderToString(latex,{displayMode:"
+        + ("true" if display else "false")
+        + ",throwOnError:true,strict:'ignore',trust:false}));}"
+        "catch(error){process.stderr.write(String(error&&error.message||error));process.exit(2);}"
+    )
+    try:
+        import base64
+
+        payload = base64.b64encode(latex.encode("utf-8")).decode("ascii")
+        completed = subprocess.run(
+            ["node", "-e", script, payload],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return None
+    if completed.returncode == 3:
+        return _KATEX_UNAVAILABLE
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return None
+    return completed.stdout
+
+
+def _formula_fallback_html(formula: Any, document: DocumentIR) -> tuple[str, list[str]]:
+    latex = getattr(formula, "latex", "") or ""
+    asset_id = getattr(formula, "asset_id", None)
+    if asset_id:
+        for page in document.pages:
+            for asset in page.assets:
+                if asset.asset_id == asset_id and asset.path:
+                    return (
+                        f'<span class="formula-image-fallback" data-formula-id="{escape(formula.formula_id, quote=True)}">'
+                        f'<img src="{escape(asset.path, quote=True)}" alt="{escape(latex, quote=True)}" />'
+                        f"</span>",
+                        ["formula_image_fallback"],
+                    )
+    return escape(latex), []
 
 
 def _katex_like_html(latex: str, *, display: bool) -> str:
@@ -834,12 +899,28 @@ def _from_ir_and_plans_continuous_reflow(
         ]
         for asset in page.assets:
             usage = asset_usages.get(asset.asset_id, "preserve")
+            suppression_reason = _reflow_asset_suppression_reason(asset)
             if usage == "ignore":
                 suppressed_artifacts.append(
                     {
                         "kind": "asset_ignored",
                         "asset_id": asset.asset_id,
                         "source_page_id": asset.page_id,
+                        "quality_flags": ["asset_suppressed_placeholder"]
+                        if not asset.path
+                        else [],
+                    }
+                )
+            elif suppression_reason is not None:
+                suppressed_artifacts.append(
+                    {
+                        "kind": "asset_ignored",
+                        "asset_id": asset.asset_id,
+                        "source_page_id": asset.page_id,
+                        "reason": suppression_reason,
+                        "quality_flags": ["formula_asset_suppressed"]
+                        if asset.kind == "formula"
+                        else ["asset_suppressed_placeholder"],
                     }
                 )
             elif not asset.path:
@@ -1090,6 +1171,14 @@ def _asset_reading_order(blocks: list[DocumentBlock], asset: Asset) -> float:
     if before:
         return max(before) + 0.5
     return -0.5
+
+
+def _reflow_asset_suppression_reason(asset: Asset) -> str | None:
+    if asset.kind == "formula":
+        return "formula_rendered_from_text"
+    if asset.kind == "figure" and not asset.path:
+        return "vector_placeholder_without_renderable_asset"
+    return None
 
 
 def _append_reflow_asset(

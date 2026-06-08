@@ -53,12 +53,15 @@ export type LayoutMode = "source_bbox" | "continuous_reflow";
 
 export type FormulaSourceKind =
   | "text_layer"
+  | "inline_text"
   | "vector_candidate"
   | "image_candidate"
+  | "ocr"
   | "mock"
   | "unknown";
 
 export type FormulaDisplayMode = "inline" | "display";
+export type OCRRegionKind = "formula" | "text" | "page";
 
 export interface BoundingBox {
   x0: number;
@@ -80,6 +83,29 @@ export interface StyleSeed {
   color?: string;
 }
 
+export interface TextSpanIR {
+  span_id: string;
+  page_id: string;
+  block_id: string;
+  line_id: string;
+  text?: string;
+  bbox: BoundingBox;
+  font_name?: string | null;
+  font_size?: number | null;
+  flags?: number | null;
+  color?: string | null;
+  origin?: [number, number] | null;
+}
+
+export interface TextLineIR {
+  line_id: string;
+  page_id: string;
+  block_id: string;
+  text?: string;
+  bbox: BoundingBox;
+  span_ids?: string[];
+}
+
 export interface DocumentBlock {
   block_id: string;
   page_id: string;
@@ -89,6 +115,8 @@ export interface DocumentBlock {
   reading_order: number;
   source_text?: string;
   span_refs?: string[];
+  lines?: TextLineIR[];
+  spans?: TextSpanIR[];
   style_seed?: StyleSeed;
   formula_id?: string | null;
 }
@@ -107,10 +135,16 @@ export interface FormulaIR {
   formula_id: string;
   page_id: string;
   source_block_id?: string | null;
+  anchor_block_id?: string | null;
   asset_id?: string | null;
   latex?: string;
+  source_text?: string;
+  source_text_range?: [number, number] | null;
+  span_ids?: string[];
   display_mode?: FormulaDisplayMode;
   confidence?: number;
+  ocr_provider?: string | null;
+  ocr_confidence?: number | null;
   source_kind?: FormulaSourceKind;
   quality_flags?: string[];
 }
@@ -119,6 +153,16 @@ export interface FormulaRecognitionResult extends NoLayoutCoordinates {
   latex: string;
   display_mode?: FormulaDisplayMode;
   confidence?: number;
+  quality_flags?: string[];
+}
+
+export interface OCRRecognitionResult extends NoLayoutCoordinates {
+  text?: string;
+  latex?: string;
+  region_kind?: OCRRegionKind;
+  confidence?: number;
+  language?: string | null;
+  provider?: string;
   quality_flags?: string[];
 }
 

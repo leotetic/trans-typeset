@@ -42,6 +42,7 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
         max_upload_bytes=1234,
         translation_concurrency=3,
         translator_max_attempts=4,
+        translation_chunk_max_chars=3200,
         agent_max_repair_attempts=3,
         agent_enable_vision_analysis=True,
         layout_planner_model="layout-model",
@@ -69,6 +70,7 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
     assert payload["openai_api_key_configured"] is True
     assert payload["translation_concurrency"] == 3
     assert payload["translator_max_attempts"] == 4
+    assert payload["translation_chunk_max_chars"] == 3200
     assert payload["agent_max_repair_attempts"] == 3
     assert payload["agent_enable_vision_analysis"] is True
     assert payload["layout_planner_model"] == "layout-model"
@@ -184,6 +186,55 @@ def test_config_uses_persisted_provider_when_env_has_no_key(
     assert "persisted-secret" not in response.text
 
 
+def test_config_defaults_chunk_size_by_translator_provider(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    deterministic = runtime_config.runtime_config_response(storage)
+
+    assert deterministic.translation_chunk_max_chars == 6000
+
+    storage.write_runtime_config(
+        {
+            "openai_base_url": "https://persisted.example.test/v1",
+            "openai_api_key": "persisted-secret",
+            "openai_model": "persisted-model",
+            "translation_concurrency": 16,
+        }
+    )
+
+    model_config = runtime_config.runtime_config_response(storage)
+
+    assert model_config.translation_chunk_max_chars == 3500
+    assert model_config.translation_concurrency == 4
+
+
+def test_config_migrates_legacy_default_ocr_order(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config(
+        {"ocr_provider_order": ["pix2text", "openai_vision", "deterministic"]}
+    )
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    migrated = runtime_config.runtime_config_response(storage)
+
+    assert migrated.ocr_provider_order == ["deterministic"]
+
+
+def test_config_preserves_explicit_pix2text_ocr_order(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config({"ocr_provider_order": ["pix2text", "deterministic"]})
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    configured = runtime_config.runtime_config_response(storage)
+
+    assert configured.ocr_provider_order == ["pix2text", "deterministic"]
+
+
 def test_config_returns_complete_render_defaults(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     storage.write_runtime_config(
@@ -282,6 +333,7 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
             "openai_api_key": "secret-key",
             "translation_concurrency": 4,
             "translator_max_attempts": 3,
+            "translation_chunk_max_chars": 4200,
             "render_defaults": render_defaults,
         },
     )
@@ -294,6 +346,7 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
     assert payload["openai_api_key_configured"] is True
     assert payload["translation_concurrency"] == 4
     assert payload["translator_max_attempts"] == 3
+    assert payload["translation_chunk_max_chars"] == 4200
     assert payload["render_defaults"]["font_stack"] == ["Noto Sans CJK SC", "serif"]
     assert payload["render_defaults"]["line_height"] == 1.5
     assert payload["render_defaults"]["overflow_policy"]["min_font_scale"] == 0.72

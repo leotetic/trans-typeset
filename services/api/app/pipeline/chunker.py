@@ -116,6 +116,21 @@ def _chunk_context(
         parts.append("Nearby titles: " + " > ".join(nearby_titles[-3:]) + ".")
     if previous_blocks:
         parts.append("Previous chunk tail: " + _summarize_blocks(previous_blocks[-2:]) + ".")
+    formulas = document.formulas_by_id()
+    formula_context: list[str] = []
+    for block in blocks:
+        for token in block.preserve_tokens:
+            formula_match = re.fullmatch(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}", token)
+            if not formula_match:
+                continue
+            formula = formulas.get(formula_match.group(1))
+            if formula is None:
+                continue
+            formula_context.append(
+                f"{token} => {formula.display_mode} LaTeX: {formula.latex}"
+            )
+    if formula_context:
+        parts.append("Formula refs: " + " | ".join(formula_context) + ".")
     parts.append("Current chunk summary: " + _summarize_blocks(blocks) + ".")
     return "\n".join(parts)
 

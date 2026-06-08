@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "text": {
+      "default": "",
+      "title": "Text",
+      "type": "string"
+    },
+    "latex": {
+      "default": "",
+      "title": "Latex",
+      "type": "string"
+    },
+    "region_kind": {
+      "default": "text",
+      "enum": [
+        "formula",
+        "text",
+        "page"
+      ],
+      "title": "Region Kind",
+      "type": "string"
+    },
+    "confidence": {
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "language": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Language"
+    },
+    "provider": {
+      "default": "unknown",
+      "title": "Provider",
+      "type": "string"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    }
+  },
+  "title": "OCRRecognitionResult",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

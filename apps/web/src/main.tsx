@@ -155,7 +155,12 @@ function App() {
     openai_model: "",
     openai_api_key: "",
     translation_concurrency: 2,
-    translator_max_attempts: 2
+    translator_max_attempts: 2,
+    translation_chunk_max_chars: 6000,
+    ocr_provider_order: ["deterministic"],
+    ocr_min_confidence: 0.35,
+    ocr_provider_timeout_seconds: 12,
+    ocr_max_visual_candidates: 12
   });
   const [configIssue, setConfigIssue] = useState<string | null>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -237,7 +242,12 @@ function App() {
         openai_model: config.openai_model,
         openai_api_key: "",
         translation_concurrency: config.translation_concurrency,
-        translator_max_attempts: config.translator_max_attempts
+        translator_max_attempts: config.translator_max_attempts,
+        translation_chunk_max_chars: config.translation_chunk_max_chars,
+        ocr_provider_order: config.ocr_provider_order,
+        ocr_min_confidence: config.ocr_min_confidence,
+        ocr_provider_timeout_seconds: config.ocr_provider_timeout_seconds,
+        ocr_max_visual_candidates: config.ocr_max_visual_candidates
       });
       setConfigIssue(null);
       if (!config.allowed_target_langs.includes(targetLang)) {
@@ -637,7 +647,12 @@ function App() {
         openai_model: configDraft.openai_model,
         openai_api_key: configDraft.openai_api_key || undefined,
         translation_concurrency: configDraft.translation_concurrency,
-        translator_max_attempts: configDraft.translator_max_attempts
+        translator_max_attempts: configDraft.translator_max_attempts,
+        translation_chunk_max_chars: configDraft.translation_chunk_max_chars,
+        ocr_provider_order: configDraft.ocr_provider_order,
+        ocr_min_confidence: configDraft.ocr_min_confidence,
+        ocr_provider_timeout_seconds: configDraft.ocr_provider_timeout_seconds,
+        ocr_max_visual_candidates: configDraft.ocr_max_visual_candidates
       });
       setRuntimeConfig(config);
       setConfigDraft((draft) => ({ ...draft, openai_api_key: "" }));
@@ -1312,6 +1327,11 @@ function RuntimeConfigCard({
     openai_api_key: string;
     translation_concurrency: number;
     translator_max_attempts: number;
+    translation_chunk_max_chars: number;
+    ocr_provider_order: string[];
+    ocr_min_confidence: number;
+    ocr_provider_timeout_seconds: number;
+    ocr_max_visual_candidates: number;
   };
   issue: string | null;
   validation: BaseUrlValidation;
@@ -1322,6 +1342,11 @@ function RuntimeConfigCard({
     openai_api_key: string;
     translation_concurrency: number;
     translator_max_attempts: number;
+    translation_chunk_max_chars: number;
+    ocr_provider_order: string[];
+    ocr_min_confidence: number;
+    ocr_provider_timeout_seconds: number;
+    ocr_max_visual_candidates: number;
   }>>;
   onSave: () => void;
 }) {
@@ -1339,7 +1364,7 @@ function RuntimeConfigCard({
           <strong>{issue ? issue : provider === "deterministic" ? "Deterministic 本地模式" : config?.openai_model}</strong>
           <small>
             {config
-              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · 尝试 ${config.translator_max_attempts}`
+              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · Chunk ${config.translation_chunk_max_chars} · OCR ${config.ocr_provider_order.join(">")} · ${config.ocr_provider_timeout_seconds}s/${config.ocr_max_visual_candidates}`
               : "读取后端配置中"}
           </small>
         </div>
@@ -1408,6 +1433,21 @@ function RuntimeConfigCard({
               onDraftChange((current) => ({
                 ...current,
                 translator_max_attempts: clampInt(event.target.value, 1, 5)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>Chunk</span>
+          <input
+            type="number"
+            min={500}
+            max={12000}
+            value={draft.translation_chunk_max_chars}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                translation_chunk_max_chars: clampInt(event.target.value, 500, 12000)
               }))
             }
           />
@@ -1858,10 +1898,16 @@ function artifactLabel(name: string) {
       return "Repair";
     case "asset-ir":
       return "Assets";
+    case "formula-candidates":
+      return "Formula Candidates";
     case "formula-recognition":
       return "Formula";
     case "formula-diagnostics":
       return "Formula QA";
+    case "ocr-recognition":
+      return "OCR";
+    case "ocr-diagnostics":
+      return "OCR QA";
     case "document-ir":
       return "IR";
     case "translation-chunks":

@@ -123,11 +123,10 @@ class OpenAICompatibleTranslator(Translator):
                 last_error = exc
                 self._record_unparseable_response(chunk, attempt, exc)
                 if attempt >= self.max_attempts:
-                    return self._fallback_plan_for_unparseable_response(
-                        chunk,
-                        attempt,
-                        exc,
-                    )
+                    raise TranslationError(
+                        "Translator response was not recoverable for "
+                        f"{chunk.chunk_id}: {exc}"
+                    ) from exc
                 await asyncio.sleep(0.25 * attempt)
             except TranslationError as exc:
                 last_error = exc
@@ -365,55 +364,15 @@ class OpenAICompatibleTranslator(Translator):
             if isinstance(candidate, dict) and _looks_like_layout_plan_payload(candidate):
                 return candidate
 
+        salvaged = _salvage_layout_plan_payload(chunk, sanitized_content)
+        if salvaged is not None:
+            return salvaged
+
         raise UnparseableTranslationResponseError(
             f"Translator returned content without a TranslationLayoutPlan JSON object "
             f"for {chunk.chunk_id}",
             content=content,
         )
-
-    def _fallback_plan_for_unparseable_response(
-        self,
-        chunk: TranslationChunk,
-        attempt: int,
-        exc: UnparseableTranslationResponseError,
-    ) -> TranslationLayoutPlan:
-        blocks: list[TranslationBlockPlan] = []
-        for source in chunk.source_blocks:
-            quality_flags = [
-                "translator_response_unparseable",
-                "source_text_fallback",
-                "missing_translation",
-            ]
-            if attempt > 1:
-                quality_flags.append(f"retry_attempt_{attempt}")
-            inline_items = []
-            for token in source.preserve_tokens:
-                inline_items.append(_inline_item_for_token(token))
-                quality_flags.append("preserve_token_repaired")
-            blocks.append(
-                TranslationBlockPlan(
-                    source_block_id=source.block_id,
-                    translated_text=source.source_text,
-                    inline_items=inline_items,
-                    role=source.role,
-                    render_intent="preserve_asset"
-                    if source.role in {BlockRole.FIGURE, BlockRole.TABLE}
-                    else "normal",
-                    quality_flags=_unique_strings(quality_flags),
-                )
-            )
-        plan = TranslationLayoutPlan(
-            chunk_id=chunk.chunk_id,
-            target_lang=chunk.target_lang,
-            blocks=blocks,
-        )
-        try:
-            return validate_layout_plan(chunk, plan)
-        except LayoutPlanValidationError as validation_exc:
-            raise TranslationError(
-                "Translator fallback layout plan validation failed "
-                f"for {chunk.chunk_id}: {validation_exc}"
-            ) from validation_exc
 
     def _record_unparseable_response(
         self,
@@ -433,6 +392,16 @@ class OpenAICompatibleTranslator(Translator):
                 "content_length": len(text),
                 "response_preview_length": len(preview),
                 "sanitized_response_preview": preview,
+                "quality_flags": _unique_strings(
+                    [
+                        "translator_response_unparseable",
+                        *(
+                            ["translator_unrecoverable_response"]
+                            if attempt >= self.max_attempts
+                            else []
+                        ),
+                    ]
+                ),
             }
         )
 
@@ -523,6 +492,144 @@ def _http_scheme_suggestion(base_url: str) -> str | None:
 
 def _strip_thinking_blocks(content: str) -> str:
     return re.sub(r"<think\b[^>]*>.*?</think>", "", content, flags=re.IGNORECASE | re.DOTALL)
+
+
+def _salvage_layout_plan_payload(
+    chunk: TranslationChunk,
+    content: str,
+) -> dict[str, Any] | None:
+    blocks: list[dict[str, Any]] = []
+    for source in chunk.source_blocks:
+        translated_text = _salvage_translated_text_for_block(content, source.block_id)
+        if translated_text is None or not translated_text.strip():
+            continue
+        blocks.append(
+            {
+                "source_block_id": source.block_id,
+                "translated_text": translated_text,
+                "inline_items": [],
+                "role": source.role.value,
+                "render_intent": "preserve_asset"
+                if source.role in {BlockRole.FIGURE, BlockRole.TABLE}
+                else "normal",
+                "quality_flags": ["translator_json_salvaged"],
+            }
+        )
+    if blocks:
+        return {
+            "schema_version": "0.1",
+            "chunk_id": chunk.chunk_id,
+            "target_lang": chunk.target_lang,
+            "blocks": blocks,
+        }
+
+    if len(chunk.source_blocks) == 1:
+        plain_text = _plain_text_salvage(content)
+        if plain_text:
+            source = chunk.source_blocks[0]
+            return {
+                "schema_version": "0.1",
+                "chunk_id": chunk.chunk_id,
+                "target_lang": chunk.target_lang,
+                "blocks": [
+                    {
+                        "source_block_id": source.block_id,
+                        "translated_text": plain_text,
+                        "inline_items": [],
+                        "role": source.role.value,
+                        "render_intent": "preserve_asset"
+                        if source.role in {BlockRole.FIGURE, BlockRole.TABLE}
+                        else "normal",
+                        "quality_flags": ["translator_plain_text_salvaged"],
+                    }
+                ],
+            }
+    return None
+
+
+def _salvage_translated_text_for_block(content: str, source_block_id: str) -> str | None:
+    id_pattern = re.compile(
+        r'"source_block_id"\s*:\s*"'
+        + re.escape(source_block_id)
+        + r'"'
+    )
+    decoder = json.JSONDecoder()
+    for id_match in id_pattern.finditer(content):
+        translated_key = re.search(
+            r'"translated_text"\s*:',
+            content[id_match.end() :],
+        )
+        if translated_key is None:
+            continue
+        value_start = id_match.end() + translated_key.end()
+        while value_start < len(content) and content[value_start].isspace():
+            value_start += 1
+        if value_start >= len(content) or content[value_start] != '"':
+            continue
+        try:
+            value, _end = decoder.raw_decode(content, value_start)
+        except json.JSONDecodeError:
+            value = _read_partial_json_string(content, value_start)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _read_partial_json_string(content: str, quote_index: int) -> str | None:
+    if quote_index >= len(content) or content[quote_index] != '"':
+        return None
+    chars: list[str] = []
+    index = quote_index + 1
+    escaping = False
+    while index < len(content):
+        char = content[index]
+        if escaping:
+            chars.append(_decode_json_escape(char))
+            escaping = False
+        elif char == "\\":
+            escaping = True
+        elif char == '"':
+            return "".join(chars)
+        else:
+            chars.append(char)
+        index += 1
+    partial = "".join(chars).strip()
+    return partial or None
+
+
+def _decode_json_escape(char: str) -> str:
+    return {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }.get(char, char)
+
+
+def _plain_text_salvage(content: str) -> str | None:
+    stripped = re.sub(r"^```(?:text|markdown)?|```$", "", content.strip(), flags=re.MULTILINE)
+    stripped = stripped.strip()
+    if not stripped:
+        return None
+    if _looks_like_layout_plan_payload_fragment(stripped):
+        return None
+    if re.search(r'"source_block_id"\s*:', stripped):
+        return None
+    if stripped.startswith("{") or stripped.startswith("["):
+        return None
+    return stripped
+
+
+def _looks_like_layout_plan_payload_fragment(content: str) -> bool:
+    return (
+        '"schema_version"' in content
+        or '"blocks"' in content
+        or '"translated_text"' in content
+    )
 
 
 def _diagnostic_text_for_content(content: object) -> str:

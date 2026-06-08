@@ -283,8 +283,8 @@ def build_layout_intent_plan(
     assets = [
         LayoutIntentAsset(
             asset_id=asset.asset_id,
-            usage="preserve" if intent.constraints.preserve_images else "ignore",
-            quality_flags=[] if asset.path else ["asset_missing_path"],
+            usage=_layout_asset_usage(asset, intent),
+            quality_flags=_layout_asset_quality_flags(asset, intent),
         )
         for page in document.pages
         for asset in page.assets
@@ -341,10 +341,12 @@ def build_semantic_layout_analysis(
     asset_signals = [
         SemanticAssetSignal(
             asset_id=asset.asset_id,
-            usage_hint="preserve" if intent.constraints.preserve_images else "ignore",
+            usage_hint=_layout_asset_usage(asset, intent),
             text_hint=asset.alt_text or "",
-            confidence=0.75 if asset.path else 0.35,
-            quality_flags=[] if asset.path else ["asset_missing_path"],
+            confidence=0.75
+            if _layout_asset_usage(asset, intent) == "preserve"
+            else 0.35,
+            quality_flags=_layout_asset_quality_flags(asset, intent),
         )
         for page in document.pages
         for asset in page.assets
@@ -656,6 +658,25 @@ def _render_intent_for_block(
     if intent.style_intent == StyleIntent.HANDOUT:
         return "compact"
     return "normal"
+
+
+def _layout_asset_usage(asset: Asset, intent: UserIntent) -> str:
+    if not intent.constraints.preserve_images:
+        return "ignore"
+    if not asset.path and asset.kind == "figure":
+        return "ignore"
+    return "preserve"
+
+
+def _layout_asset_quality_flags(asset: Asset, intent: UserIntent) -> list[str]:
+    flags: list[str] = []
+    if not asset.path:
+        flags.append("asset_missing_path")
+    if not intent.constraints.preserve_images:
+        flags.append("asset_suppressed_by_user_constraint")
+    elif asset.kind == "figure" and not asset.path:
+        flags.append("asset_suppressed_placeholder")
+    return flags
 
 
 def _priority_for_role(role: BlockRole) -> int:

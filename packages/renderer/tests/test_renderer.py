@@ -341,6 +341,43 @@ def test_formula_block_renders_internal_latex_markup() -> None:
     assert "{{formula:formula_1}}" not in html
 
 
+def test_inline_formula_ref_renders_inside_paragraph() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Energy {{formula:formula_inline}} is preserved.",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+
+    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+
+    assert 'class="katex"' in html
+    assert 'class="katex-display"' not in html
+    assert "Energy " in html
+    assert "{{formula:formula_inline}}" not in html
+
+
 def test_invalid_formula_latex_falls_back_with_quality_flag() -> None:
     formula = _block(
         "p1_formula",
@@ -654,9 +691,11 @@ def test_continuous_reflow_uses_gbt_page_layout_without_source_bbox_continuation
     assert render_document.layout_trace["standard"] == "gb_t_7713_1_2025"
     assert render_document.layout_trace["suppressed_artifacts"] == [
         {
-            "kind": "asset_without_path",
+            "kind": "asset_ignored",
             "asset_id": "vector_1",
             "source_page_id": "p1",
+            "reason": "vector_placeholder_without_renderable_asset",
+            "quality_flags": ["asset_suppressed_placeholder"],
         }
     ]
     assert 'data-asset-id="vector_1"' not in html
@@ -699,6 +738,72 @@ def test_continuous_reflow_preserves_raster_assets_in_reading_flow() -> None:
     assert 'data-asset-id="asset_1"' in html
     assert render_document.pages[0].assets[0].quality_flags == ["reflow_asset"]
     assert render_document.layout_trace["assets"][0]["asset_id"] == "asset_1"
+
+
+def test_continuous_reflow_suppresses_formula_assets_but_preserves_figures() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=50, y0=90, x1=250, y1=120),
+        source_text="{{formula:formula_1}}",
+        reading_order=0,
+    )
+    formula_asset = Asset(
+        asset_id="formula_asset",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=50, y0=90, x1=250, y1=120),
+        path="/api/documents/doc_1/assets/formula_asset.png",
+        formula_id="formula_1",
+    )
+    figure_asset = Asset(
+        asset_id="figure_asset",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=50, y0=140, x1=250, y1=260),
+        path="/api/documents/doc_1/assets/figure_asset.png",
+        alt_text="Figure asset",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+                assets=[formula_asset, figure_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    html = render_to_html(render_document)
+
+    assert 'data-asset-id="formula_asset"' not in html
+    assert 'data-asset-id="figure_asset"' in html
+    assert {
+        "kind": "asset_ignored",
+        "asset_id": "formula_asset",
+        "source_page_id": "p1",
+        "reason": "formula_rendered_from_text",
+        "quality_flags": ["formula_asset_suppressed"],
+    } in render_document.layout_trace["suppressed_artifacts"]
 
 
 def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:

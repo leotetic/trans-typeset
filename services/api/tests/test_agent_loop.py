@@ -5,6 +5,7 @@ import pytest
 from app.pipeline.agents.llm import build_layout_intelligence_client
 from app.pipeline.workflow import build_layout_intent_plan, build_semantic_layout_analysis
 from pdf_translator_schema import (
+    Asset,
     BlockRole,
     BoundingBox,
     DocumentIR,
@@ -165,3 +166,48 @@ def test_layout_intelligence_client_coerces_structured_output_without_real_api_k
         SemanticLayoutAnalysis,
         LayoutIntentPlan,
     }
+
+
+def test_layout_intent_ignores_vector_placeholder_assets_by_default() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=60, x1=260, y1=120),
+                        reading_order=0,
+                        source_text="Body text.",
+                    )
+                ],
+                assets=[
+                    Asset(
+                        asset_id="vector_1",
+                        page_id="p1",
+                        kind="figure",
+                        bbox=BoundingBox(x0=30, y0=140, x1=250, y1=200),
+                        alt_text="PDF vector drawing placeholder",
+                    ),
+                    Asset(
+                        asset_id="figure_1",
+                        page_id="p1",
+                        kind="image",
+                        bbox=BoundingBox(x0=30, y0=220, x1=250, y1=320),
+                        path="/api/documents/doc_1/assets/figure_1.png",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    plan = build_layout_intent_plan(document, UserIntent(target_lang="zh-CN"))
+    assets = {asset.asset_id: asset for asset in plan.assets}
+
+    assert assets["vector_1"].usage == "ignore"
+    assert "asset_suppressed_placeholder" in assets["vector_1"].quality_flags
+    assert assets["figure_1"].usage == "preserve"

@@ -58,10 +58,15 @@ class RuntimeConfig(BaseModel):
     openai_api_key_configured: bool
     translation_concurrency: int
     translator_max_attempts: int
+    translation_chunk_max_chars: int
     agent_max_repair_attempts: int
     agent_enable_vision_analysis: bool
     layout_planner_model: str
     vision_analyzer_model: str
+    ocr_provider_order: list[str]
+    ocr_min_confidence: float
+    ocr_provider_timeout_seconds: float
+    ocr_max_visual_candidates: int
     render_defaults: RenderDefaults
 
 
@@ -72,10 +77,15 @@ class UpdateRuntimeConfig(BaseModel):
     openai_api_key: str | None = None
     translation_concurrency: int | None = Field(default=None, ge=1, le=16)
     translator_max_attempts: int | None = Field(default=None, ge=1, le=5)
+    translation_chunk_max_chars: int | None = Field(default=None, ge=500, le=12000)
     agent_max_repair_attempts: int | None = Field(default=None, ge=0, le=5)
     agent_enable_vision_analysis: bool | None = None
     layout_planner_model: str | None = None
     vision_analyzer_model: str | None = None
+    ocr_provider_order: list[str] | None = None
+    ocr_min_confidence: float | None = Field(default=None, ge=0, le=1)
+    ocr_provider_timeout_seconds: float | None = Field(default=None, ge=1, le=120)
+    ocr_max_visual_candidates: int | None = Field(default=None, ge=0, le=200)
     render_defaults: RenderDefaults | None = None
 
 

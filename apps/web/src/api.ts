@@ -23,10 +23,15 @@ export interface RuntimeConfig {
   openai_api_key_configured: boolean;
   translation_concurrency: number;
   translator_max_attempts: number;
+  translation_chunk_max_chars: number;
   agent_max_repair_attempts: number;
   agent_enable_vision_analysis: boolean;
   layout_planner_model: string;
   vision_analyzer_model: string;
+  ocr_provider_order: string[];
+  ocr_min_confidence: number;
+  ocr_provider_timeout_seconds: number;
+  ocr_max_visual_candidates: number;
   render_defaults: RenderDefaults;
 }
 
@@ -37,10 +42,15 @@ export interface UpdateRuntimeConfig {
   openai_api_key?: string;
   translation_concurrency?: number;
   translator_max_attempts?: number;
+  translation_chunk_max_chars?: number;
   agent_max_repair_attempts?: number;
   agent_enable_vision_analysis?: boolean;
   layout_planner_model?: string;
   vision_analyzer_model?: string;
+  ocr_provider_order?: string[];
+  ocr_min_confidence?: number;
+  ocr_provider_timeout_seconds?: number;
+  ocr_max_visual_candidates?: number;
   render_defaults?: RenderDefaults;
 }
 
@@ -490,10 +500,16 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     typeof payload.openai_api_key_configured !== "boolean" ||
     typeof payload.translation_concurrency !== "number" ||
     typeof payload.translator_max_attempts !== "number" ||
+    typeof payload.translation_chunk_max_chars !== "number" ||
     typeof payload.agent_max_repair_attempts !== "number" ||
     typeof payload.agent_enable_vision_analysis !== "boolean" ||
     typeof payload.layout_planner_model !== "string" ||
     typeof payload.vision_analyzer_model !== "string" ||
+    !Array.isArray(payload.ocr_provider_order) ||
+    !payload.ocr_provider_order.every((item) => typeof item === "string") ||
+    typeof payload.ocr_min_confidence !== "number" ||
+    typeof payload.ocr_provider_timeout_seconds !== "number" ||
+    typeof payload.ocr_max_visual_candidates !== "number" ||
     !isRecord(payload.render_defaults)
   ) {
     throw new Error("运行配置返回结构不正确。");
@@ -510,10 +526,15 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     openai_api_key_configured: payload.openai_api_key_configured,
     translation_concurrency: payload.translation_concurrency,
     translator_max_attempts: payload.translator_max_attempts,
+    translation_chunk_max_chars: payload.translation_chunk_max_chars,
     agent_max_repair_attempts: payload.agent_max_repair_attempts,
     agent_enable_vision_analysis: payload.agent_enable_vision_analysis,
     layout_planner_model: payload.layout_planner_model,
     vision_analyzer_model: payload.vision_analyzer_model,
+    ocr_provider_order: payload.ocr_provider_order,
+    ocr_min_confidence: payload.ocr_min_confidence,
+    ocr_provider_timeout_seconds: payload.ocr_provider_timeout_seconds,
+    ocr_max_visual_candidates: payload.ocr_max_visual_candidates,
     render_defaults: renderDefaults
   };
 }

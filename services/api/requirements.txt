@@ -12,5 +12,9 @@ python-dotenv>=1.0
 python-multipart>=0.0.9
 uvicorn>=0.30
 playwright>=1.45
+pix2text>=1.1.2
+opencv-python-headless>=4.9
+pillow>=10.0
+numpy>=1.26
 -e packages/schema
 -e packages/renderer
