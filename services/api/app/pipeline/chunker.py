@@ -16,11 +16,8 @@ from .formula_processing import formula_placeholders_for_block, is_formula_only_
 
 TOKEN_PATTERN = re.compile(
     r"("
-<<<<<<< HEAD
     r"\{\{formula:[A-Za-z0-9_.:-]+\}\}|"
-=======
     r"@@FORMULA_[A-Za-z0-9_]+@@|"
->>>>>>> codex/freatrue_formula
     r"\[[0-9,\-\s;]+\]|"
     r"\([A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\)|"
     r"\b[A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\b|"
@@ -138,14 +135,21 @@ def _chunk_context(
     for block in blocks:
         for token in block.preserve_tokens:
             formula_match = re.fullmatch(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}", token)
-            if not formula_match:
+            if formula_match:
+                formula = formulas.get(formula_match.group(1))
+                if formula is not None:
+                    formula_context.append(
+                        f"{token} => {formula.display_mode} LaTeX: {formula.latex}"
+                    )
                 continue
-            formula = formulas.get(formula_match.group(1))
-            if formula is None:
-                continue
-            formula_context.append(
-                f"{token} => {formula.display_mode} LaTeX: {formula.latex}"
-            )
+            for document_page in document.pages:
+                for document_block in document_page.blocks:
+                    for formula in document_block.formulas:
+                        if formula.placeholder == token:
+                            formula_context.append(
+                                f"{token} => {formula.kind} LaTeX: {formula.latex}"
+                            )
+                            break
     if formula_context:
         parts.append("Formula refs: " + " | ".join(formula_context) + ".")
     parts.append("Current chunk summary: " + _summarize_blocks(blocks) + ".")

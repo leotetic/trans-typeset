@@ -41,12 +41,9 @@ class Translator:
 
 
 def _inline_item_for_token(token: str) -> InlineItem:
-<<<<<<< HEAD
     formula_ref = re.fullmatch(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}", token)
-    if formula_ref:
-=======
-    if FORMULA_PLACEHOLDER_PATTERN.fullmatch(token):
->>>>>>> codex/freatrue_formula
+    formula_placeholder = FORMULA_PLACEHOLDER_PATTERN.fullmatch(token)
+    if formula_ref or formula_placeholder:
         kind = "formula"
     elif re.fullmatch(r"\[[0-9,\-\s;]+\]", token):
         kind = "reference_marker"
@@ -65,7 +62,11 @@ def _inline_item_for_token(token: str) -> InlineItem:
         kind=kind,
         text=token,
         source_token=token,
-        asset_id=formula_ref.group(1) if formula_ref else None,
+        asset_id=formula_ref.group(1)
+        if formula_ref
+        else token.removeprefix("@@FORMULA_").removesuffix("@@")
+        if formula_placeholder
+        else None,
     )
 
 
@@ -489,17 +490,13 @@ class OpenAICompatibleTranslator(Translator):
         )
         return (
             "Translate the following academic paper chunk. Preserve citation, formula, "
-<<<<<<< HEAD
-            "reference marker, figure, and table tokens. Formula refs such as "
-            "{{formula:formula_id}} are renderer-owned LaTeX placeholders: copy them exactly "
-            "and do not rewrite their LaTeX. Cover every input block exactly once. "
-=======
             "reference marker, figure, and table tokens. Cover every input block exactly once. "
             "Do not translate, delete, rewrite, or move formula placeholders matching "
             "@@FORMULA_[A-Za-z0-9_]+@@; copy them exactly into translated_text or inline_items. "
+            "Legacy formula refs such as {{formula:formula_id}} are renderer-owned LaTeX "
+            "placeholders and must also be copied exactly. "
             "Blocks with requires_translation=false are formula-only blocks and must be "
             "copied exactly. "
->>>>>>> codex/freatrue_formula
             "Use glossary entries consistently when they are provided in the chunk JSON. "
             "Use the chunk context for local continuity, but translate only the listed blocks. "
             "Return valid JSON object only.\n\n"

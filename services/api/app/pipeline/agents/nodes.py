@@ -168,7 +168,6 @@ async def _read_input(
                 raise
             assets = []
             parser_diagnostics = context.build_parser_diagnostics(document)
-<<<<<<< HEAD
             parser_diagnostics["pdf_parse_ms"] = pdf_parse_ms
             context.update_status(
                 job_id,
@@ -246,6 +245,39 @@ async def _read_input(
                         *formula_result.diagnostics.get("quality_flags", []),
                     ]
                 )
+                formula_diagnostics = {
+                    **context.build_formula_diagnostics(document),
+                    "formula_count": len(formula_result.formulas),
+                    "inline_count": sum(
+                        1
+                        for formula in formula_result.formulas
+                        if formula.display_mode == "inline"
+                    ),
+                    "display_count": sum(
+                        1
+                        for formula in formula_result.formulas
+                        if formula.display_mode == "display"
+                    ),
+                    "latex_success_count": sum(
+                        1 for formula in formula_result.formulas if formula.latex.strip()
+                    ),
+                    "candidate_count": formula_result.diagnostics.get("candidate_count", 0),
+                    "recognized_count": formula_result.diagnostics.get(
+                        "recognized_count",
+                        0,
+                    ),
+                    "formula_enrichment_ms": formula_enrichment_ms,
+                    "recognizer_type": formula_result.diagnostics.get(
+                        "recognizer_type",
+                        "unknown",
+                    ),
+                    "visual_formula_recognition_enabled": formula_result.diagnostics.get(
+                        "visual_formula_recognition_enabled",
+                        False,
+                    ),
+                    "quality_flags": formula_result.diagnostics.get("quality_flags", []),
+                    "enrichment": formula_result.diagnostics,
+                }
             except Exception as exc:
                 context.storage.write_json(
                     doc_id,
@@ -276,9 +308,16 @@ async def _read_input(
                         "formula_enrichment_failed",
                     ]
                 )
-=======
-            formula_diagnostics = context.build_formula_diagnostics(document)
->>>>>>> codex/freatrue_formula
+                formula_diagnostics = context.build_formula_diagnostics(document)
+                formula_diagnostics["formula_enrichment_ms"] = 0
+                formula_diagnostics["recognizer_type"] = "unknown"
+                formula_diagnostics["visual_formula_recognition_enabled"] = False
+                formula_diagnostics["quality_flags"] = _unique(
+                    [
+                        *formula_diagnostics.get("quality_flags", []),
+                        "formula_enrichment_failed",
+                    ]
+                )
             normalized = helpers["normalized_input_payload"](
                 input_sources=[input_source, layout_input_source],
                 document=document,
@@ -300,10 +339,7 @@ async def _read_input(
                 "normalized-input",
                 "document-ir",
                 "parser-diagnostics",
-<<<<<<< HEAD
                 "formula-recognition",
-=======
->>>>>>> codex/freatrue_formula
                 "formula-diagnostics",
             ]
         elif input_kind == InputKind.TEXT:
