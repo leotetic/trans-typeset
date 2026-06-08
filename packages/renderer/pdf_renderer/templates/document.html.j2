@@ -3,6 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <style>
+      {{ katex_css | safe }}
+
       * {
         box-sizing: border-box;
       }
@@ -107,10 +109,37 @@
         overflow-wrap: anywhere;
       }
 
+<<<<<<< HEAD
       .katex,
       .katex-display {
         font-family: "KaTeX_Main", "Cambria Math", "STIX Two Math", "Times New Roman", serif;
         font-size: 1em;
+=======
+      .formula {
+        font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+        white-space: nowrap;
+        text-indent: 0;
+      }
+
+      .formula-inline {
+        display: inline-block;
+        vertical-align: baseline;
+      }
+
+      .formula-display {
+        display: block;
+        width: 100%;
+        text-align: center;
+        margin: 0.18em 0;
+      }
+
+      .formula-render-failed {
+        color: #111111;
+      }
+
+      .role-footnote {
+        font-size: calc(var(--font-size-pt) * 0.86);
+>>>>>>> codex/freatrue_formula
         line-height: 1.2;
         white-space: normal;
       }
@@ -285,12 +314,40 @@
               --first-line-indent-em: {{ block.first_line_indent_em }}em;
               color: {{ block.style_seed.color }};
             "
+<<<<<<< HEAD
           >{% if block.html %}{{ block.html | safe }}{% else %}{{ block.text }}{% endif %}</div>
+=======
+          >{{ block.html | safe }}</div>
+>>>>>>> codex/freatrue_formula
         {% endfor %}
         {% if page.footer_text %}
           <div class="page-footer">{{ page.footer_text }}</div>
         {% endif %}
       </section>
     {% endfor %}
+    {% if katex_js %}
+      <script>{{ katex_js | safe }}</script>
+    {% endif %}
+    <script>
+      (() => {
+        const formulas = document.querySelectorAll(".formula[data-latex]");
+        formulas.forEach((node) => {
+          const latex = node.getAttribute("data-latex") || "";
+          if (!latex || !window.katex) {
+            node.classList.add("formula-render-failed");
+            return;
+          }
+          try {
+            window.katex.render(latex, node, {
+              displayMode: node.getAttribute("data-display") === "true",
+              throwOnError: false,
+              strict: "ignore"
+            });
+          } catch (_error) {
+            node.classList.add("formula-render-failed");
+          }
+        });
+      })();
+    </script>
   </body>
 </html>

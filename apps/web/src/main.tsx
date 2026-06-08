@@ -1922,6 +1922,8 @@ function artifactLabel(name: string) {
       return "Progress";
     case "parser-diagnostics":
       return "Parser";
+    case "formula-diagnostics":
+      return "Formula";
     default:
       return name;
   }

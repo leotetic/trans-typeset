@@ -8,6 +8,7 @@ app/provider_config.py
 app/runtime_config.py
 app/storage.py
 app/pipeline/chunker.py
+app/pipeline/formula_processing.py
 app/pipeline/orchestrator.py
 app/pipeline/parser.py
 app/pipeline/resume.py

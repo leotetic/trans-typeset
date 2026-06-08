@@ -24,6 +24,7 @@ from ..storage import storage
 from .agents import run_typesetting_graph
 from .agents.state import TypesettingGraphContext
 from .chunker import build_chunks
+<<<<<<< HEAD
 from .formulas import (
     DeterministicFormulaRecognizer,
     OpenAIFormulaRecognizer,
@@ -31,6 +32,10 @@ from .formulas import (
 )
 from .ocr import DeterministicOCRProvider, OCRService, OpenAIVisionOCRProvider, Pix2TextOCRProvider
 from .parser import UnsupportedPdfError, build_parser_diagnostics, parse_pdf
+=======
+from .formula_processing import build_formula_diagnostics
+from .parser import build_parser_diagnostics, parse_pdf
+>>>>>>> codex/freatrue_formula
 from .translator import Translator, build_translator
 from .workflow import (
     append_workflow_step,
@@ -284,7 +289,11 @@ def _graph_context() -> TypesettingGraphContext:
         load_saved_workflow=_load_saved_workflow,
         parse_pdf=parse_pdf,
         build_parser_diagnostics=build_parser_diagnostics,
+<<<<<<< HEAD
         enrich_document_formulas=_enrich_document_formulas,
+=======
+        build_formula_diagnostics=build_formula_diagnostics,
+>>>>>>> codex/freatrue_formula
         build_chunks=build_chunks,
         build_translator=build_translator,
         translate_chunks=_translate_chunks,
@@ -468,6 +477,7 @@ async def _run_workflow_from_document(
     if not chunks:
         raise ValueError("Document has no translatable chunks")
     storage.write_json(doc_id, "translation-chunks.json", [chunk.model_dump() for chunk in chunks])
+    storage.write_json(doc_id, "formula-diagnostics.json", build_formula_diagnostics(document))
     translator = build_translator(
         runtime_config["openai_base_url"],
         runtime_config["openai_api_key"],

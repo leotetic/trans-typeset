@@ -21,11 +21,14 @@ v2 在该 contract 之上新增 workflow 智能排版骨架。`InputSource`、`A
 
 - `block_id`: renderer 用来把译文放回原始 `DocumentIR` block。
 - `role`: 标题、摘要、正文、图注、公式、参考文献等语义角色。
-- `source_text`: 原文。
+- `source_text`: 发给模型的文本。若 parser 识别到公式，这里使用 `@@FORMULA_...@@` 占位符，而不是原始公式内容。
 - `nearby_titles`: 局部上下文。
-- `preserve_tokens`: 必须保留的 citation、公式、reference marker、figure/table token。
+- `preserve_tokens`: 必须保留的 citation、公式占位符、reference marker、figure/table token。
+- `requires_translation`: `false` 表示纯公式 block，translator 会本地保留，不发送给模型翻译。
 - `context`: 文档标题、附近标题、当前 chunk 摘要和前一个 chunk 尾部，用于跨 chunk 连贯性。
 - `glossary`: 术语表，translator prompt 要求按该表保持术语一致。
+
+Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBlock.text_for_translation` 写入带公式占位符的文本，并在 `DocumentBlock.formulas[]` 记录 `formula_id`、`placeholder`、`kind=inline|display`、原始公式文本、LaTeX、bbox、置信度和质量 flags。LLM 不应看到或改写原始公式；只需原样保留 `@@FORMULA_...@@`。
 
 ## LLM 输出
 
@@ -47,7 +50,7 @@ v2 在该 contract 之上新增 workflow 智能排版骨架。`InputSource`、`A
 
 renderer 负责坐标、分页、溢出、字号缩放和 continuation page。模型不得返回 `bbox`、`x`、`y`、`page` 等布局坐标字段；Pydantic models 使用 `extra="forbid"` 拒绝这些字段。
 
-后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens` 对应的 inline item，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired` 或 `preserve_token_repaired`。不可解析 JSON、无法提取 plan JSON 或请求失败会按 chunk 重试，最终失败会进入 job status。
+后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens` 对应的 inline item，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired`、`preserve_token_repaired` 或 `formula_placeholder_repaired`。不可解析 JSON、无法提取 plan JSON 或请求失败会按 chunk 重试，最终失败会进入 job status。
 
 ## 默认排版值
 
@@ -80,10 +83,15 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 - `translation-chunks`: chunker 发送给 translator 的 `TranslationChunk[]`，包含 `preserve_tokens`、附近标题、默认渲染值和约束。
 - `translation-plans`: translator 通过 `validate_layout_plan` 后的 `TranslationLayoutPlan[]`。
 - `translation-progress`: chunk 级翻译进度、失败信息和 repair/quality flag 汇总。
+<<<<<<< HEAD
 - `parser-diagnostics`: parser 阶段的页数、文本块、span/line metadata、资产、角色计数、复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。
 - `formula-candidates`: 公式 enrichment 在 OCR 前生成的 display/inline/image/vector 候选记录，用于定位漏检和误检。
 - `ocr-recognition`: 公共 OCR service 的区域识别记录，包含 provider、confidence、attempts 和质量 flags。
 - `ocr-diagnostics`: 公共 OCR service 的汇总诊断。当前公式模块是第一个消费者，整页 OCR 仅预留接口。
+=======
+- `parser-diagnostics`: parser 阶段的页数、文本块、资产、角色计数、复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。
+- `formula-diagnostics`: 公式检测和占位诊断，包含公式总数、行内/行间数量、LaTeX 成功数、fallback 数、低置信度项、未解析占位符和公式 OCR provider 状态。
+>>>>>>> codex/freatrue_formula
 - `layout-trace`: renderer 的逐块排版决策日志，包括 layout mode、标准、render defaults snapshot、源页/输出页统计、跳过块/资产、页利用率、每个 source block 的分页片段、bbox、估算行数和质量 flags。
 - `renderer-diagnostics`: renderer 根据 `DocumentIR + TranslationLayoutPlan` 生成的质量诊断，包括缺失译文、角色不一致、溢出 flags、页利用率、低利用率页、单片段页和被跳过 artifact 摘要。
 - `render-evaluation`: 基于 renderer diagnostics 的结构化验收摘要，说明是否建议 repair。
@@ -96,11 +104,15 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 
 Renderer 仍以 `DocumentIR` 为坐标事实来源，在原页面 bbox 位置渲染图片。缺失 asset path 时不会静默丢弃，而是输出 `asset_missing_path` 质量 flag 和占位元素。
 
+<<<<<<< HEAD
 表格样文本仍作为 `DocumentBlock(role="table")` 保留。parser 会在 `DocumentBlock.lines[]` 和 `DocumentBlock.spans[]` 中保存 PyMuPDF line/span 的文本、bbox、font、size、flags 和 origin；这些坐标是 parser-owned metadata，只供 detector/renderer 使用，不属于模型可返回字段。
 
 公式现在是一等 metadata：公式 enrichment 会在 parser 后识别 text-layer display formula、公式样 image/vector candidate，以及段落内 inline formula run；候选区域交给公共 OCR service，生成 `DocumentIR.formulas[]`、必要的 `Asset(kind="formula")` 和 `{{formula:formula_id}}` preserve token。`FormulaIR` 保存 `formula_id`、page/block/asset/anchor 引用、原文片段、span ids、LaTeX、inline/display mode、confidence、OCR provider、source kind 和 quality flags。OCR/model 返回的 `FormulaRecognitionResult` / `OCRRecognitionResult` 继承无坐标约束，只允许语义结果。默认 OCR provider 是 deterministic，保留文本层公式并对视觉候选标记 `formula_recognition_mock`；Pix2Text 是显式 opt-in provider，运行在 worker thread 中，初始化或识别超时会写入 `pix2text_timeout` / `ocr_provider_unavailable` 并 fallback。
 
 公式相关调试输出包括 `formula-candidates.json`、`formula-recognition.json`、`formula-diagnostics.json`、`ocr-recognition.json` 和 `ocr-diagnostics.json`。OCR 识别期间会增量写入 started/failed/recognized 记录，任务状态会显示 `Recognizing formulas n/total`，避免可选视觉 OCR 卡住时前端只能看到模糊断联。Renderer 以 `DocumentIR` 的 bbox 和 reading order 为布局事实，用本地 KaTeX 渲染公式 LaTeX；standalone block 渲染 display math，段落内 ref 渲染 inline math。无效 LaTeX 或缺失识别结果会回退原文本/公式 crop 图片并标记 `formula_render_failed`、`formula_image_fallback` 或 `formula_missing_latex`。
+=======
+表格样文本作为 `DocumentBlock` 保留并使用 table CSS。公式会优先被 parser 归一化为 `DocumentBlock.formulas[]` 和 `@@FORMULA_...@@` 占位符；chunker 只把占位符送给 translator，renderer 再用 formula metadata 回填行内或行间公式节点。当前 MVP 的 LaTeX 生成优先使用本地 Pix2Text provider 可用性和文本启发式 fallback；OCR 或 LaTeX 失败不会阻断任务，但会写入 `formula_text_fallback`、`formula_ocr_unavailable`、`formula_low_confidence` 或 `formula_render_fallback`。复杂表格结构、公式矢量图和 PDF vector graphics 仍不是完整结构化资产；较大的 vector drawing 会以 `figure` placeholder asset 保留 bbox，`parser-diagnostics.fallback_flags[]` 会暴露 `table_text_fallback`、`formula_placeholder_normalized`、`vector_asset_placeholder`、`vector_assets_not_rasterized` 等状态，便于前端和测试识别当前保真边界。
+>>>>>>> codex/freatrue_formula
 
 `renderer-diagnostics.layout_issues[]` 是轻量视觉回归信号，记录同页 item overlap、bbox 越页和空 block 等风险。它不是像素级截图 diff，但可作为端到端验收前的 deterministic 门禁。
 

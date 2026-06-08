@@ -12,9 +12,15 @@ from pdf_translator_schema import (
     TranslationConstraints,
 )
 
+from .formula_processing import formula_placeholders_for_block, is_formula_only_block
+
 TOKEN_PATTERN = re.compile(
     r"("
+<<<<<<< HEAD
     r"\{\{formula:[A-Za-z0-9_.:-]+\}\}|"
+=======
+    r"@@FORMULA_[A-Za-z0-9_]+@@|"
+>>>>>>> codex/freatrue_formula
     r"\[[0-9,\-\s;]+\]|"
     r"\([A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\)|"
     r"\b[A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\b|"
@@ -31,6 +37,17 @@ TITLE_ROLES = {BlockRole.TITLE, BlockRole.HEADING}
 def extract_preserve_tokens(text: str) -> list[str]:
     tokens = {match.group(0).strip() for match in TOKEN_PATTERN.finditer(text)}
     return sorted(tokens, key=lambda token: text.find(token))
+
+
+def _preserve_tokens_for_block(block: DocumentBlock, source_text: str) -> list[str]:
+    tokens = extract_preserve_tokens(source_text)
+    for placeholder in formula_placeholders_for_block(block):
+        if placeholder not in tokens:
+            tokens.append(placeholder)
+    return sorted(
+        tokens,
+        key=lambda token: source_text.find(token) if token in source_text else 10**9,
+    )
 
 
 def find_nearby_titles(block: DocumentBlock, all_blocks: list[DocumentBlock]) -> list[str]:
@@ -164,14 +181,16 @@ def build_chunks(
     for page in document.pages:
         page_blocks = sorted(page.blocks, key=lambda block: block.reading_order)
         for block in page_blocks:
-            if not block.source_text.strip():
+            chunk_text = block.text_for_translation.strip() or block.source_text.strip()
+            if not chunk_text:
                 continue
             source_block = SourceBlock(
                 block_id=block.block_id,
                 role=block.role,
-                source_text=block.source_text,
+                source_text=chunk_text,
                 nearby_titles=find_nearby_titles(block, ordered_document_blocks),
-                preserve_tokens=extract_preserve_tokens(block.source_text),
+                preserve_tokens=_preserve_tokens_for_block(block, chunk_text),
+                requires_translation=not is_formula_only_block(block),
             )
             block_chars = len(source_block.source_text)
             next_chars = current_chars + block_chars + (1 if current_blocks else 0)

@@ -83,6 +83,7 @@ export interface StyleSeed {
   color?: string;
 }
 
+<<<<<<< HEAD
 export interface TextSpanIR {
   span_id: string;
   page_id: string;
@@ -104,6 +105,18 @@ export interface TextLineIR {
   text?: string;
   bbox: BoundingBox;
   span_ids?: string[];
+=======
+export interface Formula {
+  formula_id: string;
+  placeholder: string;
+  kind?: "inline" | "display";
+  source_text?: string;
+  latex?: string;
+  bbox?: BoundingBox | null;
+  confidence?: number | null;
+  asset_id?: string | null;
+  quality_flags?: string[];
+>>>>>>> codex/freatrue_formula
 }
 
 export interface DocumentBlock {
@@ -114,6 +127,8 @@ export interface DocumentBlock {
   column?: number;
   reading_order: number;
   source_text?: string;
+  text_for_translation?: string;
+  formulas?: Formula[];
   span_refs?: string[];
   lines?: TextLineIR[];
   spans?: TextSpanIR[];
@@ -408,6 +423,7 @@ export interface SourceBlock {
   source_text: string;
   nearby_titles?: string[];
   preserve_tokens?: string[];
+  requires_translation?: boolean;
 }
 
 export interface TranslationChunk {

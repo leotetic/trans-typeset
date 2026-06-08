@@ -159,6 +159,18 @@
           "title": "Source Text",
           "type": "string"
         },
+        "text_for_translation": {
+          "default": "",
+          "title": "Text For Translation",
+          "type": "string"
+        },
+        "formulas": {
+          "items": {
+            "$ref": "#/$defs/Formula"
+          },
+          "title": "Formulas",
+          "type": "array"
+        },
         "span_refs": {
           "items": {
             "type": "string"
@@ -238,7 +250,11 @@
       "title": "DocumentPage",
       "type": "object"
     },
+<<<<<<< HEAD
     "FormulaIR": {
+=======
+    "Formula": {
+>>>>>>> codex/freatrue_formula
       "additionalProperties": false,
       "properties": {
         "formula_id": {
@@ -246,6 +262,7 @@
           "title": "Formula Id",
           "type": "string"
         },
+<<<<<<< HEAD
         "page_id": {
           "minLength": 1,
           "title": "Page Id",
@@ -267,13 +284,60 @@
           "anyOf": [
             {
               "type": "string"
+=======
+        "placeholder": {
+          "pattern": "^@@FORMULA_[A-Za-z0-9_]+@@$",
+          "title": "Placeholder",
+          "type": "string"
+        },
+        "kind": {
+          "default": "inline",
+          "enum": [
+            "inline",
+            "display"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_text": {
+          "default": "",
+          "title": "Source Text",
+          "type": "string"
+        },
+        "latex": {
+          "default": "",
+          "title": "Latex",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+>>>>>>> codex/freatrue_formula
             },
             {
               "type": "null"
             }
           ],
           "default": null,
+<<<<<<< HEAD
           "title": "Anchor Block Id"
+=======
+          "title": "Confidence"
+>>>>>>> codex/freatrue_formula
         },
         "asset_id": {
           "anyOf": [
@@ -287,6 +351,7 @@
           "default": null,
           "title": "Asset Id"
         },
+<<<<<<< HEAD
         "latex": {
           "default": "",
           "title": "Latex",
@@ -372,6 +437,8 @@
           "$ref": "#/$defs/FormulaSourceKind",
           "default": "unknown"
         },
+=======
+>>>>>>> codex/freatrue_formula
         "quality_flags": {
           "items": {
             "type": "string"
@@ -382,6 +449,7 @@
       },
       "required": [
         "formula_id",
+<<<<<<< HEAD
         "page_id"
       ],
       "title": "FormulaIR",
@@ -400,6 +468,13 @@
       "title": "FormulaSourceKind",
       "type": "string"
     },
+=======
+        "placeholder"
+      ],
+      "title": "Formula",
+      "type": "object"
+    },
+>>>>>>> codex/freatrue_formula
     "PageSize": {
       "additionalProperties": false,
       "properties": {

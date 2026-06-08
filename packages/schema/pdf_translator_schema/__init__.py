@@ -7,12 +7,16 @@ from .models import (
     DocumentBlock,
     DocumentIR,
     DocumentPage,
+<<<<<<< HEAD
     FormulaDisplayMode,
     FormulaIR,
     FormulaRecognitionResult,
     FormulaSourceKind,
     OCRRecognitionResult,
     OCRRegionKind,
+=======
+    Formula,
+>>>>>>> codex/freatrue_formula
     InputKind,
     InputSourceRole,
     InputSource,
@@ -64,12 +68,16 @@ __all__ = [
     "DocumentBlock",
     "DocumentIR",
     "DocumentPage",
+<<<<<<< HEAD
     "FormulaDisplayMode",
     "FormulaIR",
     "FormulaRecognitionResult",
     "FormulaSourceKind",
     "OCRRecognitionResult",
     "OCRRegionKind",
+=======
+    "Formula",
+>>>>>>> codex/freatrue_formula
     "InputKind",
     "InputSourceRole",
     "InputSource",

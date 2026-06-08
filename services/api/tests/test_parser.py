@@ -11,6 +11,7 @@ from app.pipeline.parser import (
     _stable_block_id,
     classify_role,
 )
+from app.pipeline.formula_processing import build_formula_diagnostics, normalize_document_formulas
 from pdf_translator_schema import (
     Asset,
     BlockRole,
@@ -236,6 +237,50 @@ def test_parser_diagnostics_reports_structured_content_fallbacks() -> None:
     assert "vector_asset_placeholder" in diagnostics["fallback_flags"]
     assert "vector_assets_not_rasterized" in diagnostics["fallback_flags"]
     assert diagnostics["unsupported_features"][0]["status"] == "placeholder_only"
+
+
+def test_formula_normalization_detects_inline_and_display_formulas() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="para",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=20, x1=280, y1=60),
+                        reading_order=0,
+                        source_text="The scaled law is α[E] ¼ α[B] ¼ −1.",
+                    ),
+                    DocumentBlock(
+                        block_id="formula",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=10, y0=90, x1=280, y1=120),
+                        reading_order=1,
+                        source_text="@fs=@t + ∇·(fs v)=0",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+    para, display = normalized.pages[0].blocks
+    diagnostics = build_formula_diagnostics(normalized)
+
+    assert "@@FORMULA_" in para.text_for_translation
+    assert para.formulas[0].kind == "inline"
+    assert "\\alpha" in para.formulas[0].latex
+    assert display.text_for_translation == display.formulas[0].placeholder
+    assert display.formulas[0].kind == "display"
+    assert "\\nabla" in display.formulas[0].latex
+    assert diagnostics["formula_count"] == 2
+    assert diagnostics["inline_count"] == 1
+    assert diagnostics["display_count"] == 1
 
 
 def test_unsupported_pdf_error_carries_scanned_pdf_diagnostics() -> None:

@@ -464,6 +464,11 @@
           },
           "title": "Preserve Tokens",
           "type": "array"
+        },
+        "requires_translation": {
+          "default": true,
+          "title": "Requires Translation",
+          "type": "boolean"
         }
       },
       "required": [

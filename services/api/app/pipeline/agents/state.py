@@ -51,7 +51,11 @@ class TypesettingGraphContext:
         load_saved_workflow: Any,
         parse_pdf: Any,
         build_parser_diagnostics: Any,
+<<<<<<< HEAD
         enrich_document_formulas: Any,
+=======
+        build_formula_diagnostics: Any,
+>>>>>>> codex/freatrue_formula
         build_chunks: Any,
         build_translator: Any,
         translate_chunks: Any,
@@ -68,7 +72,11 @@ class TypesettingGraphContext:
         self.load_saved_workflow = load_saved_workflow
         self.parse_pdf = parse_pdf
         self.build_parser_diagnostics = build_parser_diagnostics
+<<<<<<< HEAD
         self.enrich_document_formulas = enrich_document_formulas
+=======
+        self.build_formula_diagnostics = build_formula_diagnostics
+>>>>>>> codex/freatrue_formula
         self.build_chunks = build_chunks
         self.build_translator = build_translator
         self.translate_chunks = translate_chunks

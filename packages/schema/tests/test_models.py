@@ -8,8 +8,12 @@ from pdf_translator_schema import (
     BoundingBox,
     DocumentIR,
     DocumentPage,
+<<<<<<< HEAD
     FormulaIR,
     FormulaRecognitionResult,
+=======
+    Formula,
+>>>>>>> codex/freatrue_formula
     InputSource,
     OCRRecognitionResult,
     PageSize,
@@ -222,6 +226,7 @@ def test_document_rejects_duplicate_page_asset_and_reading_order_ids() -> None:
         )
 
 
+<<<<<<< HEAD
 def test_document_can_reference_formula_ir_from_block_and_asset() -> None:
     block = DocumentBlock(
         block_id="b_formula",
@@ -288,11 +293,22 @@ def test_document_can_store_text_line_and_span_metadata_for_inline_formulas() ->
         text="where E = mc^2 holds",
         bbox=BoundingBox(x0=0, y0=8, x1=120, y1=22),
         span_ids=["s1"],
+=======
+def test_formula_contract_defaults_on_document_and_chunk_blocks() -> None:
+    formula = Formula(
+        formula_id="Fabc123",
+        placeholder="@@FORMULA_Fabc123@@",
+        kind="inline",
+        source_text="x = y + 1",
+        latex="x = y + 1",
+        confidence=0.8,
+>>>>>>> codex/freatrue_formula
     )
     block = DocumentBlock(
         block_id="b1",
         page_id="p1",
         role=BlockRole.PARAGRAPH,
+<<<<<<< HEAD
         bbox=BoundingBox(x0=0, y0=0, x1=160, y1=40),
         reading_order=0,
         source_text="where {{formula:f_inline}} holds",
@@ -369,6 +385,30 @@ def test_document_rejects_invalid_formula_refs() -> None:
                 )
             ],
         )
+=======
+        bbox=BoundingBox(x0=0, y0=0, x1=10, y1=10),
+        reading_order=0,
+        source_text="We use x = y + 1.",
+        text_for_translation="We use @@FORMULA_Fabc123@@.",
+        formulas=[formula],
+    )
+    source = SourceBlock(
+        block_id="b1",
+        role=BlockRole.PARAGRAPH,
+        source_text=block.text_for_translation,
+        preserve_tokens=[formula.placeholder],
+    )
+
+    assert block.formulas[0].placeholder == "@@FORMULA_Fabc123@@"
+    assert block.text_for_translation == "We use @@FORMULA_Fabc123@@."
+    assert source.requires_translation is True
+    assert SourceBlock(
+        block_id="formula",
+        role=BlockRole.FORMULA,
+        source_text="@@FORMULA_Fdisplay@@",
+        requires_translation=False,
+    ).requires_translation is False
+>>>>>>> codex/freatrue_formula
 
 
 def test_chunk_rejects_duplicate_source_block_ids() -> None:

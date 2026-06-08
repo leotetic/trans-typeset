@@ -374,6 +374,7 @@ class StyleSeed(StrictBaseModel):
     color: str = "#111111"
 
 
+<<<<<<< HEAD
 class TextSpanIR(StrictBaseModel):
     span_id: str = Field(min_length=1)
     page_id: str = Field(min_length=1)
@@ -395,6 +396,18 @@ class TextLineIR(StrictBaseModel):
     text: str = ""
     bbox: BoundingBox
     span_ids: list[str] = Field(default_factory=list)
+=======
+class Formula(StrictBaseModel):
+    formula_id: str = Field(min_length=1)
+    placeholder: str = Field(pattern=r"^@@FORMULA_[A-Za-z0-9_]+@@$")
+    kind: Literal["inline", "display"] = "inline"
+    source_text: str = ""
+    latex: str = ""
+    bbox: BoundingBox | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    asset_id: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+>>>>>>> codex/freatrue_formula
 
 
 class Asset(StrictBaseModel):
@@ -415,6 +428,8 @@ class DocumentBlock(StrictBaseModel):
     column: int = Field(default=0, ge=0)
     reading_order: int = Field(ge=0)
     source_text: str = ""
+    text_for_translation: str = ""
+    formulas: list[Formula] = Field(default_factory=list)
     span_refs: list[str] = Field(default_factory=list)
     lines: list[TextLineIR] = Field(default_factory=list)
     spans: list[TextSpanIR] = Field(default_factory=list)
@@ -701,6 +716,7 @@ class SourceBlock(StrictBaseModel):
     source_text: str
     nearby_titles: list[str] = Field(default_factory=list)
     preserve_tokens: list[str] = Field(default_factory=list)
+    requires_translation: bool = True
 
 
 class TranslationConstraints(StrictBaseModel):
