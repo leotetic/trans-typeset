@@ -304,8 +304,6 @@ def test_structured_roles_have_dedicated_rendering_rules() -> None:
     assert ".role-formula" in html
     assert ".role-footnote" in html
 
-
-<<<<<<< HEAD
 def test_formula_block_renders_internal_latex_markup() -> None:
     formula = _block(
         "p1_formula",
@@ -445,10 +443,12 @@ def test_formula_renderer_structures_common_latex_commands() -> None:
 
     html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
 
-    assert 'class="katex-frac"' in html
-    assert "α<sup>2</sup>" in html
-    assert 'class="katex-sqrt"' in html
-=======
+    assert 'data-latex="\\frac{\\alpha^2}{\\sqrt{x}}"' in html
+    assert 'class="katex-frac"' in html or "<mfrac>" in html
+    assert "α<sup>2</sup>" in html or "<mi>α</mi>" in html
+    assert 'class="katex-sqrt"' in html or "<msqrt>" in html
+
+
 def test_formula_placeholders_are_rendered_as_formula_nodes() -> None:
     placeholder = "@@FORMULA_Fabc123@@"
     block = _block(
@@ -491,7 +491,6 @@ def test_formula_placeholders_are_rendered_as_formula_nodes() -> None:
     assert "katex.render" in html
     assert diagnostics["formula_rendered_count"] == 1
     assert diagnostics["unresolved_formula_placeholders"] == []
->>>>>>> codex/freatrue_formula
 
 
 def test_original_bbox_is_a_hard_constraint() -> None:

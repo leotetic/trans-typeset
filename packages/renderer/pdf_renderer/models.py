@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
-from html import escape
 from math import ceil
 from html import escape
 from functools import lru_cache
@@ -33,11 +32,8 @@ _CONTINUATION_MARGIN_PT = 54.0
 _MIN_FINAL_FRAGMENT_CHARS = 12
 _MIN_FINAL_FRAGMENT_LINES = 2
 _LOW_UTILIZATION_THRESHOLD = 0.18
-<<<<<<< HEAD
 _KATEX_UNAVAILABLE = "__katex_unavailable__"
-=======
 _FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
->>>>>>> codex/freatrue_formula
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -109,7 +105,7 @@ def _enum_value(value: object) -> str:
 _FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
 
 
-def _formula_html_for_text(
+def _formula_ir_html_for_text(
     text: str,
     document: DocumentIR,
     *,
@@ -130,20 +126,34 @@ def _formula_html_for_text(
             flags.append("formula_missing_latex")
         elif not _latex_looks_renderable(formula.latex):
             fallback, fallback_flags = _formula_fallback_html(formula, document)
-            parts.append(fallback)
+            display = formula.display_mode == "display" or role == BlockRole.FORMULA
+            parts.append(_formula_ir_span(formula, fallback, display=display))
             flags.extend(["formula_render_failed", *fallback_flags])
         else:
             display = formula.display_mode == "display" or role == BlockRole.FORMULA
             rendered = _katex_html(formula.latex, display=display)
             if rendered is None:
                 fallback, fallback_flags = _formula_fallback_html(formula, document)
-                parts.append(fallback)
+                parts.append(_formula_ir_span(formula, fallback, display=display))
                 flags.extend(["formula_render_failed", *fallback_flags])
             else:
-                parts.append(rendered)
+                parts.append(_formula_ir_span(formula, rendered, display=display))
         last_index = match.end()
     parts.append(escape(text[last_index:]))
     return "".join(parts), _unique_flags(flags)
+
+
+def _formula_ir_span(formula: Any, inner_html: str, *, display: bool) -> str:
+    css_kind = "display" if display else "inline"
+    latex = getattr(formula, "latex", "") or getattr(formula, "source_text", "")
+    formula_id = getattr(formula, "formula_id", "")
+    return (
+        f'<span class="formula formula-{css_kind} formula-ir" '
+        f'data-formula-id="{escape(formula_id, quote=True)}" '
+        f'data-display="{"true" if display else "false"}" '
+        f'data-latex="{escape(latex, quote=True)}">'
+        f"{inner_html}</span>"
+    )
 
 
 @lru_cache(maxsize=512)
@@ -439,7 +449,6 @@ class RenderBlock:
     role: BlockRole
     bbox: BoundingBox
     text: str
-    html: str
     style_seed: StyleSeed
     font_size_pt: float
     html: str | None = None
@@ -561,8 +570,9 @@ class RenderDocument:
             for block in page.blocks:
                 block_count += 1
                 text_area += _bbox_area(block.bbox)
-                formula_rendered_count += block.html.count("data-formula-id=")
-                for placeholder in _FORMULA_PLACEHOLDER_PATTERN.findall(block.html):
+                block_html = block.html or ""
+                formula_rendered_count += block_html.count("data-formula-id=")
+                for placeholder in _FORMULA_PLACEHOLDER_PATTERN.findall(block_html):
                     unresolved_formula_placeholders.append(
                         {
                             "page_id": page.page_id,
@@ -707,17 +717,7 @@ class RenderDocument:
                         quality_flags.append("role_mismatch")
                 if layout_intent is not None:
                     quality_flags.extend(layout_intent.quality_flags)
-<<<<<<< HEAD
-                html, formula_flags = _formula_html_for_text(
-                    text,
-                    document,
-                    role=block.role,
-                )
-                quality_flags.extend(formula_flags)
-
                 style = _style_for_role(defaults, block.role)
-=======
->>>>>>> codex/freatrue_formula
                 font_scale = 1.0
                 if render_intent == "compact":
                     font_scale = compact_font_scale
@@ -763,6 +763,7 @@ class RenderDocument:
                                         block,
                                         overflow_text,
                                         page.size,
+                                        document,
                                         font_size_pt,
                                         font_scale,
                                         render_intent,
@@ -778,7 +779,7 @@ class RenderDocument:
                         else:
                             quality_flags.append("overflow_clipped")
 
-                html, formula_flags = _formula_html_for_text(text, block.formulas)
+                html, formula_flags = _formula_html_for_text(text, document, block)
                 quality_flags.extend(formula_flags)
 
                 render_blocks.append(
@@ -787,7 +788,6 @@ class RenderDocument:
                         role=block.role,
                         bbox=render_bbox,
                         text=text,
-                        html=html,
                         style_seed=block.style_seed,
                         font_size_pt=font_size_pt,
                         font_scale=font_scale,
@@ -1033,15 +1033,11 @@ def _from_ir_and_plans_continuous_reflow(
             flags.append("compact_reflow")
         if layout_intent is not None:
             flags.extend(layout_intent.quality_flags)
-<<<<<<< HEAD
         html, formula_flags = _formula_html_for_text(
             text,
             document,
-            role=block.role,
+            block,
         )
-=======
-        html, formula_flags = _formula_html_for_text(text, block.formulas)
->>>>>>> codex/freatrue_formula
         flags.extend(formula_flags)
 
         if block.role == BlockRole.REFERENCE and current_blocks:
@@ -1104,7 +1100,6 @@ def _from_ir_and_plans_continuous_reflow(
                     role=block.role,
                     bbox=bbox,
                     text=fragment,
-                    html=_formula_html_for_text(fragment, block.formulas)[0],
                     style_seed=block.style_seed,
                     font_size_pt=style.font_size_pt,
                     font_scale=style.font_size_pt / block.style_seed.font_size
@@ -1190,13 +1185,22 @@ def _translated_text_for_block(
     return text, render_intent, quality_flags
 
 
-def _formula_html_for_text(text: str, formulas: list[Formula]) -> tuple[str, list[str]]:
+def _formula_html_for_text(
+    text: str,
+    document: DocumentIR,
+    block: DocumentBlock,
+) -> tuple[str | None, list[str]]:
+    if _FORMULA_PLACEHOLDER_PATTERN.search(text):
+        return _formula_placeholder_html_for_text(text, block.formulas)
+    return _formula_ir_html_for_text(text, document, role=block.role)
+
+
+def _formula_placeholder_html_for_text(
+    text: str,
+    formulas: list[Formula],
+) -> tuple[str, list[str]]:
     if not formulas:
-        return escape(text), (
-            ["unresolved_formula_placeholder"]
-            if _FORMULA_PLACEHOLDER_PATTERN.search(text)
-            else []
-        )
+        return escape(text), ["unresolved_formula_placeholder"]
     formulas_by_placeholder = {formula.placeholder: formula for formula in formulas}
     flags: list[str] = []
     parts: list[str] = []
@@ -1524,6 +1528,7 @@ def _make_continuation_blocks(
     source_block: DocumentBlock,
     text: str,
     page_size: PageSize,
+    document: DocumentIR,
     font_size_pt: float,
     font_scale: float,
     render_intent: str,
@@ -1555,7 +1560,7 @@ def _make_continuation_blocks(
                 role=source_block.role,
                 bbox=bbox,
                 text=visible_text,
-                html=_formula_html_for_text(visible_text, source_block.formulas)[0],
+                html=_formula_html_for_text(visible_text, document, source_block)[0],
                 style_seed=source_block.style_seed,
                 font_size_pt=font_size_pt,
                 font_scale=font_scale,
