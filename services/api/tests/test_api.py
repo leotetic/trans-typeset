@@ -322,10 +322,12 @@ def test_retry_job_requeues_existing_upload(tmp_path: Path, monkeypatch) -> None
         )
     )
 
-    async def noop_process(*args, **kwargs) -> None:
-        return None
+    scheduled: list[tuple] = []
 
-    monkeypatch.setattr(documents_route, "process_document_job", noop_process)
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
     client = TestClient(app)
 
     response = client.post("/api/jobs/job_1/retry")
@@ -336,6 +338,8 @@ def test_retry_job_requeues_existing_upload(tmp_path: Path, monkeypatch) -> None
     retry_status = storage.load_status(payload["job_id"])
     assert retry_status.status == documents_route.JobState.QUEUED
     assert retry_status.message == "Queued retry"
+    assert scheduled[0][0] is documents_route.process_document_job
+    assert scheduled[0][1][0] == payload["job_id"]
 
 
 def test_retry_job_without_upload_returns_404(tmp_path: Path, monkeypatch) -> None:
@@ -424,11 +428,12 @@ def test_oversized_pdf_upload_returns_413(tmp_path: Path, monkeypatch) -> None:
 def test_pdf_upload_queues_job(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
 
-    async def noop_process(*args, **kwargs) -> None:
-        return None
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
 
-    monkeypatch.setattr(documents_route, "process_document_job", noop_process)
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
     client = TestClient(app)
 
     response = client.post(
@@ -443,6 +448,36 @@ def test_pdf_upload_queues_job(tmp_path: Path, monkeypatch) -> None:
     status = storage.load_status(payload["job_id"])
     assert status.status == "queued"
     assert status.error is None
+    assert scheduled[0][0] is documents_route.process_document_job
+    assert scheduled[0][1][0] == payload["job_id"]
+
+
+def test_pdf_upload_response_does_not_wait_for_scheduled_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
+
+    async def never_run(*_args, **_kwargs) -> None:
+        raise AssertionError("scheduled jobs should not run inside the request")
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "process_document_job", never_run)
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/documents",
+        files={"file": ("paper.pdf", b"%PDF-1.7\n%%EOF", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    assert storage.load_status(response.json()["job_id"]).status == "queued"
+    assert scheduled[0][0] is never_run
 
 
 def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) -> None:
@@ -451,10 +486,11 @@ def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) 
 
     captured = {}
 
-    async def noop_process(*args, **kwargs) -> None:
+    def fake_schedule_job(func, *args, **kwargs):
+        captured["func"] = func
         captured["args"] = args
 
-    monkeypatch.setattr(documents_route, "process_text_document_job", noop_process)
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
     client = TestClient(app)
 
     response = client.post(
@@ -473,17 +509,19 @@ def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) 
     status = storage.load_status(payload["job_id"])
     assert status.status == "queued"
     assert status.filename == "text-input.txt"
+    assert captured["func"] is documents_route.process_text_document_job
     assert captured["args"][5].instruction == "按照gb-GB/T 7713.1 进行排版"
 
 
 def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
 
-    async def noop_process(*args, **kwargs) -> None:
-        return None
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
 
-    monkeypatch.setattr(documents_route, "process_image_document_job", noop_process)
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
     client = TestClient(app)
 
     response = client.post(
@@ -499,16 +537,19 @@ def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
     payload = response.json()
     assert storage.load_status(payload["job_id"]).filename == "layout.png"
     assert storage.find_upload(payload["doc_id"]) is not None
+    assert scheduled[0][0] is documents_route.process_image_document_job
+    assert scheduled[0][1][0] == payload["job_id"]
 
 
 def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
 
-    async def noop_process(*args, **kwargs) -> None:
-        return None
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
 
-    monkeypatch.setattr(documents_route, "process_document_job", noop_process)
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
     client = TestClient(app)
 
     response = client.post(
@@ -527,6 +568,10 @@ def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> N
         "one.pdf",
         "two.pdf",
     }
+    assert [item[0] for item in scheduled] == [
+        documents_route.process_document_job,
+        documents_route.process_document_job,
+    ]
 
 
 def test_batch_upload_rejects_non_pdf(tmp_path: Path, monkeypatch) -> None:

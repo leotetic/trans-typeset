@@ -25,21 +25,26 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
     )
     scheduled: list[tuple] = []
 
-    def fake_create_task(coro):
-        coro.close()
-        scheduled.append(("task",))
-        return object()
-
     async def fake_process(*args):
         return None
 
-    monkeypatch.setattr(resume.asyncio, "create_task", fake_create_task)
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(resume, "schedule_job", fake_schedule_job)
     monkeypatch.setattr(resume, "process_document_job", fake_process)
 
     resumed = asyncio.run(resume.resume_incomplete_jobs(storage))
 
     assert resumed == 1
-    assert scheduled == [("task",)]
+    assert scheduled[0][0] is fake_process
+    assert scheduled[0][1] == (
+        "job_1",
+        "doc_1",
+        "paper.pdf",
+        storage.uploads / "doc_1.pdf",
+        "zh-CN",
+    )
 
 
 def test_resume_incomplete_jobs_marks_missing_upload_failed(tmp_path: Path) -> None:

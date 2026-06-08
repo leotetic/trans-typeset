@@ -2,9 +2,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from app import runtime_config
 from app.config import Settings
 from app.models import JobState
-from app import runtime_config
 from app.pipeline import orchestrator
 from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
@@ -211,6 +211,95 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert captured["chunk_render_defaults"].font_stack == ["Configured Sans", "serif"]
     assert captured["renderer_render_defaults"].line_height == 1.58
     assert captured["renderer_render_defaults"].overflow_policy.min_font_scale == 0.77
+
+
+def test_process_document_job_persists_pdf_export_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                ],
+            )
+        ],
+    )
+    chunks = [
+        TranslationChunk(
+            chunk_id="chunk_1",
+            source_blocks=[
+                SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Alpha")
+            ],
+        ),
+    ]
+
+    class FakeTranslator:
+        async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+            return TranslationLayoutPlan(
+                chunk_id=chunk.chunk_id,
+                blocks=[
+                    TranslationBlockPlan(
+                        source_block_id="b1",
+                        translated_text="translated Alpha",
+                        role=BlockRole.PARAGRAPH,
+                    )
+                ],
+            )
+
+    async def fake_render_to_pdf(
+        html: str,
+        output_path: Path,
+        *,
+        diagnostics_path: Path | None = None,
+        asset_base_path: Path | None = None,
+    ) -> Path:
+        assert "translated Alpha" in html
+        assert asset_base_path == storage.asset_dir("doc_1")
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        if diagnostics_path is not None:
+            diagnostics_path.write_text(
+                '{"kind":"pdf_export","status":"completed","output_bytes":14}',
+                encoding="utf-8",
+            )
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
+    monkeypatch.setattr(orchestrator, "build_chunks", lambda *_args, **_kwargs: chunks)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "paper.pdf",
+            tmp_path / "paper.pdf",
+            "zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    diagnostics = storage.read_output_json("doc_1", "pdf-export-diagnostics.json")
+    workflow = storage.read_output_json("doc_1", "workflow-run.json")
+
+    assert status.status == JobState.COMPLETED
+    assert diagnostics["status"] == "completed"
+    complete_steps = [step for step in workflow["steps"] if step["name"] == "complete"]
+    assert "pdf-export-diagnostics" in complete_steps[-1]["output_artifacts"]
 
 
 def test_process_document_job_persists_scanned_pdf_diagnostics(

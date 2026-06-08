@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -149,7 +150,12 @@ async def process_document_job(
             doc_id,
         )
         try:
-            document = parse_pdf(pdf_path, doc_id, storage.asset_dir(doc_id))
+            document = await asyncio.to_thread(
+                parse_pdf,
+                pdf_path,
+                doc_id,
+                storage.asset_dir(doc_id),
+            )
         except UnsupportedPdfError as exc:
             storage.write_json(doc_id, "parser-diagnostics.json", exc.diagnostics)
             workflow = append_workflow_step(
@@ -631,7 +637,24 @@ async def _run_workflow_from_document(
         chunks=status_chunks,
     )
     pdf_output = storage.output_pdf_path(doc_id)
-    await render_to_pdf(html, pdf_output)
+    pdf_diagnostics_path = storage.output_json_path(doc_id, "pdf-export-diagnostics.json")
+    await _render_pdf_with_optional_diagnostics(
+        html,
+        pdf_output,
+        diagnostics_path=pdf_diagnostics_path,
+        asset_base_path=storage.asset_dir(doc_id),
+    )
+    if not pdf_diagnostics_path.exists():
+        storage.write_json(
+            doc_id,
+            "pdf-export-diagnostics.json",
+            {
+                "kind": "pdf_export",
+                "status": "completed",
+                "output_path": str(pdf_output),
+                "output_bytes": pdf_output.stat().st_size if pdf_output.exists() else 0,
+            },
+        )
 
     update_status(
         job_id,
@@ -650,7 +673,7 @@ async def _run_workflow_from_document(
             WorkflowStepStatus.COMPLETED,
             progress=1,
             message="Workflow completed",
-            output_artifacts=["preview", "download"],
+            output_artifacts=["preview", "download", "pdf-export-diagnostics"],
         ),
         status=WorkflowStatus.COMPLETED,
     )
@@ -756,6 +779,24 @@ async def _translate_chunks(
             f"{len(errors)} translation chunk(s) failed; first error: {errors[0]}"
         )
     return [plan for plan in plans_by_index if plan is not None]
+
+
+async def _render_pdf_with_optional_diagnostics(
+    html: str,
+    output_path: Path,
+    *,
+    diagnostics_path: Path,
+    asset_base_path: Path,
+) -> Path:
+    signature = inspect.signature(render_to_pdf)
+    if "diagnostics_path" in signature.parameters:
+        return await render_to_pdf(
+            html,
+            output_path,
+            diagnostics_path=diagnostics_path,
+            asset_base_path=asset_base_path,
+        )
+    return await render_to_pdf(html, output_path)
 
 
 def _mark_canceled(

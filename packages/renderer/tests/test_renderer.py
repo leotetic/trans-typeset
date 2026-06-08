@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import builtins
+import json
 import tomllib
 from pathlib import Path
 
-from pdf_renderer import RenderDocument, render_to_html
+import pdf_renderer.renderer as renderer_module
+import pytest
+from pdf_renderer import RenderDocument, render_to_html, render_to_pdf
 from pdf_translator_schema import (
     Asset,
     BlockRole,
     BoundingBox,
     DocumentIR,
     DocumentPage,
-    PageSize,
     LayoutIntentBlock,
     LayoutIntentPlan,
+    PageSize,
     TranslationBlockPlan,
     TranslationLayoutPlan,
 )
@@ -113,6 +117,81 @@ def test_render_to_html_uses_configured_render_defaults() -> None:
     assert "line-height: 1.55" in html
 
 
+def test_render_to_pdf_falls_back_when_playwright_driver_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "playwright.async_api":
+            raise RuntimeError("driver unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    output_path = tmp_path / "fallback.pdf"
+    import asyncio
+
+    asyncio.run(render_to_pdf("<html><body><p>Translated text</p></body></html>", output_path))
+
+    assert output_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_render_to_pdf_writes_diagnostics_for_driver_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "playwright.async_api":
+            raise RuntimeError("Connection closed while reading from the driver")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", "/custom/node")
+    output_path = tmp_path / "fallback.pdf"
+    diagnostics_path = tmp_path / "pdf-export-diagnostics.json"
+
+    import asyncio
+
+    asyncio.run(
+        render_to_pdf(
+            "<html><body><p>Translated text</p></body></html>",
+            output_path,
+            diagnostics_path=diagnostics_path,
+        )
+    )
+
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+    assert diagnostics["kind"] == "pdf_export"
+    assert diagnostics["status"] == "fallback_pdf"
+    assert diagnostics["playwright_nodejs_path"] == "/custom/node"
+    assert diagnostics["playwright_nodejs_path_source"] == "env"
+    assert "PLAYWRIGHT_NODEJS_PATH" in diagnostics["error"]
+    assert diagnostics["output_bytes"] > 0
+
+
+def test_pdf_export_inlines_api_asset_sources(tmp_path: Path) -> None:
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    (asset_dir / "asset_1.png").write_bytes(b"image-bytes")
+    diagnostics = {
+        "asset_rewrites": {
+            "inlined": 0,
+            "missing": [],
+        }
+    }
+    html = '<img src="/api/documents/doc_1/assets/asset_1.png" alt="figure" />'
+
+    rewritten = renderer_module._inline_api_asset_sources(html, asset_dir, diagnostics)
+
+    assert 'src="data:image/png;base64,' in rewritten
+    assert diagnostics["asset_rewrites"]["inlined"] == 1
+    assert diagnostics["asset_rewrites"]["missing"] == []
+
+
 def test_render_to_html_includes_translated_text_and_block_id() -> None:
     block = _block(
         "p1_b1",
@@ -192,7 +271,9 @@ def test_structured_roles_have_dedicated_rendering_rules() -> None:
         reading_order=2,
     )
 
-    html = render_to_html(RenderDocument.from_ir_and_plans(_document([table, formula, footnote]), [], "zh-CN"))
+    html = render_to_html(
+        RenderDocument.from_ir_and_plans(_document([table, formula, footnote]), [], "zh-CN")
+    )
 
     assert 'class="block role-table intent-normal quality-missing-translation"' in html
     assert 'class="block role-formula intent-normal quality-missing-translation"' in html
@@ -399,7 +480,9 @@ def test_render_to_html_preserves_image_assets_at_document_bbox() -> None:
         alt_text="Figure asset",
     )
 
-    html = render_to_html(RenderDocument.from_ir_and_plans(_document([block], [asset]), [], "zh-CN"))
+    html = render_to_html(
+        RenderDocument.from_ir_and_plans(_document([block], [asset]), [], "zh-CN")
+    )
 
     assert 'data-asset-id="asset_1"' in html
     assert 'src="/api/documents/doc_1/assets/asset_1.png"' in html

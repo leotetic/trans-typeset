@@ -57,6 +57,8 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - 后端未启动：前端任务面板会显示后端离线。先访问 `http://127.0.0.1:8000/api/health`，应返回 `{"status":"ok"}`。
 - 前端打不开：优先访问 `http://127.0.0.1:5173`。如果改过前端端口，请访问 `VITE_DEV_PORT` 对应地址。
 - 上传失败：仅支持 PDF，默认最大 50 MB，目标语言必须在 `ALLOWED_TARGET_LANGS` 中。
+- PDF 导出失败：先运行 `.venv/bin/python -m playwright install chromium`，确保当前 Playwright 版本对应的 Chromium 已安装。macOS 11/12 上如果出现 `Connection closed while reading from the driver`，通常是 Playwright bundled node 与系统 libc++ 不兼容；设置 `PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node` 后重试，或使用兼容当前系统的 Playwright/Chromium 组合。
+- 图片资产排查：不要只用 `file://data/outputs/.../preview.html` 判断图片是否可用；该 artifact 中的 `/api/documents/.../assets/...` 会在 `file://` 下解析失败。应通过后端 `http://127.0.0.1:8000/api/documents/{doc_id}/preview` 打开，并用 Chrome DevTools 检查 console/network 和 `img.complete`。
 
 ## Diagnostics
 
@@ -74,6 +76,7 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - `GET /api/documents/{doc_id}/artifacts/translation-progress`
 - `GET /api/documents/{doc_id}/artifacts/parser-diagnostics`
 - `GET /api/documents/{doc_id}/artifacts/renderer-diagnostics`
+- `GET /api/documents/{doc_id}/artifacts/pdf-export-diagnostics`
 - `GET /api/documents/{doc_id}/assets/{filename}`: 返回 parser 提取的 PDF 图片资产，用于预览和 PDF 导出。
 
 前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不匹配、溢出等 quality flags。
@@ -83,6 +86,8 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 `GET/PUT /api/config` 支持持久化本地运行配置，包括 provider/base URL/model/API key、默认语言、并发、重试和 `RenderDefaults`。API key 只写入本地 `data/config/runtime-config.json`，不会在响应中返回。前端配置面板可编辑字体栈、行高、段距和 overflow 最小字号缩放；chunker 和 renderer 使用同一份已持久化的 `RenderDefaults`，保证 prompt 中的 render defaults 与最终 HTML/PDF 一致。
 
 Renderer 当前执行确定性 overflow policy：先按 `min_font_scale` 缩放，再在页面可用空间内扩盒，仍放不下时创建 continuation page，并在 diagnostics 中标记 `font_scaled`、`box_expanded`、`continued_on_next_page` 或 `continuation_page`。
+
+PDF export 会写入 `pdf-export-diagnostics.json`，记录 Playwright version、Node driver 路径、HTML/页面/图片统计、失败资源和输出大小。Renderer 在导出时会把 `/api/documents/{doc_id}/assets/{filename}` 图片资产内联为 data URL，避免 `page.set_content()` 缺少后端 base URL 时丢图；preview HTML 仍保留 API 路径供前端和调试接口使用。Playwright 不可用时会生成一个最小 fallback PDF 并在 diagnostics 中标记 `fallback_pdf`，便于工作流产生可下载 artifact，同时暴露真实失败原因。
 
 Parser 会从数字版 PDF 的 image block 提取栅格图片资产，写入 `DocumentIR.pages[].assets[]`，并保存到本地输出目录。Renderer 会按 `DocumentIR` 中的 asset bbox 在原页面位置保留图片；缺失 asset path 时输出 `asset_missing_path` 诊断和占位。
 

@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from ..config import settings
+from ..jobs import schedule_job
 from ..models import (
     ArtifactSummary,
     BatchCreateDocumentResponse,
@@ -16,7 +17,6 @@ from ..models import (
     RuntimeConfig,
     UpdateRuntimeConfig,
 )
-from ..jobs import schedule_job
 from ..pipeline.orchestrator import (
     process_document_job,
     process_image_document_job,
@@ -40,6 +40,7 @@ JSON_ARTIFACTS = {
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
     "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
     "render-evaluation": ("render-evaluation.json", "render-evaluation"),
+    "pdf-export-diagnostics": ("pdf-export-diagnostics.json", "pdf-export-diagnostics"),
     "translation-progress": ("translation-progress.json", "translation-progress"),
     "parser-diagnostics": ("parser-diagnostics.json", "parser-diagnostics"),
 }
