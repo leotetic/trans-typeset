@@ -445,6 +445,137 @@ def test_overflow_creates_continuation_page_after_scaling_and_expansion() -> Non
     assert 'data-block-id="p1_b1__cont_01"' in html
 
 
+def test_continuous_reflow_uses_gbt_page_layout_without_source_bbox_continuations() -> None:
+    title = _block(
+        "p1_title",
+        BlockRole.TITLE,
+        BoundingBox(x0=12, y0=12, x1=40, y1=24),
+        source_text="Tiny source title bbox",
+        reading_order=0,
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=12, y0=30, x1=42, y1=42),
+        source_text="Small source body bbox",
+        reading_order=1,
+    )
+    vector_placeholder = Asset(
+        asset_id="vector_1",
+        page_id="p1",
+        kind="figure",
+        bbox=BoundingBox(x0=20, y0=60, x1=180, y1=120),
+        alt_text="PDF vector drawing placeholder",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_title",
+            translated_text="论文题名",
+            role=BlockRole.TITLE,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="。".join(["这是一段用于测试连续重排的中文译文"] * 260),
+            role=BlockRole.PARAGRAPH,
+        ),
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([title, paragraph], [vector_placeholder]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert render_document.layout_mode == "continuous_reflow"
+    assert render_document.pages[0].size.width == pytest.approx(595.28)
+    assert render_document.pages[0].blocks[0].bbox.x0 == pytest.approx(70.87)
+    assert render_document.pages[0].blocks[0].bbox.x0 != title.bbox.x0
+    assert all("_cont_" not in page.page_id for page in render_document.pages)
+    assert "quality-continuation-page" not in html
+    assert diagnostics["single_fragment_pages"] == []
+    assert render_document.layout_trace["standard"] == "gb_t_7713_1_2025"
+    assert render_document.layout_trace["suppressed_artifacts"] == [
+        {
+            "kind": "asset_without_path",
+            "asset_id": "vector_1",
+            "source_page_id": "p1",
+        }
+    ]
+    assert 'data-asset-id="vector_1"' not in html
+    assert "page-footer" in html
+
+
+def test_continuous_reflow_preserves_raster_assets_in_reading_flow() -> None:
+    block = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=130),
+        source_text="Body before figure.",
+        reading_order=0,
+    )
+    asset = Asset(
+        asset_id="asset_1",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=50, y0=140, x1=250, y1=260),
+        path="/api/documents/doc_1/assets/asset_1.png",
+        alt_text="Figure asset",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="图前正文。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([block], [asset]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    assert 'data-asset-id="asset_1"' in html
+    assert render_document.pages[0].assets[0].quality_flags == ["reflow_asset"]
+    assert render_document.layout_trace["assets"][0]["asset_id"] == "asset_1"
+
+
+def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:
+    artifact = _block(
+        "p1_timestamp",
+        BlockRole.HEADING,
+        BoundingBox(x0=562, y0=390, x1=568, y1=453),
+        source_text="25 April 2025 00:08:47",
+        reading_order=0,
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([artifact]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    assert "25 April 2025" not in html
+    assert render_document.layout_trace["suppressed_artifacts"] == [
+        {
+            "kind": "source_block_suppressed",
+            "source_block_id": "p1_timestamp",
+            "source_page_id": "p1",
+            "reason": "running_header_footer_or_pdf_artifact",
+        }
+    ]
+
+
 def test_render_document_diagnostics_reports_quality_flags() -> None:
     block = _block(
         "p1_b1",

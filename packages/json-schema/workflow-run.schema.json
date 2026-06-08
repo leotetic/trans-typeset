@@ -20,6 +20,10 @@
         "input_type": {
           "$ref": "#/$defs/InputKind"
         },
+        "source_role": {
+          "$ref": "#/$defs/InputSourceRole",
+          "default": "content"
+        },
         "filename": {
           "anyOf": [
             {
@@ -91,6 +95,14 @@
       "title": "InputSource",
       "type": "object"
     },
+    "InputSourceRole": {
+      "enum": [
+        "content",
+        "layout_reference"
+      ],
+      "title": "InputSourceRole",
+      "type": "string"
+    },
     "OutputKind": {
       "enum": [
         "translation",
@@ -110,6 +122,14 @@
         "plain"
       ],
       "title": "StyleIntent",
+      "type": "string"
+    },
+    "TypesettingStandard": {
+      "enum": [
+        "none",
+        "gb_t_7713_1_2025"
+      ],
+      "title": "TypesettingStandard",
       "type": "string"
     },
     "UserConstraints": {
@@ -162,6 +182,10 @@
         "style_intent": {
           "$ref": "#/$defs/StyleIntent",
           "default": "academic"
+        },
+        "typesetting_standard": {
+          "$ref": "#/$defs/TypesettingStandard",
+          "default": "none"
         },
         "instruction": {
           "default": "",
@@ -283,12 +307,14 @@
       "enum": [
         "read_input",
         "analyze_intent",
+        "semantic_recognize",
         "build_plan",
         "validate_plan",
         "translate",
         "render",
         "evaluate_render",
         "repair",
+        "export_pdf",
         "complete",
         "fail"
       ],

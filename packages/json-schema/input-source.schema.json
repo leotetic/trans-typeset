@@ -8,6 +8,14 @@
       ],
       "title": "InputKind",
       "type": "string"
+    },
+    "InputSourceRole": {
+      "enum": [
+        "content",
+        "layout_reference"
+      ],
+      "title": "InputSourceRole",
+      "type": "string"
     }
   },
   "additionalProperties": false,
@@ -19,6 +27,10 @@
     },
     "input_type": {
       "$ref": "#/$defs/InputKind"
+    },
+    "source_role": {
+      "$ref": "#/$defs/InputSourceRole",
+      "default": "content"
     },
     "filename": {
       "anyOf": [

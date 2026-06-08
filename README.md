@@ -37,6 +37,8 @@ npm run dev:web
 
 前端开发服务器会把 `/api` 代理到 `VITE_API_PROXY_TARGET`，默认是 `http://127.0.0.1:8000`。如果 `.env` 中没有配置 `OPENAI_API_KEY`，后端会使用本地 deterministic translator，把每个文本块标记为目标语言的占位译文，便于端到端验证上传、分块、schema 校验和渲染流程。
 
+PDF 工作台入口分为两个上传源：`待翻译 PDF` 是必填内容源，`版式参考 PDF` 是可选的排版语义输入源。未提供版式参考时，后端会把内容 PDF 同时作为默认版式语义源，并在 `normalized-input` / `semantic-analysis` 中标记 `layout_source_fallback_to_content`。展开“自定义强约束”后，前端会用 typed 控件提交页尺寸、目标字号、续页和图片保留策略；首版不开放 raw JSON schema 编辑。
+
 常用配置在 `.env` 中：
 
 ```bash
@@ -71,6 +73,7 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - `POST /api/jobs/{job_id}/retry`: 复用原上传文件重新排队。
 - `GET /api/documents/{doc_id}/artifacts`: 返回当前文档可用 artifact。
 - `GET /api/documents/{doc_id}/artifacts/document-ir`
+- `GET /api/documents/{doc_id}/artifacts/semantic-analysis`
 - `GET /api/documents/{doc_id}/artifacts/translation-chunks`
 - `GET /api/documents/{doc_id}/artifacts/translation-plans`
 - `GET /api/documents/{doc_id}/artifacts/translation-progress`
@@ -79,11 +82,13 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - `GET /api/documents/{doc_id}/artifacts/pdf-export-diagnostics`
 - `GET /api/documents/{doc_id}/assets/{filename}`: 返回 parser 提取的 PDF 图片资产，用于预览和 PDF 导出。
 
-前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不匹配、溢出等 quality flags。
+前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、semantic analysis、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不匹配、溢出等 quality flags。
 
 真实模型返回会先提取 `TranslationLayoutPlan` JSON object，再经过严格 schema 校验。OpenAI-compatible endpoint 不一定保证 `message.content` 是纯 JSON；后端会处理 prose、markdown fence 或 thinking 包裹后的 plan JSON，MiniMax-M3 会额外关闭 thinking 并启用 reasoning split。可修复的 chunk 级问题，例如误带坐标字段、缺失 block 或遗漏 preserve token，会被后端修复为合法 `TranslationLayoutPlan` 并写入 `quality_flags`；不可提取、不可解析或请求失败会按 chunk 重试后落到任务错误状态。`TRANSLATION_CONCURRENCY` 控制 chunk 并发翻译，`TRANSLATOR_MAX_ATTEMPTS` 控制每个 chunk 的模型调用尝试次数。
 
-`GET/PUT /api/config` 支持持久化本地运行配置，包括 provider/base URL/model/API key、默认语言、并发、重试和 `RenderDefaults`。API key 只写入本地 `data/config/runtime-config.json`，不会在响应中返回。前端配置面板可编辑字体栈、行高、段距和 overflow 最小字号缩放；chunker 和 renderer 使用同一份已持久化的 `RenderDefaults`，保证 prompt 中的 render defaults 与最终 HTML/PDF 一致。
+`GET/PUT /api/config` 支持持久化本地运行配置，包括 provider/base URL/model/API key、默认语言、并发、重试、LangGraph agent repair 次数、vision analysis 开关、layout/vision 模型名和 `RenderDefaults`。API key 只写入本地 `data/config/runtime-config.json`，不会在响应中返回。前端配置面板可编辑字体栈、行高、段距和 overflow 最小字号缩放；chunker 和 renderer 使用同一份已持久化的 `RenderDefaults`，保证 prompt 中的 render defaults 与最终 HTML/PDF 一致。
+
+智能排版 workflow 由 LangGraph `StateGraph` 编排为 adapter、intent analysis、semantic recognition、plan、validation、translation、render evaluation、repair 和 export 节点。未配置模型 key 时会使用 deterministic semantic/layout fallback；图片 vision analysis 默认关闭，不会自动把用户图片发送到远端 provider。
 
 Renderer 当前执行确定性 overflow policy：先按 `min_font_scale` 缩放，再在页面可用空间内扩盒，仍放不下时创建 continuation page，并在 diagnostics 中标记 `font_scaled`、`box_expanded`、`continued_on_next_page` 或 `continuation_page`。
 

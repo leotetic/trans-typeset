@@ -1,0 +1,182 @@
+{
+  "$defs": {
+    "BlockRole": {
+      "enum": [
+        "title",
+        "abstract",
+        "heading",
+        "paragraph",
+        "caption",
+        "formula",
+        "table",
+        "figure",
+        "footnote",
+        "reference",
+        "unknown"
+      ],
+      "title": "BlockRole",
+      "type": "string"
+    },
+    "SemanticAssetSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "minLength": 1,
+          "title": "Asset Id",
+          "type": "string"
+        },
+        "usage_hint": {
+          "default": "unknown",
+          "enum": [
+            "preserve",
+            "inline_reference",
+            "background_reference",
+            "ignore",
+            "unknown"
+          ],
+          "title": "Usage Hint",
+          "type": "string"
+        },
+        "text_hint": {
+          "default": "",
+          "title": "Text Hint",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_id"
+      ],
+      "title": "SemanticAssetSignal",
+      "type": "object"
+    },
+    "SemanticBlockSignal": {
+      "additionalProperties": false,
+      "properties": {
+        "source_block_id": {
+          "minLength": 1,
+          "title": "Source Block Id",
+          "type": "string"
+        },
+        "role_candidates": {
+          "items": {
+            "$ref": "#/$defs/BlockRole"
+          },
+          "title": "Role Candidates",
+          "type": "array"
+        },
+        "section_hint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Hint"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_block_id"
+      ],
+      "title": "SemanticBlockSignal",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "analysis_id": {
+      "minLength": 1,
+      "title": "Analysis Id",
+      "type": "string"
+    },
+    "doc_id": {
+      "minLength": 1,
+      "title": "Doc Id",
+      "type": "string"
+    },
+    "target_lang": {
+      "default": "zh-CN",
+      "title": "Target Lang",
+      "type": "string"
+    },
+    "block_signals": {
+      "items": {
+        "$ref": "#/$defs/SemanticBlockSignal"
+      },
+      "title": "Block Signals",
+      "type": "array"
+    },
+    "asset_signals": {
+      "items": {
+        "$ref": "#/$defs/SemanticAssetSignal"
+      },
+      "title": "Asset Signals",
+      "type": "array"
+    },
+    "section_hints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Section Hints",
+      "type": "array"
+    },
+    "confidence": {
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "analysis_id",
+    "doc_id"
+  ],
+  "title": "SemanticLayoutAnalysis",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

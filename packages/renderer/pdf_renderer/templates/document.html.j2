@@ -43,13 +43,14 @@
         overflow: hidden;
         padding: 0;
         font-size: var(--font-size-pt);
-        line-height: {{ document.line_height }};
+        line-height: var(--line-height, {{ document.line_height }});
         white-space: pre-wrap;
         overflow-wrap: anywhere;
         color: #111111;
-        font-weight: 400;
-        font-style: normal;
-        text-align: left;
+        font-weight: var(--font-weight, 400);
+        font-style: var(--font-style, normal);
+        text-align: var(--text-align, left);
+        text-indent: var(--first-line-indent-em, 0em);
       }
 
       .asset {
@@ -89,25 +90,19 @@
       }
 
       .role-title {
-        font-weight: 700;
-        text-align: center;
         line-height: 1.18;
       }
 
       .role-heading {
-        font-weight: 700;
         line-height: 1.22;
-        text-align: left;
       }
 
       .role-abstract,
       .role-paragraph {
-        text-align: justify;
-        text-indent: 0;
+        text-align: var(--text-align, justify);
       }
 
       .role-reference {
-        text-align: justify;
         font-size: calc(var(--font-size-pt) * 0.94);
         line-height: 1.25;
         overflow-wrap: break-word;
@@ -123,7 +118,6 @@
 
       .role-formula {
         font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
-        text-align: center;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
@@ -131,14 +125,23 @@
       .role-footnote {
         font-size: calc(var(--font-size-pt) * 0.86);
         line-height: 1.2;
-        text-align: left;
         color: #222222;
       }
 
       .role-caption {
-        text-align: center;
         font-size: calc(var(--font-size-pt) * 0.92);
         line-height: 1.25;
+      }
+
+      .page-footer {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 18pt;
+        text-align: center;
+        font-size: 10.5pt;
+        line-height: 1;
+        color: #111111;
       }
 
       .intent-compact {
@@ -232,10 +235,18 @@
               --w-pt: {{ block.bbox.x1 - block.bbox.x0 }}pt;
               --h-pt: {{ block.bbox.y1 - block.bbox.y0 }}pt;
               --font-size-pt: {{ block.font_size_pt }}pt;
+              --line-height: {{ block.line_height or document.line_height }};
+              --text-align: {{ block.text_align or 'left' }};
+              --font-weight: {{ block.font_weight or (700 if block.style_seed.bold else 400) }};
+              --font-style: {{ block.font_style or ('italic' if block.style_seed.italic else 'normal') }};
+              --first-line-indent-em: {{ block.first_line_indent_em }}em;
               color: {{ block.style_seed.color }};
             "
           >{{ block.text }}</div>
         {% endfor %}
+        {% if page.footer_text %}
+          <div class="page-footer">{{ page.footer_text }}</div>
+        {% endif %}
       </section>
     {% endfor %}
   </body>

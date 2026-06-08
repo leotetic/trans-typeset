@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pdf_translator_schema import RenderDefaults
+from pdf_translator_schema import LayoutMode, RenderDefaults, TypesettingStandard, UserIntent
 
 from .config import settings
 from .models import RuntimeConfig
@@ -23,6 +23,18 @@ def _render_defaults_from_payload(payload: object, target_lang: str | None = Non
     return defaults
 
 
+def _bool_from_payload(value: object, fallback: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return fallback
+
+
 def effective_runtime_config(storage: Storage) -> dict:
     persisted = storage.read_runtime_config()
     default_target_lang = str(
@@ -42,12 +54,22 @@ def effective_runtime_config(storage: Storage) -> dict:
             persisted.get("openai_api_key", settings.openai_api_key)
         ).strip(),
         "openai_model": str(persisted.get("openai_model", settings.openai_model)).strip(),
+        "layout_planner_model": str(
+            persisted.get("layout_planner_model", settings.layout_planner_model)
+        ).strip()
+        or settings.openai_model,
+        "vision_analyzer_model": str(
+            persisted.get("vision_analyzer_model", settings.vision_analyzer_model)
+        ).strip()
+        or settings.openai_model,
     }
     if settings.openai_api_key_from_env:
         provider_config = {
             "openai_base_url": settings.openai_base_url,
             "openai_api_key": settings.openai_api_key,
             "openai_model": settings.openai_model,
+            "layout_planner_model": settings.layout_planner_model or settings.openai_model,
+            "vision_analyzer_model": settings.vision_analyzer_model or settings.openai_model,
         }
 
     return {
@@ -59,6 +81,19 @@ def effective_runtime_config(storage: Storage) -> dict:
         "translator_max_attempts": int(
             persisted.get("translator_max_attempts", settings.translator_max_attempts)
         ),
+        "agent_max_repair_attempts": int(
+            persisted.get(
+                "agent_max_repair_attempts",
+                settings.agent_max_repair_attempts,
+            )
+        ),
+        "agent_enable_vision_analysis": _bool_from_payload(
+            persisted.get(
+                "agent_enable_vision_analysis",
+                settings.agent_enable_vision_analysis,
+            ),
+            settings.agent_enable_vision_analysis,
+        ),
         "render_defaults": render_defaults,
     }
 
@@ -66,6 +101,17 @@ def effective_runtime_config(storage: Storage) -> dict:
 def render_defaults_for_target(storage: Storage, target_lang: str) -> RenderDefaults:
     configured = effective_runtime_config(storage)["render_defaults"]
     return configured.model_copy(update={"target_lang": target_lang}, deep=True)
+
+
+def render_defaults_for_intent(
+    storage: Storage,
+    target_lang: str,
+    intent: UserIntent,
+) -> RenderDefaults:
+    configured = render_defaults_for_target(storage, target_lang)
+    if intent.typesetting_standard == TypesettingStandard.GB_T_7713_1_2025:
+        return configured.model_copy(update={"layout_mode": LayoutMode.CONTINUOUS_REFLOW}, deep=True)
+    return configured
 
 
 def runtime_config_response(storage: Storage) -> RuntimeConfig:
@@ -82,5 +128,9 @@ def runtime_config_response(storage: Storage) -> RuntimeConfig:
         openai_api_key_configured=bool(effective["openai_api_key"]),
         translation_concurrency=effective["translation_concurrency"],
         translator_max_attempts=effective["translator_max_attempts"],
+        agent_max_repair_attempts=effective["agent_max_repair_attempts"],
+        agent_enable_vision_analysis=effective["agent_enable_vision_analysis"],
+        layout_planner_model=effective["layout_planner_model"],
+        vision_analyzer_model=effective["vision_analyzer_model"],
         render_defaults=effective["render_defaults"],
     )

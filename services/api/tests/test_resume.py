@@ -38,13 +38,53 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
 
     assert resumed == 1
     assert scheduled[0][0] is fake_process
-    assert scheduled[0][1] == (
+    assert scheduled[0][1][:5] == (
         "job_1",
         "doc_1",
         "paper.pdf",
         storage.uploads / "doc_1.pdf",
         "zh-CN",
     )
+    assert scheduled[0][1][5] is None
+    assert scheduled[0][1][6] is None
+
+
+def test_resume_incomplete_jobs_schedules_layout_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    content_path = storage.uploads / "doc_1.content.pdf"
+    layout_path = storage.uploads / "doc_1.layout.pdf"
+    content_path.write_bytes(b"%PDF-1.7\n%%EOF")
+    layout_path.write_bytes(b"%PDF-1.7\n%%EOF")
+    storage.save_status(
+        JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=JobState.TRANSLATING,
+            progress=0.5,
+            message="Translating",
+        )
+    )
+    scheduled: list[tuple] = []
+
+    async def fake_process(*args):
+        return None
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(resume, "schedule_job", fake_schedule_job)
+    monkeypatch.setattr(resume, "process_document_job", fake_process)
+
+    resumed = asyncio.run(resume.resume_incomplete_jobs(storage))
+
+    assert resumed == 1
+    assert scheduled[0][1][3] == content_path
+    assert scheduled[0][1][6] == layout_path
 
 
 def test_resume_incomplete_jobs_marks_missing_upload_failed(tmp_path: Path) -> None:

@@ -2,17 +2,18 @@
 
 `TranslationLayoutPlan@0.1` 是给大模型看的唯一输出 contract。它刻意停留在文本语义层，不允许返回绝对坐标。
 
-v2 在该 contract 之上新增 workflow 智能排版骨架。`InputSource`、`AssetIR`、`UserIntent`、`WorkflowRun` 和 `LayoutIntentPlan@0.1` 用于记录输入归一化、用户意图、agent 语义计划、步骤状态和诊断。`LayoutIntentPlan` 只表达 block/asset 映射、role、priority、render intent 和 quality flags，仍然禁止 `bbox`、`x`、`y`、`page`、`width`、`height` 等坐标或分页字段。
+v2 在该 contract 之上新增 workflow 智能排版骨架。`InputSource`、`AssetIR`、`UserIntent`、`WorkflowRun`、`SemanticLayoutAnalysis@0.1` 和 `LayoutIntentPlan@0.1` 用于记录输入归一化、用户意图、agent 语义识别、语义计划、步骤状态和诊断。`SemanticLayoutAnalysis` 和 `LayoutIntentPlan` 都只表达语义信号，不含 `bbox`、`x`、`y`、`page`、`width`、`height` 等坐标或分页字段。
 
 ## v2 Workflow Contract
 
-- `InputSource`: 记录 text/image/pdf 输入类型、文件名、MIME、大小、hash、本地 artifact path 和诊断 flags。
+- `InputSource`: 记录 text/image/pdf 输入类型、`source_role`、文件名、MIME、大小、hash、本地 artifact path 和诊断 flags。PDF workflow 使用 `content` 表示待翻译内容源，使用 `layout_reference` 表示可选版式语义参考源；未提供版式参考时写入 `layout_source_fallback_to_content`。
 - `AssetIR`: 记录图片或参考资产、OCR/mock 摘要、alt text、来源 block 和不确定性 flags。
-- `UserIntent`: 记录 `target_lang`、`output_kind`、`style_intent`、自然语言排版说明、保留策略和约束。
+- `UserIntent`: 记录 `target_lang`、`output_kind`、`style_intent`、`typesetting_standard`、自然语言排版说明、保留策略和约束。后端会把包含 `GB/T 7713.1` 的说明归一化为 `gb_t_7713_1_2025`。
 - `WorkflowRun`: 记录 workflow 状态、当前 step、进度、输入源、用户意图、artifact refs、错误和每个 `WorkflowStep`。
+- `SemanticLayoutAnalysis`: 记录 block role candidates、section hints、asset usage hints、confidence 和质量 flags，是 debug/agent artifact，不直接传给 renderer。
 - `LayoutIntentPlan`: 记录语义排版计划，不含坐标。renderer 可消费其中的 `render_intent` 和 asset usage，但最终坐标、分页、溢出和续页仍由 renderer 决定。
 
-当前 deterministic agent loop 固定为 `read_input -> analyze_intent -> build_plan -> validate_plan -> translate -> render -> evaluate_render -> optional repair -> complete`。当用户说明包含 `GB/T 7713.1` 时，plan 会写入 `gb_t_7713_1_requested`，标题/小节倾向 `emphasis`，参考文献和脚注倾向 `compact`。这些只是语义意图，不改变 `DocumentIR` 坐标。
+当前 agent loop 由 LangGraph `StateGraph` 编排为 `read_input -> analyze_intent -> semantic_recognize -> build_plan -> validate_plan -> translate -> render -> evaluate_render -> optional repair -> export_pdf -> complete`。未安装或未配置模型 provider 时，后端使用同一批节点的 deterministic fallback；配置 OpenAI-compatible provider 后，LangChain structured output 可增强 `SemanticLayoutAnalysis` 和 `LayoutIntentPlan`，但所有模型输出仍必须通过 Pydantic/schema 校验。当用户说明包含 `GB/T 7713.1` 时，plan 会写入 `gb_t_7713_1_requested`，`UserIntent.typesetting_standard` 会设为 `gb_t_7713_1_2025`，renderer defaults 会切到 `continuous_reflow`。标题/小节倾向 `emphasis`，参考文献和脚注倾向 `compact`；这些仍是语义意图，LLM 不返回坐标。
 
 ## LLM 输入
 
@@ -54,10 +55,13 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 - `font_stack`: `Noto Sans CJK SC`, `Source Han Sans SC`, `Arial Unicode MS`, `sans-serif`
 - `line_height`: `1.35`
 - `paragraph_spacing_em`: `0.45`
+- `layout_mode`: `source_bbox`
+- `page_layout`: A4 `595.28 x 841.89pt`，上/左 `70.87pt`，下/右 `56.69pt`
+- `role_styles`: GB/T 连续重排使用 title 18pt、heading 14pt、paragraph/abstract 12pt、caption/reference/footnote 10.5pt，并按角色设置加粗、对齐、首行缩进和段前后间距。
 - `overflow_policy.strategy`: `scale_then_expand_then_continue`
 - `overflow_policy.min_font_scale`: `0.86`
 
-当前 renderer 对该策略的实现顺序是缩放、扩盒、续页。扩盒只在原页面可用空间内进行；仍放不下时生成 continuation page，并输出 `font_scaled`、`box_expanded`、`continued_on_next_page`、`continuation_page` 等诊断 flag。
+`layout_mode=source_bbox` 保留原 PDF 页面尺寸和 bbox，并按缩放、扩盒、续页实现 overflow policy。`layout_mode=continuous_reflow` 用于 GB/T 7713.1 中文可读重排：renderer 按全局阅读顺序生成连续 A4 页面和确定性 bbox，跳过竖排时间戳、重复页脚、无 path 的 vector placeholder，对长段做句子/词边界分页，并输出居中阿拉伯页码。
 
 `RenderDefaults` 也可以通过本地运行配置持久化。`GET /api/config` 返回当前有效默认值，`PUT /api/config` 可更新字体栈、行高、段距和 `overflow_policy.min_font_scale` 等字段。后端会把同一份 `RenderDefaults` 写入 `TranslationChunk.render_defaults` 并传给 renderer；LLM 仍只能消费这些语义级约束，不能返回坐标或页面定位字段。
 
@@ -68,6 +72,7 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 - `normalized-input`: v2 adapter 归一化后的输入摘要，包含 `InputSource[]`、block/asset 数和质量 flags。
 - `user-intent`: 当前任务使用的 `UserIntent`，包括默认值来源后的最终目标语言、输出类型、风格和说明。
 - `workflow-run`: `WorkflowRun`，记录每个 step、attempt、输入输出 artifact、诊断和错误。
+- `semantic-analysis`: `SemanticLayoutAnalysis`，记录 deterministic 或模型增强后的语义识别信号、置信度和 fallback flags。
 - `layout-intent-plan`: deterministic agent 生成或修复后的 `LayoutIntentPlan`。
 - `validation-and-repair`: plan validation 结果和 repair history。
 - `asset-ir`: image adapter 或后续 OCR/视觉摘要 adapter 生成的 `AssetIR[]`。
@@ -76,7 +81,8 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 - `translation-plans`: translator 通过 `validate_layout_plan` 后的 `TranslationLayoutPlan[]`。
 - `translation-progress`: chunk 级翻译进度、失败信息和 repair/quality flag 汇总。
 - `parser-diagnostics`: parser 阶段的页数、文本块、资产、角色计数、复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。
-- `renderer-diagnostics`: renderer 根据 `DocumentIR + TranslationLayoutPlan` 生成的质量诊断，包括缺失译文、角色不一致和溢出 flags。
+- `layout-trace`: renderer 的逐块排版决策日志，包括 layout mode、标准、render defaults snapshot、源页/输出页统计、跳过块/资产、页利用率、每个 source block 的分页片段、bbox、估算行数和质量 flags。
+- `renderer-diagnostics`: renderer 根据 `DocumentIR + TranslationLayoutPlan` 生成的质量诊断，包括缺失译文、角色不一致、溢出 flags、页利用率、低利用率页、单片段页和被跳过 artifact 摘要。
 - `render-evaluation`: 基于 renderer diagnostics 的结构化验收摘要，说明是否建议 repair。
 
 这些 artifact 用于前端 schema inspector 和本地问题定位，不包含上传 PDF 本体或模型密钥。

@@ -8,6 +8,7 @@ from .models import (
     DocumentIR,
     InputSource,
     LayoutIntentPlan,
+    SemanticLayoutAnalysis,
     TranslationChunk,
     TranslationLayoutPlan,
     UserIntent,
@@ -37,6 +38,9 @@ def export_schema(output_dir: Path) -> None:
         "workflow-run.schema.json": _with_metadata(WorkflowRun.model_json_schema()),
         "layout-intent-plan.schema.json": _with_metadata(
             LayoutIntentPlan.model_json_schema()
+        ),
+        "semantic-layout-analysis.schema.json": _with_metadata(
+            SemanticLayoutAnalysis.model_json_schema()
         ),
         "translation-chunk.schema.json": _with_metadata(TranslationChunk.model_json_schema()),
         "translation-layout-plan.schema.json": _with_metadata(

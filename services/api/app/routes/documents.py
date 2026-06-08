@@ -4,6 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
+from pdf_translator_schema import UserIntent
 
 from ..config import settings
 from ..jobs import schedule_job
@@ -32,12 +33,14 @@ JSON_ARTIFACTS = {
     "normalized-input": ("normalized-input.json", "normalized-input"),
     "user-intent": ("user-intent.json", "user-intent"),
     "workflow-run": ("workflow-run.json", "workflow-run"),
+    "semantic-analysis": ("semantic-analysis.json", "semantic-layout-analysis"),
     "layout-intent-plan": ("layout-intent-plan.json", "layout-intent-plan"),
     "validation-and-repair": ("validation-and-repair.json", "validation-and-repair"),
     "asset-ir": ("asset-ir.json", "asset-ir"),
     "document-ir": ("document_ir", "document-ir"),
     "translation-chunks": ("translation-chunks.json", "translation-chunks"),
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
+    "layout-trace": ("layout-trace.json", "layout-trace"),
     "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
     "render-evaluation": ("render-evaluation.json", "render-evaluation"),
     "pdf-export-diagnostics": ("pdf-export-diagnostics.json", "pdf-export-diagnostics"),
@@ -82,6 +85,35 @@ def ensure_target_lang(target_lang: str) -> None:
         )
 
 
+def _constraints_from_form(
+    *,
+    page_width_pt: float | None = None,
+    page_height_pt: float | None = None,
+    target_font_size_pt: float | None = None,
+    allow_continuation: bool | None = None,
+    preserve_images: bool | None = None,
+) -> dict[str, object] | None:
+    values: dict[str, object] = {}
+    if page_width_pt is not None:
+        values["page_width_pt"] = page_width_pt
+    if page_height_pt is not None:
+        values["page_height_pt"] = page_height_pt
+    if target_font_size_pt is not None:
+        values["target_font_size_pt"] = target_font_size_pt
+    if allow_continuation is not None:
+        values["allow_continuation"] = allow_continuation
+    if preserve_images is not None:
+        values["preserve_images"] = preserve_images
+    return values or None
+
+
+def _load_user_intent(doc_id: str) -> UserIntent | None:
+    try:
+        return UserIntent.model_validate(storage.read_output_json(doc_id, "user-intent.json"))
+    except Exception:
+        return None
+
+
 @router.get("/config", response_model=RuntimeConfig)
 async def get_config() -> RuntimeConfig:
     return runtime_config_response(storage)
@@ -115,23 +147,62 @@ async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
 
 @router.post("/documents", response_model=CreateDocumentResponse)
 async def create_document(
-    file: Annotated[UploadFile, File()],
+    content_file: Annotated[UploadFile | None, File()] = None,
+    layout_file: Annotated[UploadFile | None, File()] = None,
+    file: Annotated[UploadFile | None, File()] = None,
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
     output_kind: Annotated[str, Form()] = "translation",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
+    page_width_pt: Annotated[float | None, Form()] = None,
+    page_height_pt: Annotated[float | None, Form()] = None,
+    target_font_size_pt: Annotated[float | None, Form()] = None,
+    allow_continuation: Annotated[bool | None, Form()] = None,
+    preserve_images: Annotated[bool | None, Form()] = None,
 ) -> CreateDocumentResponse:
     ensure_target_lang(target_lang)
-    await ensure_pdf_upload(file)
-    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
+    content_upload = content_file or file
+    if content_upload is None:
+        raise HTTPException(status_code=400, detail="Content PDF is required")
+    await ensure_pdf_upload(content_upload)
+    if layout_file is not None:
+        await ensure_pdf_upload(layout_file)
+    user_intent = coerce_user_intent(
+        target_lang,
+        output_kind,
+        style_intent,
+        instruction,
+        _constraints_from_form(
+            page_width_pt=page_width_pt,
+            page_height_pt=page_height_pt,
+            target_font_size_pt=target_font_size_pt,
+            allow_continuation=allow_continuation,
+            preserve_images=preserve_images,
+        ),
+    )
 
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
-    pdf_path = await storage.save_upload(doc_id, file, settings.max_upload_bytes)
+    pdf_path = await storage.save_upload(
+        doc_id,
+        content_upload,
+        settings.max_upload_bytes,
+        role="content",
+    )
+    layout_pdf_path = (
+        await storage.save_upload(
+            doc_id,
+            layout_file,
+            settings.max_upload_bytes,
+            role="layout",
+        )
+        if layout_file is not None
+        else None
+    )
     status = JobStatus(
         job_id=job_id,
         doc_id=doc_id,
-        filename=file.filename,
+        filename=content_upload.filename or "content.pdf",
         target_lang=target_lang,
         status=JobState.QUEUED,
         progress=0,
@@ -139,7 +210,15 @@ async def create_document(
     )
     storage.save_status(status)
     schedule_job(
-        process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang, user_intent
+        process_document_job,
+        job_id,
+        doc_id,
+        content_upload.filename or "content.pdf",
+        pdf_path,
+        target_lang,
+        user_intent,
+        layout_pdf_path,
+        layout_file.filename if layout_file is not None else None,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -151,12 +230,29 @@ async def create_text_workflow(
     output_kind: Annotated[str, Form()] = "typeset_document",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
+    page_width_pt: Annotated[float | None, Form()] = None,
+    page_height_pt: Annotated[float | None, Form()] = None,
+    target_font_size_pt: Annotated[float | None, Form()] = None,
+    allow_continuation: Annotated[bool | None, Form()] = None,
+    preserve_images: Annotated[bool | None, Form()] = None,
     filename: Annotated[str, Form()] = "text-input.txt",
 ) -> CreateDocumentResponse:
     ensure_target_lang(target_lang)
     if not text.strip():
         raise HTTPException(status_code=400, detail="Text input is empty")
-    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
+    user_intent = coerce_user_intent(
+        target_lang,
+        output_kind,
+        style_intent,
+        instruction,
+        _constraints_from_form(
+            page_width_pt=page_width_pt,
+            page_height_pt=page_height_pt,
+            target_font_size_pt=target_font_size_pt,
+            allow_continuation=allow_continuation,
+            preserve_images=preserve_images,
+        ),
+    )
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
     storage.save_status(
@@ -189,10 +285,27 @@ async def create_image_workflow(
     output_kind: Annotated[str, Form()] = "layout_reference",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
+    page_width_pt: Annotated[float | None, Form()] = None,
+    page_height_pt: Annotated[float | None, Form()] = None,
+    target_font_size_pt: Annotated[float | None, Form()] = None,
+    allow_continuation: Annotated[bool | None, Form()] = None,
+    preserve_images: Annotated[bool | None, Form()] = None,
 ) -> CreateDocumentResponse:
     ensure_target_lang(target_lang)
     await ensure_image_upload(file)
-    user_intent = coerce_user_intent(target_lang, output_kind, style_intent, instruction)
+    user_intent = coerce_user_intent(
+        target_lang,
+        output_kind,
+        style_intent,
+        instruction,
+        _constraints_from_form(
+            page_width_pt=page_width_pt,
+            page_height_pt=page_height_pt,
+            target_font_size_pt=target_font_size_pt,
+            allow_continuation=allow_continuation,
+            preserve_images=preserve_images,
+        ),
+    )
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
     image_path = await storage.save_upload_file(
@@ -229,17 +342,43 @@ async def create_image_workflow(
 async def create_documents_batch(
     files: Annotated[list[UploadFile], File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    output_kind: Annotated[str, Form()] = "translation",
+    style_intent: Annotated[str, Form()] = "academic",
+    instruction: Annotated[str, Form()] = "",
+    page_width_pt: Annotated[float | None, Form()] = None,
+    page_height_pt: Annotated[float | None, Form()] = None,
+    target_font_size_pt: Annotated[float | None, Form()] = None,
+    allow_continuation: Annotated[bool | None, Form()] = None,
+    preserve_images: Annotated[bool | None, Form()] = None,
 ) -> BatchCreateDocumentResponse:
     ensure_target_lang(target_lang)
     if not files:
         raise HTTPException(status_code=400, detail="At least one PDF is required")
+    user_intent = coerce_user_intent(
+        target_lang,
+        output_kind,
+        style_intent,
+        instruction,
+        _constraints_from_form(
+            page_width_pt=page_width_pt,
+            page_height_pt=page_height_pt,
+            target_font_size_pt=target_font_size_pt,
+            allow_continuation=allow_continuation,
+            preserve_images=preserve_images,
+        ),
+    )
 
     jobs: list[CreateDocumentResponse] = []
     for file in files:
         await ensure_pdf_upload(file)
         doc_id = storage.new_doc_id()
         job_id = storage.new_job_id()
-        pdf_path = await storage.save_upload(doc_id, file, settings.max_upload_bytes)
+        pdf_path = await storage.save_upload(
+            doc_id,
+            file,
+            settings.max_upload_bytes,
+            role="content",
+        )
         status = JobStatus(
             job_id=job_id,
             doc_id=doc_id,
@@ -251,7 +390,13 @@ async def create_documents_batch(
         )
         storage.save_status(status)
         schedule_job(
-            process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang
+            process_document_job,
+            job_id,
+            doc_id,
+            file.filename,
+            pdf_path,
+            target_lang,
+            user_intent,
         )
         jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
     return BatchCreateDocumentResponse(jobs=jobs)
@@ -301,11 +446,13 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         raise HTTPException(status_code=404, detail="Job not found") from exc
     if not status.doc_id:
         raise HTTPException(status_code=400, detail="Job has no document to retry")
-    pdf_path = storage.find_upload(status.doc_id)
+    pdf_path = storage.find_upload(status.doc_id, role="content")
     if pdf_path is None:
         raise HTTPException(status_code=404, detail="Original upload not found")
+    layout_pdf_path = storage.find_upload(status.doc_id, role="layout")
     target_lang = status.target_lang or settings.default_target_lang
     ensure_target_lang(target_lang)
+    user_intent = _load_user_intent(status.doc_id)
     next_job_id = storage.new_job_id()
     next_status = JobStatus(
         job_id=next_job_id,
@@ -324,6 +471,8 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         status.filename,
         pdf_path,
         target_lang,
+        user_intent,
+        layout_pdf_path,
     )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
 

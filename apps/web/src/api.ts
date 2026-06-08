@@ -1,4 +1,4 @@
-import type { JobStatus, OutputKind, RenderDefaults, StyleIntent } from "@trans-typesetting/schema";
+import type { JobStatus, OutputKind, RenderDefaults, StyleIntent, UserConstraints } from "@trans-typesetting/schema";
 
 export interface CreateDocumentResponse {
   job_id: string;
@@ -23,6 +23,10 @@ export interface RuntimeConfig {
   openai_api_key_configured: boolean;
   translation_concurrency: number;
   translator_max_attempts: number;
+  agent_max_repair_attempts: number;
+  agent_enable_vision_analysis: boolean;
+  layout_planner_model: string;
+  vision_analyzer_model: string;
   render_defaults: RenderDefaults;
 }
 
@@ -33,6 +37,10 @@ export interface UpdateRuntimeConfig {
   openai_api_key?: string;
   translation_concurrency?: number;
   translator_max_attempts?: number;
+  agent_max_repair_attempts?: number;
+  agent_enable_vision_analysis?: boolean;
+  layout_planner_model?: string;
+  vision_analyzer_model?: string;
   render_defaults?: RenderDefaults;
 }
 
@@ -40,6 +48,14 @@ export interface WorkflowIntentInput {
   output_kind: OutputKind;
   style_intent: StyleIntent;
   instruction: string;
+  constraints?: UserConstraints;
+}
+
+export interface CreateDocumentInput {
+  contentFile: File;
+  layoutReferenceFile?: File | null;
+  targetLang: string;
+  intent?: WorkflowIntentInput;
 }
 
 export interface ArtifactSummary {
@@ -93,16 +109,14 @@ export async function getHealth(options: ApiRequestInit = {}) {
   });
 }
 
-export async function createDocument(
-  file: File,
-  targetLang: string,
-  intent?: WorkflowIntentInput,
-  options: ApiRequestInit = {}
-) {
+export async function createDocument(input: CreateDocumentInput, options: ApiRequestInit = {}) {
   const formData = new FormData();
-  formData.append("file", file);
-  formData.append("target_lang", targetLang);
-  appendIntentFields(formData, intent);
+  formData.append("content_file", input.contentFile);
+  if (input.layoutReferenceFile) {
+    formData.append("layout_file", input.layoutReferenceFile);
+  }
+  formData.append("target_lang", input.targetLang);
+  appendIntentFields(formData, input.intent);
 
   return requestJson("/api/documents", parseCreateDocumentResponse, {
     method: "POST",
@@ -179,6 +193,21 @@ function appendIntentFields(formData: FormData, intent?: WorkflowIntentInput) {
   formData.append("output_kind", intent.output_kind);
   formData.append("style_intent", intent.style_intent);
   formData.append("instruction", intent.instruction);
+  if (intent.constraints?.page_width_pt !== undefined) {
+    formData.append("page_width_pt", String(intent.constraints.page_width_pt));
+  }
+  if (intent.constraints?.page_height_pt !== undefined) {
+    formData.append("page_height_pt", String(intent.constraints.page_height_pt));
+  }
+  if (intent.constraints?.target_font_size_pt !== undefined) {
+    formData.append("target_font_size_pt", String(intent.constraints.target_font_size_pt));
+  }
+  if (intent.constraints?.allow_continuation !== undefined) {
+    formData.append("allow_continuation", String(intent.constraints.allow_continuation));
+  }
+  if (intent.constraints?.preserve_images !== undefined) {
+    formData.append("preserve_images", String(intent.constraints.preserve_images));
+  }
 }
 
 export async function getJob(jobId: string, options: ApiRequestInit = {}) {
@@ -461,6 +490,10 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     typeof payload.openai_api_key_configured !== "boolean" ||
     typeof payload.translation_concurrency !== "number" ||
     typeof payload.translator_max_attempts !== "number" ||
+    typeof payload.agent_max_repair_attempts !== "number" ||
+    typeof payload.agent_enable_vision_analysis !== "boolean" ||
+    typeof payload.layout_planner_model !== "string" ||
+    typeof payload.vision_analyzer_model !== "string" ||
     !isRecord(payload.render_defaults)
   ) {
     throw new Error("运行配置返回结构不正确。");
@@ -477,6 +510,10 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     openai_api_key_configured: payload.openai_api_key_configured,
     translation_concurrency: payload.translation_concurrency,
     translator_max_attempts: payload.translator_max_attempts,
+    agent_max_repair_attempts: payload.agent_max_repair_attempts,
+    agent_enable_vision_analysis: payload.agent_enable_vision_analysis,
+    layout_planner_model: payload.layout_planner_model,
+    vision_analyzer_model: payload.vision_analyzer_model,
     render_defaults: renderDefaults
   };
 }
@@ -500,6 +537,16 @@ function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
     font_stack: fontStack,
     line_height: payload.line_height,
     paragraph_spacing_em: payload.paragraph_spacing_em,
+    layout_mode:
+      typeof payload.layout_mode === "string"
+        ? (payload.layout_mode as RenderDefaults["layout_mode"])
+        : undefined,
+    page_layout: isRecord(payload.page_layout)
+      ? (payload.page_layout as RenderDefaults["page_layout"])
+      : undefined,
+    role_styles: isRecord(payload.role_styles)
+      ? (payload.role_styles as RenderDefaults["role_styles"])
+      : undefined,
     alignment: isRecord(payload.alignment)
       ? (payload.alignment as RenderDefaults["alignment"])
       : undefined,

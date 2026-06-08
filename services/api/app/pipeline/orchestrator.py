@@ -19,8 +19,10 @@ from pdf_translator_schema import (
 )
 
 from ..models import ChunkProgress, JobState, JobStatus
-from ..runtime_config import effective_runtime_config, render_defaults_for_target
+from ..runtime_config import effective_runtime_config, render_defaults_for_intent
 from ..storage import storage
+from .agents import run_typesetting_graph
+from .agents.state import TypesettingGraphContext
 from .chunker import build_chunks
 from .parser import UnsupportedPdfError, build_parser_diagnostics, parse_pdf
 from .translator import Translator, build_translator
@@ -31,11 +33,13 @@ from .workflow import (
     build_input_source,
     build_layout_intent_plan,
     build_repair_record,
+    build_semantic_layout_analysis,
     build_text_document,
     coerce_user_intent,
     make_workflow_step,
     normalized_input_payload,
     render_evaluation_summary,
+    safe_validate_layout_intent_plan,
 )
 
 
@@ -111,112 +115,46 @@ async def process_document_job(
     pdf_path: Path,
     target_lang: str,
     user_intent: UserIntent | None = None,
+    layout_pdf_path: Path | None = None,
+    layout_filename: str | None = None,
 ) -> None:
     intent = user_intent or coerce_user_intent(target_lang)
     input_source = build_input_source(
-        source_id="source_1",
+        source_id="content_source",
         input_type=InputKind.PDF,
+        source_role="content",
         filename=filename,
         mime_type="application/pdf",
         path=pdf_path,
     )
+    layout_input_source = build_input_source(
+        source_id="layout_source",
+        input_type=InputKind.PDF,
+        source_role="layout_reference",
+        filename=layout_filename or filename,
+        mime_type="application/pdf",
+        path=layout_pdf_path or pdf_path,
+        quality_flags=[] if layout_pdf_path is not None else ["layout_source_fallback_to_content"],
+    )
     workflow = build_initial_workflow_run(
         job_id=job_id,
         doc_id=doc_id,
-        input_sources=[input_source],
+        input_sources=[input_source, layout_input_source],
         intent=intent,
     )
-    status_chunks: list[ChunkProgress] = []
-    try:
-        ensure_not_canceled(job_id)
-        workflow = append_workflow_step(
-            workflow,
-            make_workflow_step(
-                WorkflowStepName.READ_INPUT,
-                WorkflowStepStatus.RUNNING,
-                progress=0.05,
-                message="Reading PDF input",
-                output_artifacts=["normalized-input"],
-            ),
-        )
-        _save_workflow(doc_id, workflow)
-        update_status(
-            job_id,
-            filename,
-            target_lang,
-            JobState.PARSING,
-            0.15,
-            "Parsing PDF",
-            doc_id,
-        )
-        try:
-            document = await asyncio.to_thread(
-                parse_pdf,
-                pdf_path,
-                doc_id,
-                storage.asset_dir(doc_id),
-            )
-        except UnsupportedPdfError as exc:
-            storage.write_json(doc_id, "parser-diagnostics.json", exc.diagnostics)
-            workflow = append_workflow_step(
-                workflow,
-                make_workflow_step(
-                    WorkflowStepName.READ_INPUT,
-                    WorkflowStepStatus.FAILED,
-                    progress=1,
-                    message="PDF adapter failed",
-                    diagnostics=exc.diagnostics,
-                    error=str(exc),
-                ),
-                status=WorkflowStatus.FAILED,
-            )
-            _save_workflow(doc_id, workflow)
-            raise
-
-        storage.save_document_ir(document)
-        storage.write_json(
-            doc_id,
-            "parser-diagnostics.json",
-            build_parser_diagnostics(document),
-        )
-        storage.write_json(
-            doc_id,
-            "normalized-input.json",
-            normalized_input_payload(
-                input_sources=[input_source],
-                document=document,
-            ),
-        )
-        workflow = append_workflow_step(
-            workflow,
-            make_workflow_step(
-                WorkflowStepName.READ_INPUT,
-                WorkflowStepStatus.COMPLETED,
-                progress=0.2,
-                message="PDF adapter completed",
-                output_artifacts=[
-                    "normalized-input",
-                    "document-ir",
-                    "parser-diagnostics",
-                ],
-            ),
-        )
-        _save_workflow(doc_id, workflow)
-
-        await _run_workflow_from_document(
-            workflow=workflow,
-            job_id=job_id,
-            doc_id=doc_id,
-            filename=filename,
-            target_lang=target_lang,
-            document=document,
-            intent=intent,
-            status_chunks=status_chunks,
-        )
-    except JobCanceled:
-        _mark_canceled(job_id, doc_id, filename, target_lang, workflow, status_chunks)
-    except Exception as exc:
-        _mark_failed(job_id, doc_id, filename, target_lang, workflow, status_chunks, exc)
+    await _run_graph_job(
+        workflow=workflow,
+        job_id=job_id,
+        doc_id=doc_id,
+        filename=filename,
+        target_lang=target_lang,
+        input_kind=InputKind.PDF,
+        intent=intent,
+        source_path=pdf_path,
+        content_source_path=pdf_path,
+        layout_source_path=layout_pdf_path,
+        layout_source_filename=layout_filename,
+    )
 
 
 async def process_text_document_job(
@@ -231,6 +169,7 @@ async def process_text_document_job(
     input_source = build_input_source(
         source_id="source_1",
         input_type=InputKind.TEXT,
+        source_role="content",
         filename=filename,
         mime_type="text/plain",
         path=None,
@@ -242,69 +181,16 @@ async def process_text_document_job(
         input_sources=[input_source],
         intent=intent,
     )
-    status_chunks: list[ChunkProgress] = []
-    try:
-        ensure_not_canceled(job_id)
-        update_status(
-            job_id,
-            filename,
-            target_lang,
-            JobState.PARSING,
-            0.15,
-            "Reading text input",
-            doc_id,
-        )
-        document = build_text_document(doc_id, text, intent)
-        storage.save_document_ir(document)
-        storage.write_json(
-            doc_id,
-            "normalized-input.json",
-            normalized_input_payload(
-                input_sources=[input_source],
-                document=document,
-                input_text=text,
-            ),
-        )
-        storage.write_json(
-            doc_id,
-            "parser-diagnostics.json",
-            {
-                "kind": "text_adapter_diagnostics",
-                "text_block_count": sum(len(page.blocks) for page in document.pages),
-                "page_count": len(document.pages),
-                "quality_flags": [],
-            },
-        )
-        workflow = append_workflow_step(
-            workflow,
-            make_workflow_step(
-                WorkflowStepName.READ_INPUT,
-                WorkflowStepStatus.COMPLETED,
-                progress=0.2,
-                message="Text adapter completed",
-                output_artifacts=[
-                    "normalized-input",
-                    "document-ir",
-                    "parser-diagnostics",
-                ],
-            ),
-        )
-        _save_workflow(doc_id, workflow)
-
-        await _run_workflow_from_document(
-            workflow=workflow,
-            job_id=job_id,
-            doc_id=doc_id,
-            filename=filename,
-            target_lang=target_lang,
-            document=document,
-            intent=intent,
-            status_chunks=status_chunks,
-        )
-    except JobCanceled:
-        _mark_canceled(job_id, doc_id, filename, target_lang, workflow, status_chunks)
-    except Exception as exc:
-        _mark_failed(job_id, doc_id, filename, target_lang, workflow, status_chunks, exc)
+    await _run_graph_job(
+        workflow=workflow,
+        job_id=job_id,
+        doc_id=doc_id,
+        filename=filename,
+        target_lang=target_lang,
+        input_kind=InputKind.TEXT,
+        intent=intent,
+        input_text=text,
+    )
 
 
 async def process_image_document_job(
@@ -320,6 +206,7 @@ async def process_image_document_job(
     input_source = build_input_source(
         source_id="source_1",
         input_type=InputKind.IMAGE,
+        source_role="content",
         filename=filename,
         mime_type=mime_type,
         path=image_path,
@@ -331,78 +218,87 @@ async def process_image_document_job(
         input_sources=[input_source],
         intent=intent,
     )
-    status_chunks: list[ChunkProgress] = []
-    try:
-        ensure_not_canceled(job_id)
-        update_status(
-            job_id,
-            filename,
-            target_lang,
-            JobState.PARSING,
-            0.15,
-            "Reading image input",
-            doc_id,
-        )
-        document, assets = build_image_document(
-            doc_id=doc_id,
-            image_path=image_path,
-            storage=storage,
-            intent=intent,
-            filename=filename,
-            mime_type=mime_type,
-        )
-        storage.save_document_ir(document)
-        storage.write_json(doc_id, "asset-ir.json", [asset.model_dump() for asset in assets])
-        storage.write_json(
-            doc_id,
-            "normalized-input.json",
-            normalized_input_payload(
-                input_sources=[input_source],
-                document=document,
-                assets=assets,
-            ),
-        )
-        storage.write_json(
-            doc_id,
-            "parser-diagnostics.json",
-            {
-                "kind": "image_adapter_diagnostics",
-                "text_block_count": sum(len(page.blocks) for page in document.pages),
-                "asset_count": len(assets),
-                "quality_flags": ["deterministic_ocr_mock", "ocr_uncertain"],
-            },
-        )
-        workflow = append_workflow_step(
-            workflow,
-            make_workflow_step(
-                WorkflowStepName.READ_INPUT,
-                WorkflowStepStatus.COMPLETED,
-                progress=0.2,
-                message="Image adapter completed",
-                output_artifacts=[
-                    "normalized-input",
-                    "document-ir",
-                    "asset-ir",
-                    "parser-diagnostics",
-                ],
-            ),
-        )
-        _save_workflow(doc_id, workflow)
+    await _run_graph_job(
+        workflow=workflow,
+        job_id=job_id,
+        doc_id=doc_id,
+        filename=filename,
+        target_lang=target_lang,
+        input_kind=InputKind.IMAGE,
+        intent=intent,
+        source_path=image_path,
+        mime_type=mime_type,
+    )
 
-        await _run_workflow_from_document(
-            workflow=workflow,
-            job_id=job_id,
-            doc_id=doc_id,
-            filename=filename,
-            target_lang=target_lang,
-            document=document,
-            intent=intent,
-            status_chunks=status_chunks,
-        )
-    except JobCanceled:
-        _mark_canceled(job_id, doc_id, filename, target_lang, workflow, status_chunks)
-    except Exception as exc:
-        _mark_failed(job_id, doc_id, filename, target_lang, workflow, status_chunks, exc)
+
+async def _run_graph_job(
+    *,
+    workflow: WorkflowRun,
+    job_id: str,
+    doc_id: str,
+    filename: str,
+    target_lang: str,
+    input_kind: InputKind,
+    intent: UserIntent,
+        source_path: Path | None = None,
+    content_source_path: Path | None = None,
+    layout_source_path: Path | None = None,
+    layout_source_filename: str | None = None,
+    input_text: str = "",
+    mime_type: str | None = None,
+) -> None:
+    runtime_config = effective_runtime_config(storage)
+    await run_typesetting_graph(
+        context=_graph_context(),
+        job_id=job_id,
+        doc_id=doc_id,
+        filename=filename,
+        target_lang=target_lang,
+        input_kind=input_kind,
+        user_intent=intent,
+        workflow=workflow,
+        max_repair_attempts=runtime_config["agent_max_repair_attempts"],
+        source_path=source_path,
+        content_source_path=content_source_path,
+        layout_source_path=layout_source_path,
+        layout_source_filename=layout_source_filename,
+        input_text=input_text,
+        mime_type=mime_type,
+    )
+
+
+def _graph_context() -> TypesettingGraphContext:
+    return TypesettingGraphContext(
+        storage=storage,
+        update_status=update_status,
+        ensure_not_canceled=ensure_not_canceled,
+        mark_canceled=_mark_canceled,
+        mark_failed=_mark_failed,
+        save_workflow=_save_workflow,
+        load_saved_workflow=_load_saved_workflow,
+        parse_pdf=parse_pdf,
+        build_parser_diagnostics=build_parser_diagnostics,
+        build_chunks=build_chunks,
+        build_translator=build_translator,
+        translate_chunks=_translate_chunks,
+        render_preview_artifacts=_render_preview_artifacts,
+        render_pdf_with_optional_diagnostics=_render_pdf_with_optional_diagnostics,
+        workflow_helpers={
+            "append_workflow_step": append_workflow_step,
+            "build_image_document": build_image_document,
+            "build_initial_workflow_run": build_initial_workflow_run,
+            "build_input_source": build_input_source,
+            "build_layout_intent_plan": build_layout_intent_plan,
+            "build_repair_record": build_repair_record,
+            "build_semantic_layout_analysis": build_semantic_layout_analysis,
+            "build_text_document": build_text_document,
+            "initial_chunk_progress": _initial_chunk_progress,
+            "make_workflow_step": make_workflow_step,
+            "normalized_input_payload": normalized_input_payload,
+            "render_evaluation_summary": render_evaluation_summary,
+            "safe_validate_layout_intent_plan": safe_validate_layout_intent_plan,
+        },
+    )
 
 
 async def _run_workflow_from_document(
@@ -470,7 +366,7 @@ async def _run_workflow_from_document(
     _save_workflow(doc_id, workflow)
 
     runtime_config = effective_runtime_config(storage)
-    render_defaults = render_defaults_for_target(storage, target_lang)
+    render_defaults = render_defaults_for_intent(storage, target_lang, intent)
     chunks = build_chunks(
         document,
         target_lang=target_lang,
@@ -547,18 +443,15 @@ async def _run_workflow_from_document(
         doc_id,
         chunks=status_chunks,
     )
-    render_document = RenderDocument.from_ir_and_plans(
+    storage.write_json(doc_id, "translation-plans.json", [plan.model_dump() for plan in plans])
+    html, renderer_diagnostics = _render_preview_artifacts(
+        doc_id,
         document,
         plans,
         target_lang,
-        render_defaults=render_defaults,
-        layout_intent_plan=layout_plan,
+        render_defaults,
+        layout_plan,
     )
-    html = render_to_html(render_document)
-    storage.save_preview_html(doc_id, html)
-    storage.write_json(doc_id, "translation-plans.json", [plan.model_dump() for plan in plans])
-    renderer_diagnostics = render_document.diagnostics()
-    storage.write_json(doc_id, "renderer-diagnostics.json", renderer_diagnostics)
     workflow = append_workflow_step(
         workflow,
         make_workflow_step(
@@ -567,7 +460,7 @@ async def _run_workflow_from_document(
             progress=0.86,
             message="Preview rendered",
             input_artifacts=["document-ir", "layout-intent-plan", "translation-plans"],
-            output_artifacts=["renderer-diagnostics", "preview"],
+            output_artifacts=["renderer-diagnostics", "layout-trace", "preview"],
             diagnostics={
                 "quality_flag_counts": renderer_diagnostics.get("quality_flag_counts", {})
             },
@@ -611,16 +504,35 @@ async def _run_workflow_from_document(
             "validation-and-repair.json",
             {"layout_intent_plan": {"status": "valid"}, "repairs": repairs},
         )
+        html, renderer_diagnostics = _render_preview_artifacts(
+            doc_id,
+            document,
+            plans,
+            target_lang,
+            render_defaults,
+            layout_plan,
+        )
+        evaluation = render_evaluation_summary(renderer_diagnostics)
+        storage.write_json(doc_id, "render-evaluation.json", evaluation)
         workflow = append_workflow_step(
             workflow,
             make_workflow_step(
                 WorkflowStepName.REPAIR,
                 WorkflowStepStatus.REPAIRED,
                 progress=0.9,
-                message="Semantic layout intent repaired from renderer diagnostics",
+                message="Semantic layout intent repaired and preview re-rendered",
                 input_artifacts=["renderer-diagnostics", "layout-intent-plan"],
-                output_artifacts=["layout-intent-plan", "validation-and-repair"],
-                diagnostics=repair_record,
+                output_artifacts=[
+                    "layout-intent-plan",
+                    "validation-and-repair",
+                    "renderer-diagnostics",
+                    "layout-trace",
+                    "preview",
+                ],
+                diagnostics={
+                    **repair_record,
+                    "post_repair_evaluation": evaluation,
+                },
             ),
         )
     _save_workflow(doc_id, workflow)
@@ -797,6 +709,29 @@ async def _render_pdf_with_optional_diagnostics(
             asset_base_path=asset_base_path,
         )
     return await render_to_pdf(html, output_path)
+
+
+def _render_preview_artifacts(
+    doc_id: str,
+    document: DocumentIR,
+    plans: list[TranslationLayoutPlan],
+    target_lang: str,
+    render_defaults: Any,
+    layout_plan: Any,
+) -> tuple[str, dict[str, Any]]:
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        plans,
+        target_lang,
+        render_defaults=render_defaults,
+        layout_intent_plan=layout_plan,
+    )
+    html = render_to_html(render_document)
+    storage.save_preview_html(doc_id, html)
+    renderer_diagnostics = render_document.diagnostics()
+    storage.write_json(doc_id, "renderer-diagnostics.json", renderer_diagnostics)
+    storage.write_json(doc_id, "layout-trace.json", render_document.layout_trace)
+    return html, renderer_diagnostics
 
 
 def _mark_canceled(

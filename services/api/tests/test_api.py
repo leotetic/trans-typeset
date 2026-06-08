@@ -40,6 +40,10 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
         max_upload_bytes=1234,
         translation_concurrency=3,
         translator_max_attempts=4,
+        agent_max_repair_attempts=3,
+        agent_enable_vision_analysis=True,
+        layout_planner_model="layout-model",
+        vision_analyzer_model="vision-model",
         render_font_stack=("Example Sans", "serif"),
         render_line_height=1.44,
         render_paragraph_spacing_em=0.3,
@@ -63,6 +67,10 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
     assert payload["openai_api_key_configured"] is True
     assert payload["translation_concurrency"] == 3
     assert payload["translator_max_attempts"] == 4
+    assert payload["agent_max_repair_attempts"] == 3
+    assert payload["agent_enable_vision_analysis"] is True
+    assert payload["layout_planner_model"] == "layout-model"
+    assert payload["vision_analyzer_model"] == "vision-model"
     assert payload["render_defaults"]["target_lang"] == "ja-JP"
     assert payload["render_defaults"]["font_stack"] == ["Example Sans", "serif"]
     assert payload["render_defaults"]["line_height"] == 1.44
@@ -308,7 +316,10 @@ def test_cancel_completed_job_is_noop(tmp_path: Path, monkeypatch) -> None:
 def test_retry_job_requeues_existing_upload(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
-    (storage.uploads / "doc_1.pdf").write_bytes(b"%PDF-1.7\n%%EOF")
+    content_path = storage.uploads / "doc_1.content.pdf"
+    layout_path = storage.uploads / "doc_1.layout.pdf"
+    content_path.write_bytes(b"%PDF-1.7\n%%EOF")
+    layout_path.write_bytes(b"%PDF-1.7\n%%EOF")
     storage.save_status(
         documents_route.JobStatus(
             job_id="job_1",
@@ -340,6 +351,8 @@ def test_retry_job_requeues_existing_upload(tmp_path: Path, monkeypatch) -> None
     assert retry_status.message == "Queued retry"
     assert scheduled[0][0] is documents_route.process_document_job
     assert scheduled[0][1][0] == payload["job_id"]
+    assert scheduled[0][1][3] == content_path
+    assert scheduled[0][1][6] == layout_path
 
 
 def test_retry_job_without_upload_returns_404(tmp_path: Path, monkeypatch) -> None:
@@ -448,8 +461,55 @@ def test_pdf_upload_queues_job(tmp_path: Path, monkeypatch) -> None:
     status = storage.load_status(payload["job_id"])
     assert status.status == "queued"
     assert status.error is None
+    assert storage.find_upload(payload["doc_id"], role="content") is not None
     assert scheduled[0][0] is documents_route.process_document_job
     assert scheduled[0][1][0] == payload["job_id"]
+
+
+def test_pdf_upload_accepts_content_and_layout_sources(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/documents",
+        data={
+            "target_lang": "zh-CN",
+            "output_kind": "typeset_document",
+            "style_intent": "academic",
+            "instruction": "按照 GB/T 7713.1 标准排版",
+            "page_width_pt": "595.28",
+            "page_height_pt": "841.89",
+            "target_font_size_pt": "12",
+            "allow_continuation": "true",
+            "preserve_images": "false",
+        },
+        files={
+            "content_file": ("paper.pdf", b"%PDF-1.7\n%%EOF", "application/pdf"),
+            "layout_file": ("layout.pdf", b"%PDF-1.7\n%%EOF", "application/pdf"),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    content_path = storage.find_upload(payload["doc_id"], role="content")
+    layout_path = storage.find_upload(payload["doc_id"], role="layout")
+    assert content_path is not None
+    assert layout_path is not None
+    assert content_path.name.endswith(".content.pdf")
+    assert layout_path.name.endswith(".layout.pdf")
+    assert scheduled[0][0] is documents_route.process_document_job
+    assert scheduled[0][1][3] == content_path
+    assert scheduled[0][1][6] == layout_path
+    intent = scheduled[0][1][5]
+    assert intent.constraints.page_width_pt == 595.28
+    assert intent.constraints.preserve_images is False
 
 
 def test_pdf_upload_response_does_not_wait_for_scheduled_job(
@@ -733,6 +793,7 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     )
     storage.save_document_ir(document)
     storage.write_json("doc_1", "translation-chunks.json", [{"chunk_id": "chunk_1"}])
+    storage.write_json("doc_1", "layout-trace.json", {"kind": "layout_trace"})
     storage.write_json("doc_1", "parser-diagnostics.json", {"kind": "parser_diagnostics"})
     client = TestClient(app)
 
@@ -742,14 +803,17 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     artifacts = {item["name"]: item for item in summary.json()["artifacts"]}
     assert artifacts["normalized-input"]["available"] is False
     assert artifacts["workflow-run"]["available"] is False
+    assert artifacts["semantic-analysis"]["available"] is False
     assert artifacts["document-ir"]["available"] is True
     assert artifacts["translation-chunks"]["available"] is True
+    assert artifacts["layout-trace"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False
     assert artifacts["parser-diagnostics"]["available"] is True
 
     document_response = client.get("/api/documents/doc_1/artifacts/document-ir")
     chunks_response = client.get("/api/documents/doc_1/artifacts/translation-chunks")
     parser_response = client.get("/api/documents/doc_1/artifacts/parser-diagnostics")
+    trace_response = client.get("/api/documents/doc_1/artifacts/layout-trace")
 
     assert document_response.status_code == 200
     assert document_response.json()["doc_id"] == "doc_1"
@@ -757,6 +821,8 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert chunks_response.json() == [{"chunk_id": "chunk_1"}]
     assert parser_response.status_code == 200
     assert parser_response.json() == {"kind": "parser_diagnostics"}
+    assert trace_response.status_code == 200
+    assert trace_response.json() == {"kind": "layout_trace"}
 
 
 def test_missing_artifact_returns_404(tmp_path: Path, monkeypatch) -> None:

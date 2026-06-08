@@ -20,7 +20,11 @@ from pdf_translator_schema import (
     LayoutIntentPlan,
     OutputKind,
     PageSize,
+    SemanticAssetSignal,
+    SemanticBlockSignal,
+    SemanticLayoutAnalysis,
     StyleIntent,
+    TypesettingStandard,
     UserIntent,
     WorkflowRun,
     WorkflowStatus,
@@ -29,7 +33,7 @@ from pdf_translator_schema import (
     WorkflowStepStatus,
     validate_layout_intent_plan,
 )
-from pdf_translator_schema.models import DocumentBlock, StyleSeed
+from pdf_translator_schema.models import DocumentBlock, StyleSeed, UserConstraints
 from pdf_translator_schema.validation import LayoutIntentPlanValidationError
 
 from ..storage import Storage
@@ -47,12 +51,16 @@ def coerce_user_intent(
     output_kind: str | None = None,
     style_intent: str | None = None,
     instruction: str | None = None,
+    constraints: UserConstraints | dict[str, Any] | None = None,
 ) -> UserIntent:
+    normalized_instruction = (instruction or "").strip()
     return UserIntent(
         target_lang=target_lang,
         output_kind=_coerce_output_kind(output_kind),
         style_intent=_coerce_style_intent(style_intent),
-        instruction=(instruction or "").strip(),
+        typesetting_standard=_typesetting_standard_for_instruction(normalized_instruction),
+        instruction=normalized_instruction,
+        constraints=_coerce_user_constraints(constraints),
     )
 
 
@@ -60,6 +68,7 @@ def build_input_source(
     *,
     source_id: str,
     input_type: InputKind,
+    source_role: str = "content",
     filename: str | None,
     mime_type: str | None,
     path: Path | None,
@@ -70,6 +79,7 @@ def build_input_source(
     return InputSource(
         source_id=source_id,
         input_type=input_type,
+        source_role=source_role,
         filename=filename,
         mime_type=mime_type,
         size_bytes=path.stat().st_size if path and path.exists() else size_bytes,
@@ -243,6 +253,7 @@ def build_layout_intent_plan(
     *,
     attempt: int = 1,
     diagnostics: dict[str, Any] | None = None,
+    semantic_analysis: SemanticLayoutAnalysis | None = None,
 ) -> LayoutIntentPlan:
     diagnostics = diagnostics or {}
     repair_block_ids = _diagnostic_block_ids(diagnostics)
@@ -288,7 +299,81 @@ def build_layout_intent_plan(
         assets=assets,
         quality_flags=_layout_plan_flags(intent, diagnostics, attempt),
     )
+    if semantic_analysis is not None:
+        plan = plan.model_copy(
+            update={
+                "quality_flags": _unique(
+                    [*plan.quality_flags, "semantic_analysis_considered"]
+                )
+            },
+            deep=True,
+        )
     return validate_layout_intent_plan(document, plan)
+
+
+def build_semantic_layout_analysis(
+    document: DocumentIR,
+    intent: UserIntent,
+    *,
+    input_kind: InputKind,
+) -> SemanticLayoutAnalysis:
+    block_signals: list[SemanticBlockSignal] = []
+    section_hints: list[str] = []
+    for page in document.pages:
+        for block in sorted(page.blocks, key=lambda item: item.reading_order):
+            quality_flags: list[str] = []
+            role_candidates = [block.role]
+            if block.role == BlockRole.UNKNOWN:
+                quality_flags.append("role_uncertain")
+            if not block.source_text.strip():
+                quality_flags.append("empty_source_block")
+            if block.role in {BlockRole.TITLE, BlockRole.HEADING, BlockRole.ABSTRACT}:
+                section_hints.append(_compact_text(block.source_text, 120))
+            block_signals.append(
+                SemanticBlockSignal(
+                    source_block_id=block.block_id,
+                    role_candidates=role_candidates,
+                    section_hint=_section_hint_for_block(block),
+                    confidence=0.85 if not quality_flags else 0.45,
+                    quality_flags=quality_flags,
+                )
+            )
+    asset_signals = [
+        SemanticAssetSignal(
+            asset_id=asset.asset_id,
+            usage_hint="preserve" if intent.constraints.preserve_images else "ignore",
+            text_hint=asset.alt_text or "",
+            confidence=0.75 if asset.path else 0.35,
+            quality_flags=[] if asset.path else ["asset_missing_path"],
+        )
+        for page in document.pages
+        for asset in page.assets
+    ]
+    quality_flags = ["deterministic_semantic_analysis"]
+    if input_kind == InputKind.IMAGE:
+        quality_flags.append("vision_analysis_disabled")
+    if intent.instruction.strip():
+        quality_flags.append("user_instruction_considered")
+    if intent.typesetting_standard == TypesettingStandard.GB_T_7713_1_2025:
+        quality_flags.append("gb_t_7713_1_requested")
+    confidence_values = [
+        signal.confidence for signal in block_signals
+    ] + [signal.confidence for signal in asset_signals]
+    confidence = (
+        sum(confidence_values) / len(confidence_values)
+        if confidence_values
+        else 0.5
+    )
+    return SemanticLayoutAnalysis(
+        analysis_id=f"{document.doc_id}_semantic_analysis_01",
+        doc_id=document.doc_id,
+        target_lang=intent.target_lang,
+        block_signals=block_signals,
+        asset_signals=asset_signals,
+        section_hints=_unique([hint for hint in section_hints if hint]),
+        confidence=round(confidence, 4),
+        quality_flags=quality_flags,
+    )
 
 
 def render_evaluation_summary(renderer_diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -374,6 +459,23 @@ def _coerce_style_intent(value: str | None) -> StyleIntent:
         return StyleIntent(value)
     except ValueError:
         return StyleIntent.ACADEMIC
+
+
+def _coerce_user_constraints(
+    value: UserConstraints | dict[str, Any] | None,
+) -> UserConstraints:
+    if value is None:
+        return UserConstraints()
+    if isinstance(value, UserConstraints):
+        return value
+    return UserConstraints.model_validate(value)
+
+
+def _typesetting_standard_for_instruction(instruction: str) -> TypesettingStandard:
+    normalized = instruction.lower()
+    if "gb/t 7713.1" in normalized or "gb-gb/t 7713.1" in normalized:
+        return TypesettingStandard.GB_T_7713_1_2025
+    return TypesettingStandard.NONE
 
 
 def _sha256(path: Path) -> str:
@@ -507,6 +609,17 @@ def _document_text(document: DocumentIR) -> str:
         for page in document.pages
         for block in sorted(page.blocks, key=lambda item: item.reading_order)
     )
+
+
+def _section_hint_for_block(block: DocumentBlock) -> str | None:
+    text = _compact_text(block.source_text, 80)
+    if block.role == BlockRole.TITLE:
+        return f"title: {text}" if text else "title"
+    if block.role == BlockRole.HEADING:
+        return f"heading: {text}" if text else "heading"
+    if block.role == BlockRole.ABSTRACT:
+        return "abstract"
+    return None
 
 
 def _collect_source_flags(input_sources: list[InputSource]) -> list[str]:

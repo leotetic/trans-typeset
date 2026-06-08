@@ -145,6 +145,14 @@
       "title": "BlockRole",
       "type": "string"
     },
+    "LayoutMode": {
+      "enum": [
+        "source_bbox",
+        "continuous_reflow"
+      ],
+      "title": "LayoutMode",
+      "type": "string"
+    },
     "OverflowPolicy": {
       "additionalProperties": false,
       "properties": {
@@ -183,6 +191,49 @@
         }
       },
       "title": "OverflowPolicy",
+      "type": "object"
+    },
+    "PageLayoutDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "width_pt": {
+          "default": 595.28,
+          "exclusiveMinimum": 0,
+          "title": "Width Pt",
+          "type": "number"
+        },
+        "height_pt": {
+          "default": 841.89,
+          "exclusiveMinimum": 0,
+          "title": "Height Pt",
+          "type": "number"
+        },
+        "margin_top_pt": {
+          "default": 70.87,
+          "minimum": 0,
+          "title": "Margin Top Pt",
+          "type": "number"
+        },
+        "margin_right_pt": {
+          "default": 56.69,
+          "minimum": 0,
+          "title": "Margin Right Pt",
+          "type": "number"
+        },
+        "margin_bottom_pt": {
+          "default": 56.69,
+          "minimum": 0,
+          "title": "Margin Bottom Pt",
+          "type": "number"
+        },
+        "margin_left_pt": {
+          "default": 70.87,
+          "minimum": 0,
+          "title": "Margin Left Pt",
+          "type": "number"
+        }
+      },
+      "title": "PageLayoutDefaults",
       "type": "object"
     },
     "PreservePolicy": {
@@ -262,6 +313,16 @@
           "title": "Paragraph Spacing Em",
           "type": "number"
         },
+        "layout_mode": {
+          "$ref": "#/$defs/LayoutMode",
+          "default": "source_bbox"
+        },
+        "page_layout": {
+          "$ref": "#/$defs/PageLayoutDefaults"
+        },
+        "role_styles": {
+          "$ref": "#/$defs/RoleStyles"
+        },
         "alignment": {
           "$ref": "#/$defs/AlignmentDefaults"
         },
@@ -273,6 +334,106 @@
         }
       },
       "title": "RenderDefaults",
+      "type": "object"
+    },
+    "RoleStyleDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "font_size_pt": {
+          "exclusiveMinimum": 0,
+          "title": "Font Size Pt",
+          "type": "number"
+        },
+        "bold": {
+          "default": false,
+          "title": "Bold",
+          "type": "boolean"
+        },
+        "italic": {
+          "default": false,
+          "title": "Italic",
+          "type": "boolean"
+        },
+        "alignment": {
+          "default": "left",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Alignment",
+          "type": "string"
+        },
+        "line_height": {
+          "default": 1.5,
+          "exclusiveMinimum": 0,
+          "title": "Line Height",
+          "type": "number"
+        },
+        "first_line_indent_em": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "First Line Indent Em",
+          "type": "number"
+        },
+        "space_before_pt": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Space Before Pt",
+          "type": "number"
+        },
+        "space_after_pt": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Space After Pt",
+          "type": "number"
+        }
+      },
+      "required": [
+        "font_size_pt"
+      ],
+      "title": "RoleStyleDefaults",
+      "type": "object"
+    },
+    "RoleStyles": {
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "abstract": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "heading": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "paragraph": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "caption": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "formula": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "table": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "figure": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "footnote": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "reference": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        },
+        "unknown": {
+          "$ref": "#/$defs/RoleStyleDefaults"
+        }
+      },
+      "title": "RoleStyles",
       "type": "object"
     },
     "SourceBlock": {

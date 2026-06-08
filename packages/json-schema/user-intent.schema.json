@@ -21,6 +21,14 @@
       "title": "StyleIntent",
       "type": "string"
     },
+    "TypesettingStandard": {
+      "enum": [
+        "none",
+        "gb_t_7713_1_2025"
+      ],
+      "title": "TypesettingStandard",
+      "type": "string"
+    },
     "UserConstraints": {
       "additionalProperties": false,
       "properties": {
@@ -71,6 +79,10 @@
     "style_intent": {
       "$ref": "#/$defs/StyleIntent",
       "default": "academic"
+    },
+    "typesetting_standard": {
+      "$ref": "#/$defs/TypesettingStandard",
+      "default": "none"
     },
     "instruction": {
       "default": "",

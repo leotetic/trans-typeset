@@ -12,6 +12,8 @@ from pdf_translator_schema import (
     PageSize,
     LayoutIntentBlock,
     LayoutIntentPlan,
+    SemanticBlockSignal,
+    SemanticLayoutAnalysis,
     SourceBlock,
     TranslationBlockPlan,
     TranslationChunk,
@@ -19,6 +21,7 @@ from pdf_translator_schema import (
     UserIntent,
     WorkflowRun,
     WorkflowStep,
+    TypesettingStandard,
     validate_layout_intent_plan,
     validate_layout_plan,
 )
@@ -40,6 +43,11 @@ def test_render_defaults_are_available_on_chunk() -> None:
 
     assert chunk.target_lang == "zh-CN"
     assert chunk.render_defaults.font_stack[0] == "Noto Sans CJK SC"
+    assert chunk.render_defaults.layout_mode == "source_bbox"
+    assert chunk.render_defaults.page_layout.width_pt == 595.28
+    assert chunk.render_defaults.page_layout.margin_top_pt == 70.87
+    assert chunk.render_defaults.role_styles.paragraph.font_size_pt == 12.0
+    assert chunk.render_defaults.role_styles.paragraph.line_height == 1.5
     assert chunk.render_defaults.alignment.paragraph == "justify"
     assert chunk.render_defaults.overflow_policy.min_font_scale == 0.86
     assert chunk.render_defaults.overflow_policy.allow_continuation_page is True
@@ -81,10 +89,48 @@ def test_v2_workflow_contract_defaults_are_available() -> None:
     )
 
     assert source.input_type == "text"
+    assert source.source_role == "content"
     assert asset.quality_flags == ["deterministic_ocr_mock"]
     assert intent.output_kind == "typeset_document"
+    assert intent.typesetting_standard == TypesettingStandard.NONE
     assert intent.constraints.allow_continuation is True
     assert run.steps[0].name == "read_input"
+
+
+def test_input_source_can_mark_layout_reference_role() -> None:
+    source = InputSource(
+        source_id="layout_source",
+        input_type="pdf",
+        source_role="layout_reference",
+        filename="style.pdf",
+    )
+
+    assert source.source_role == "layout_reference"
+
+
+def test_semantic_layout_analysis_contract_defaults_are_available() -> None:
+    analysis = SemanticLayoutAnalysis(
+        analysis_id="analysis_1",
+        doc_id="doc_1",
+        block_signals=[
+            SemanticBlockSignal(
+                source_block_id="b1",
+                role_candidates=[BlockRole.TITLE, BlockRole.HEADING],
+                section_hint="title",
+                confidence=0.82,
+            )
+        ],
+        section_hints=["title"],
+        quality_flags=["deterministic_semantic_analysis"],
+    )
+
+    assert analysis.schema_version == "0.1"
+    assert analysis.block_signals[0].source_block_id == "b1"
+    assert analysis.block_signals[0].role_candidates == [
+        BlockRole.TITLE,
+        BlockRole.HEADING,
+    ]
+    assert analysis.quality_flags == ["deterministic_semantic_analysis"]
 
 
 def test_rejects_invalid_bbox() -> None:
@@ -339,6 +385,17 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
                 "page_number": 1,
             },
         ),
+        (
+            SemanticLayoutAnalysis,
+            {
+                "analysis_id": "analysis_1",
+                "doc_id": "doc_1",
+                "block_signals": [
+                    {"source_block_id": "b1", "role_candidates": [BlockRole.TITLE]}
+                ],
+                "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+            },
+        ),
     ],
 )
 def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) -> None:
@@ -356,6 +413,7 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
         "user-intent.schema.json",
         "workflow-run.schema.json",
         "layout-intent-plan.schema.json",
+        "semantic-layout-analysis.schema.json",
         "translation-chunk.schema.json",
         "translation-layout-plan.schema.json",
     ):

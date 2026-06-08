@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from math import ceil
 from typing import Any
 
-from pdf_translator_schema import DocumentIR, LayoutIntentPlan, TranslationLayoutPlan
+from pdf_translator_schema import (
+    DocumentIR,
+    LayoutIntentPlan,
+    LayoutMode,
+    TranslationLayoutPlan,
+)
 from pdf_translator_schema.models import (
     Asset,
     BlockRole,
@@ -12,12 +18,16 @@ from pdf_translator_schema.models import (
     DocumentBlock,
     PageSize,
     RenderDefaults,
+    RoleStyleDefaults,
     StyleSeed,
 )
 
 
 _SCHEMA_RENDER_DEFAULTS = RenderDefaults()
 _CONTINUATION_MARGIN_PT = 54.0
+_MIN_FINAL_FRAGMENT_CHARS = 12
+_MIN_FINAL_FRAGMENT_LINES = 2
+_LOW_UTILIZATION_THRESHOLD = 0.18
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -74,6 +84,16 @@ def _estimated_line_count(text: str, width_pt: float, font_size_pt: float) -> in
         line_width = line_units * font_size_pt
         lines += max(1, ceil(line_width / width_pt))
     return lines
+
+
+def _normalized_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _enum_value(value: object) -> str:
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)
 
 
 def _text_overflows(
@@ -200,6 +220,11 @@ class RenderBlock:
     font_size_pt: float
     font_scale: float = 1.0
     render_intent: str = "normal"
+    text_align: str | None = None
+    font_weight: int | None = None
+    font_style: str | None = None
+    first_line_indent_em: float = 0.0
+    line_height: float | None = None
     quality_flags: list[str] = field(default_factory=list)
 
 
@@ -219,6 +244,7 @@ class RenderPage:
     size: PageSize
     blocks: list[RenderBlock]
     assets: list[RenderAsset] = field(default_factory=list)
+    footer_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -231,6 +257,8 @@ class RenderDocument:
     )
     line_height: float = _SCHEMA_RENDER_DEFAULTS.line_height
     paragraph_spacing_em: float = _SCHEMA_RENDER_DEFAULTS.paragraph_spacing_em
+    layout_mode: str = _enum_value(_SCHEMA_RENDER_DEFAULTS.layout_mode)
+    layout_trace: dict[str, Any] = field(default_factory=dict)
 
     def layout_issues(self) -> list[dict[str, Any]]:
         issues: list[dict[str, Any]] = []
@@ -296,11 +324,16 @@ class RenderDocument:
         pages: list[dict[str, Any]] = []
         quality_flag_counts: dict[str, int] = {}
         block_count = 0
+        page_utilization: list[dict[str, Any]] = []
+        low_utilization_pages: list[str] = []
+        single_fragment_pages: list[str] = []
         for page in self.pages:
             page_flags: list[dict[str, Any]] = []
             asset_flags: list[dict[str, Any]] = []
+            text_area = 0.0
             for block in page.blocks:
                 block_count += 1
+                text_area += _bbox_area(block.bbox)
                 for flag in block.quality_flags:
                     quality_flag_counts[flag] = quality_flag_counts.get(flag, 0) + 1
                 if block.quality_flags:
@@ -313,6 +346,30 @@ class RenderDocument:
                             "quality_flags": block.quality_flags,
                         }
                     )
+            page_area = page.size.width * page.size.height
+            utilization = round(text_area / page_area, 4) if page_area > 0 else 0.0
+            page_utilization.append(
+                {
+                    "page_id": page.page_id,
+                    "text_area_ratio": utilization,
+                    "block_count": len(page.blocks),
+                    "asset_count": len(page.assets),
+                }
+            )
+            if page.blocks and utilization < _LOW_UTILIZATION_THRESHOLD:
+                low_utilization_pages.append(page.page_id)
+            if len(page.blocks) == 1:
+                text = page.blocks[0].text.strip()
+                estimated_lines = _estimated_line_count(
+                    text,
+                    _bbox_width(page.blocks[0].bbox),
+                    page.blocks[0].font_size_pt,
+                )
+                if (
+                    len(text) < _MIN_FINAL_FRAGMENT_CHARS
+                    or estimated_lines < _MIN_FINAL_FRAGMENT_LINES
+                ):
+                    single_fragment_pages.append(page.page_id)
             for asset in page.assets:
                 for flag in asset.quality_flags:
                     quality_flag_counts[flag] = quality_flag_counts.get(flag, 0) + 1
@@ -336,10 +393,15 @@ class RenderDocument:
         return {
             "doc_id": self.doc_id,
             "target_lang": self.target_lang,
+            "layout_mode": self.layout_mode,
             "page_count": len(self.pages),
             "block_count": block_count,
             "quality_flag_counts": quality_flag_counts,
             "layout_issues": self.layout_issues(),
+            "page_utilization": page_utilization,
+            "low_utilization_pages": low_utilization_pages,
+            "single_fragment_pages": single_fragment_pages,
+            "suppressed_artifacts": self.layout_trace.get("suppressed_artifacts", []),
             "pages": pages,
         }
 
@@ -357,6 +419,14 @@ class RenderDocument:
             if render_defaults is not None
             else RenderDefaults(target_lang=target_lang)
         )
+        if defaults.layout_mode == LayoutMode.CONTINUOUS_REFLOW:
+            return _from_ir_and_plans_continuous_reflow(
+                document,
+                plans,
+                target_lang,
+                defaults,
+                layout_intent_plan,
+            )
         min_font_scale = float(defaults.overflow_policy.min_font_scale)
         compact_font_scale = max(min_font_scale, 0.92)
         line_height = defaults.line_height
@@ -492,6 +562,8 @@ class RenderDocument:
             font_stack=defaults.font_stack,
             line_height=defaults.line_height,
             paragraph_spacing_em=defaults.paragraph_spacing_em,
+            layout_mode=_enum_value(defaults.layout_mode),
+            layout_trace=_build_source_bbox_trace(document, pages, defaults),
         )
 
 
@@ -520,6 +592,588 @@ def _render_assets(
             )
         )
     return render_assets
+
+
+def _from_ir_and_plans_continuous_reflow(
+    document: DocumentIR,
+    plans: list[TranslationLayoutPlan],
+    target_lang: str,
+    defaults: RenderDefaults,
+    layout_intent_plan: LayoutIntentPlan | None,
+) -> RenderDocument:
+    translations = {
+        block.source_block_id: block
+        for plan in plans
+        for block in plan.blocks
+    }
+    layout_intents = {
+        block.source_block_id: block
+        for block in (layout_intent_plan.blocks if layout_intent_plan else [])
+    }
+    asset_usages = {
+        asset.asset_id: asset.usage
+        for asset in (layout_intent_plan.assets if layout_intent_plan else [])
+    }
+    page_layout = defaults.page_layout
+    page_size = PageSize(width=page_layout.width_pt, height=page_layout.height_pt)
+    content_x0 = page_layout.margin_left_pt
+    content_y0 = page_layout.margin_top_pt
+    content_width = page_layout.width_pt - page_layout.margin_left_pt - page_layout.margin_right_pt
+    content_bottom = page_layout.height_pt - page_layout.margin_bottom_pt
+
+    pages: list[RenderPage] = []
+    current_blocks: list[RenderBlock] = []
+    current_assets: list[RenderAsset] = []
+    cursor_y = content_y0
+    page_index = 1
+    block_traces: list[dict[str, Any]] = []
+    asset_traces: list[dict[str, Any]] = []
+    suppressed_artifacts: list[dict[str, Any]] = []
+    source_page_ids: set[str] = set()
+    rendered_source_ids: set[str] = set()
+
+    def finish_page() -> None:
+        nonlocal current_blocks, current_assets, cursor_y, page_index
+        pages.append(
+            RenderPage(
+                page_id=f"r{page_index:04d}",
+                size=page_size,
+                blocks=current_blocks,
+                assets=current_assets,
+                footer_text=str(page_index),
+            )
+        )
+        page_index += 1
+        current_blocks = []
+        current_assets = []
+        cursor_y = content_y0
+
+    ordered_pages = sorted(document.pages, key=lambda item: item.page_id)
+    ordered_items: list[tuple[str, DocumentBlock | Asset]] = []
+    for page in ordered_pages:
+        source_page_ids.add(page.page_id)
+        page_items: list[tuple[float, float, float, str, DocumentBlock | Asset]] = [
+            (
+                float(block.reading_order),
+                block.bbox.y0,
+                block.bbox.x0,
+                "block",
+                block,
+            )
+            for block in page.blocks
+        ]
+        for asset in page.assets:
+            usage = asset_usages.get(asset.asset_id, "preserve")
+            if usage == "ignore":
+                suppressed_artifacts.append(
+                    {
+                        "kind": "asset_ignored",
+                        "asset_id": asset.asset_id,
+                        "source_page_id": asset.page_id,
+                    }
+                )
+            elif not asset.path:
+                suppressed_artifacts.append(
+                    {
+                        "kind": "asset_without_path",
+                        "asset_id": asset.asset_id,
+                        "source_page_id": asset.page_id,
+                    }
+                )
+            else:
+                order = _asset_reading_order(page.blocks, asset)
+                page_items.append((order, asset.bbox.y0, asset.bbox.x0, "asset", asset))
+        ordered_items.extend(
+            (kind, item)
+            for _, _, _, kind, item in sorted(
+                page_items,
+                key=lambda entry: (entry[0], entry[1], entry[2], entry[3]),
+            )
+        )
+
+    for kind, item in ordered_items:
+        if kind == "asset":
+            asset = item
+            if not isinstance(asset, Asset):
+                continue
+            _, asset_height = _reflow_asset_dimensions(asset, page_size, content_width)
+            if (
+                (current_blocks or current_assets)
+                and cursor_y + 8.0 + asset_height > content_bottom
+            ):
+                finish_page()
+            cursor_y = _append_reflow_asset(
+                asset=asset,
+                page_size=page_size,
+                content_x0=content_x0,
+                content_y0=content_y0,
+                content_width=content_width,
+                content_bottom=content_bottom,
+                cursor_y=cursor_y,
+                current_assets=current_assets,
+                current_page_id=lambda: f"r{page_index:04d}",
+                asset_traces=asset_traces,
+            )
+            continue
+
+        block = item
+        if not isinstance(block, DocumentBlock):
+            continue
+        source_page_ids.add(block.page_id)
+        if _should_suppress_reflow_block(block):
+            suppressed_artifacts.append(
+                {
+                    "kind": "source_block_suppressed",
+                    "source_block_id": block.block_id,
+                    "source_page_id": block.page_id,
+                    "reason": "running_header_footer_or_pdf_artifact",
+                }
+            )
+            continue
+
+        plan = translations.get(block.block_id)
+        layout_intent = layout_intents.get(block.block_id)
+        text, render_intent, flags = _translated_text_for_block(block, plan, layout_intent)
+        if not text.strip():
+            suppressed_artifacts.append(
+                {
+                    "kind": "empty_text_block_suppressed",
+                    "source_block_id": block.block_id,
+                    "source_page_id": block.page_id,
+                }
+            )
+            continue
+
+        style = _style_for_role(defaults, block.role)
+        if render_intent == "compact":
+            style = style.model_copy(
+                update={
+                    "font_size_pt": max(9.0, style.font_size_pt * 0.9),
+                    "line_height": min(style.line_height, 1.35),
+                }
+            )
+            flags.append("compact_reflow")
+        if layout_intent is not None:
+            flags.extend(layout_intent.quality_flags)
+
+        if block.role == BlockRole.REFERENCE and current_blocks:
+            finish_page()
+
+        estimated_height = _estimated_reflow_height(text, content_width, style)
+        keep_with_next = block.role in {BlockRole.TITLE, BlockRole.HEADING}
+        if keep_with_next and current_blocks and cursor_y + estimated_height + 36 > content_bottom:
+            finish_page()
+
+        first_fragment_height = content_bottom - cursor_y - style.space_before_pt
+        if (
+            current_blocks
+            and first_fragment_height
+            < style.font_size_pt * style.line_height * _MIN_FINAL_FRAGMENT_LINES
+        ):
+            finish_page()
+            first_fragment_height = content_bottom - cursor_y - style.space_before_pt
+        fragments = _split_reflow_text(
+            text,
+            content_width,
+            content_bottom - content_y0,
+            style,
+            first_max_height_pt=first_fragment_height if current_blocks else None,
+        )
+        fragment_count = len(fragments)
+        for fragment_index, fragment in enumerate(fragments, start=1):
+            fragment_height = _estimated_reflow_height(fragment, content_width, style)
+            if current_blocks and cursor_y + style.space_before_pt + fragment_height > content_bottom:
+                finish_page()
+
+            cursor_y += style.space_before_pt
+            if cursor_y + fragment_height > content_bottom and current_blocks:
+                finish_page()
+                cursor_y += style.space_before_pt
+
+            bbox = BoundingBox(
+                x0=content_x0,
+                y0=cursor_y,
+                x1=content_x0 + content_width,
+                y1=min(content_bottom, cursor_y + fragment_height),
+            )
+            block_flags = list(flags)
+            if fragment_count > 1:
+                block_flags.append("reflow_split")
+                if fragment_index > 1:
+                    block_flags.append("reflow_continued")
+            render_block_id = (
+                block.block_id
+                if fragment_count == 1
+                else f"{block.block_id}__reflow_{fragment_index:02d}"
+            )
+            current_blocks.append(
+                RenderBlock(
+                    block_id=render_block_id,
+                    role=block.role,
+                    bbox=bbox,
+                    text=fragment,
+                    style_seed=block.style_seed,
+                    font_size_pt=style.font_size_pt,
+                    font_scale=style.font_size_pt / block.style_seed.font_size
+                    if block.style_seed.font_size
+                    else 1.0,
+                    render_intent=render_intent,
+                    text_align=style.alignment,
+                    font_weight=700 if style.bold else 400,
+                    font_style="italic" if style.italic else "normal",
+                    first_line_indent_em=style.first_line_indent_em
+                    if fragment_index == 1
+                    else 0.0,
+                    line_height=style.line_height,
+                    quality_flags=_unique_flags(block_flags),
+                )
+            )
+            rendered_source_ids.add(block.block_id)
+            block_traces.append(
+                {
+                    "source_block_id": block.block_id,
+                    "render_block_id": render_block_id,
+                    "source_page_id": block.page_id,
+                    "output_page_id": f"r{page_index:04d}",
+                    "role": block.role.value,
+                    "translated_chars": len(fragment),
+                    "estimated_lines": _estimated_line_count(
+                        fragment,
+                        content_width,
+                        style.font_size_pt,
+                    ),
+                    "bbox": bbox.model_dump(),
+                    "fragment_index": fragment_index,
+                    "fragment_count": fragment_count,
+                    "quality_flags": _unique_flags(block_flags),
+                }
+            )
+            cursor_y = bbox.y1 + style.space_after_pt
+
+    if current_blocks or current_assets or not pages:
+        finish_page()
+
+    trace = _build_reflow_trace(
+        document=document,
+        pages=pages,
+        defaults=defaults,
+        source_page_ids=source_page_ids,
+        rendered_source_ids=rendered_source_ids,
+        block_traces=block_traces,
+        asset_traces=asset_traces,
+        suppressed_artifacts=suppressed_artifacts,
+    )
+    return RenderDocument(
+        doc_id=document.doc_id,
+        target_lang=target_lang,
+        pages=pages,
+        font_stack=defaults.font_stack,
+        line_height=defaults.line_height,
+        paragraph_spacing_em=defaults.paragraph_spacing_em,
+        layout_mode=_enum_value(defaults.layout_mode),
+        layout_trace=trace,
+    )
+
+
+def _translated_text_for_block(
+    block: DocumentBlock,
+    plan: Any,
+    layout_intent: Any,
+) -> tuple[str, str, list[str]]:
+    quality_flags: list[str]
+    if plan is None:
+        text = block.source_text
+        render_intent = layout_intent.render_intent if layout_intent is not None else "normal"
+        quality_flags = ["missing_translation"]
+    else:
+        text = plan.translated_text if plan.translated_text.strip() else block.source_text
+        render_intent = layout_intent.render_intent if layout_intent is not None else plan.render_intent
+        quality_flags = list(plan.quality_flags)
+        if not plan.translated_text.strip():
+            quality_flags.append("empty_translation")
+        if plan.role != block.role:
+            quality_flags.append("role_mismatch")
+    return text, render_intent, quality_flags
+
+
+def _style_for_role(defaults: RenderDefaults, role: BlockRole) -> RoleStyleDefaults:
+    return getattr(defaults.role_styles, role.value, defaults.role_styles.unknown)
+
+
+def _asset_reading_order(blocks: list[DocumentBlock], asset: Asset) -> float:
+    before = [
+        block.reading_order
+        for block in blocks
+        if block.bbox.y0 <= asset.bbox.y0
+    ]
+    if before:
+        return max(before) + 0.5
+    return -0.5
+
+
+def _append_reflow_asset(
+    *,
+    asset: Asset,
+    page_size: PageSize,
+    content_x0: float,
+    content_y0: float,
+    content_width: float,
+    content_bottom: float,
+    cursor_y: float,
+    current_assets: list[RenderAsset],
+    current_page_id: Any,
+    asset_traces: list[dict[str, Any]],
+) -> float:
+    width, height = _reflow_asset_dimensions(asset, page_size, content_width)
+    space_before = 8.0
+    space_after = 8.0
+    cursor_y += space_before
+    x0 = content_x0 + max(0.0, (content_width - width) / 2)
+    bbox = BoundingBox(
+        x0=x0,
+        y0=cursor_y,
+        x1=x0 + width,
+        y1=min(content_bottom, cursor_y + height),
+    )
+    current_assets.append(
+        RenderAsset(
+            asset_id=asset.asset_id,
+            kind=asset.kind,
+            bbox=bbox,
+            path=asset.path,
+            alt_text=asset.alt_text,
+            quality_flags=["reflow_asset"],
+        )
+    )
+    asset_traces.append(
+        {
+            "asset_id": asset.asset_id,
+            "source_page_id": asset.page_id,
+            "output_page_id": current_page_id(),
+            "kind": asset.kind,
+            "bbox": bbox.model_dump(),
+            "quality_flags": ["reflow_asset"],
+        }
+    )
+    return bbox.y1 + space_after
+
+
+def _reflow_asset_dimensions(
+    asset: Asset,
+    page_size: PageSize,
+    content_width: float,
+) -> tuple[float, float]:
+    source_width = max(1.0, _bbox_width(asset.bbox))
+    source_height = max(1.0, _bbox_height(asset.bbox))
+    max_height = max(72.0, page_size.height * 0.42)
+    scale = min(1.0, content_width / source_width, max_height / source_height)
+    return max(24.0, source_width * scale), max(24.0, source_height * scale)
+
+
+def _estimated_reflow_height(
+    text: str,
+    width_pt: float,
+    style: RoleStyleDefaults,
+) -> float:
+    text_width = max(1.0, width_pt - style.first_line_indent_em * style.font_size_pt)
+    lines = _estimated_line_count(text, text_width, style.font_size_pt)
+    return max(style.font_size_pt * style.line_height, lines * style.font_size_pt * style.line_height)
+
+
+def _split_reflow_text(
+    text: str,
+    width_pt: float,
+    max_height_pt: float,
+    style: RoleStyleDefaults,
+    *,
+    first_max_height_pt: float | None = None,
+) -> list[str]:
+    text = _normalized_text(text)
+    if not text:
+        return []
+    max_lines = max(1, int(max_height_pt / (style.font_size_pt * style.line_height)))
+    max_chars = max(1, _estimated_chars_for_lines(width_pt, style.font_size_pt, max_lines))
+    if len(text) <= max_chars:
+        return [text]
+
+    fragments: list[str] = []
+    remaining = text
+    while remaining:
+        height_for_fragment = first_max_height_pt if not fragments and first_max_height_pt else max_height_pt
+        lines_for_fragment = max(
+            1,
+            int(height_for_fragment / (style.font_size_pt * style.line_height)),
+        )
+        chars_for_fragment = max(
+            1,
+            _estimated_chars_for_lines(width_pt, style.font_size_pt, lines_for_fragment),
+        )
+        chars_for_fragment = min(
+            chars_for_fragment,
+            _max_reflow_chars_to_fit(remaining, width_pt, style, height_for_fragment),
+        )
+        if len(remaining) <= chars_for_fragment:
+            fragments.append(remaining)
+            break
+        split_index = _best_reflow_split_index(remaining, chars_for_fragment)
+        fragment = remaining[:split_index].strip()
+        rest = remaining[split_index:].strip()
+        if rest and (
+            len(rest) < _MIN_FINAL_FRAGMENT_CHARS
+            or _estimated_line_count(rest, width_pt, style.font_size_pt)
+            < _MIN_FINAL_FRAGMENT_LINES
+        ):
+            rebalance_at = _best_reflow_split_index(fragment, max(1, int(len(fragment) * 0.75)))
+            rest = f"{fragment[rebalance_at:].strip()} {rest}".strip()
+            fragment = fragment[:rebalance_at].strip()
+        if not fragment:
+            fragment = remaining[:chars_for_fragment].strip()
+            rest = remaining[chars_for_fragment:].strip()
+        fragments.append(fragment)
+        remaining = rest
+    return [fragment for fragment in fragments if fragment]
+
+
+def _estimated_chars_for_lines(width_pt: float, font_size_pt: float, lines: int) -> int:
+    return max(1, int((width_pt / max(font_size_pt, 1.0)) * lines * 1.75))
+
+
+def _max_reflow_chars_to_fit(
+    text: str,
+    width_pt: float,
+    style: RoleStyleDefaults,
+    height_pt: float,
+) -> int:
+    low = 1
+    high = max(1, len(text))
+    best = 1
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = text[:mid].strip()
+        if _estimated_reflow_height(candidate, width_pt, style) <= height_pt:
+            best = max(1, mid)
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def _best_reflow_split_index(text: str, max_chars: int) -> int:
+    max_chars = min(max_chars, len(text))
+    candidates = [
+        text.rfind(marker, 0, max_chars)
+        for marker in ("。", "！", "？", ". ", "! ", "? ", "；", "; ", "，", ", ", " ")
+    ]
+    split_index = max(candidates)
+    if split_index >= max(1, int(max_chars * 0.55)):
+        char = text[split_index]
+        return split_index + (0 if char.isspace() else 1)
+    return max_chars
+
+
+def _should_suppress_reflow_block(block: DocumentBlock) -> bool:
+    text = block.source_text.strip()
+    if not text:
+        return True
+    width = _bbox_width(block.bbox)
+    height = _bbox_height(block.bbox)
+    if width <= 8 and height >= 40 and re.search(r"\d{4}", text):
+        return True
+    if block.role == BlockRole.FOOTNOTE and re.search(r"\bdoi:\s*\S+", text.lower()):
+        return True
+    if text.lower().startswith(("view online", "export citation", "crossmark")):
+        return True
+    return False
+
+
+def _page_utilization(pages: list[RenderPage]) -> list[dict[str, Any]]:
+    utilization: list[dict[str, Any]] = []
+    for page in pages:
+        area = page.size.width * page.size.height
+        text_area = sum(_bbox_area(block.bbox) for block in page.blocks)
+        utilization.append(
+            {
+                "page_id": page.page_id,
+                "text_area_ratio": round(text_area / area, 4) if area > 0 else 0.0,
+                "block_count": len(page.blocks),
+                "asset_count": len(page.assets),
+            }
+        )
+    return utilization
+
+
+def _build_reflow_trace(
+    *,
+    document: DocumentIR,
+    pages: list[RenderPage],
+    defaults: RenderDefaults,
+    source_page_ids: set[str],
+    rendered_source_ids: set[str],
+    block_traces: list[dict[str, Any]],
+    asset_traces: list[dict[str, Any]],
+    suppressed_artifacts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source_block_count = sum(len(page.blocks) for page in document.pages)
+    return {
+        "kind": "layout_trace",
+        "layout_mode": _enum_value(defaults.layout_mode),
+        "standard": "gb_t_7713_1_2025",
+        "render_defaults": defaults.model_dump(mode="json"),
+        "source": {
+            "page_count": len(source_page_ids),
+            "block_count": source_block_count,
+        },
+        "output": {
+            "page_count": len(pages),
+            "block_count": sum(len(page.blocks) for page in pages),
+        },
+        "rendered_source_block_count": len(rendered_source_ids),
+        "suppressed_artifacts": suppressed_artifacts,
+        "page_utilization": _page_utilization(pages),
+        "blocks": block_traces,
+        "assets": asset_traces,
+    }
+
+
+def _build_source_bbox_trace(
+    document: DocumentIR,
+    pages: list[RenderPage],
+    defaults: RenderDefaults,
+) -> dict[str, Any]:
+    return {
+        "kind": "layout_trace",
+        "layout_mode": _enum_value(defaults.layout_mode),
+        "standard": "none",
+        "render_defaults": defaults.model_dump(mode="json"),
+        "source": {
+            "page_count": len(document.pages),
+            "block_count": sum(len(page.blocks) for page in document.pages),
+        },
+        "output": {
+            "page_count": len(pages),
+            "block_count": sum(len(page.blocks) for page in pages),
+        },
+        "suppressed_artifacts": [],
+        "page_utilization": _page_utilization(pages),
+        "blocks": [
+            {
+                "source_block_id": block.block_id.split("__cont_", 1)[0],
+                "render_block_id": block.block_id,
+                "output_page_id": page.page_id,
+                "role": block.role.value,
+                "translated_chars": len(block.text),
+                "estimated_lines": _estimated_line_count(
+                    block.text,
+                    _bbox_width(block.bbox),
+                    block.font_size_pt,
+                ),
+                "bbox": block.bbox.model_dump(),
+                "quality_flags": block.quality_flags,
+            }
+            for page in pages
+            for block in page.blocks
+        ],
+    }
 
 
 def _make_continuation_blocks(

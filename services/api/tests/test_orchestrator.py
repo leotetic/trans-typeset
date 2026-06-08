@@ -6,6 +6,7 @@ from app import runtime_config
 from app.config import Settings
 from app.models import JobState
 from app.pipeline import orchestrator
+from app.pipeline.workflow import coerce_user_intent
 from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
 from pdf_renderer import RenderDocument
@@ -49,6 +50,16 @@ def test_process_document_job_persists_frontend_visible_error(
     assert status.status == JobState.FAILED
     assert status.error == "parse failed clearly"
     assert status.message == "Failed"
+
+
+def test_coerce_user_intent_detects_gbt_7713_standard() -> None:
+    intent = coerce_user_intent(
+        "zh-CN",
+        output_kind="typeset_document",
+        instruction="按照 GB/T 7713.1 标准进行排版",
+    )
+
+    assert intent.typesetting_standard == "gb_t_7713_1_2025"
 
 
 def test_process_document_job_honors_existing_cancel_request(
@@ -302,6 +313,102 @@ def test_process_document_job_persists_pdf_export_diagnostics(
     assert "pdf-export-diagnostics" in complete_steps[-1]["output_artifacts"]
 
 
+def test_process_document_job_rerenders_preview_after_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                ],
+            )
+        ],
+    )
+    chunks = [
+        TranslationChunk(
+            chunk_id="chunk_1",
+            source_blocks=[
+                SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Alpha")
+            ],
+        ),
+    ]
+
+    class FakeTranslator:
+        async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+            return TranslationLayoutPlan(
+                chunk_id=chunk.chunk_id,
+                blocks=[
+                    TranslationBlockPlan(
+                        source_block_id="b1",
+                        translated_text="translated Alpha",
+                        role=BlockRole.PARAGRAPH,
+                    )
+                ],
+            )
+
+    render_calls = 0
+    real_render_to_html = orchestrator.render_to_html
+
+    def fake_render_to_html(render_document):
+        nonlocal render_calls
+        render_calls += 1
+        suffix = "repaired" if render_calls == 2 else "initial"
+        return f"{real_render_to_html(render_document)}<!-- {suffix} -->"
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        assert "<!-- repaired -->" in html
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
+    monkeypatch.setattr(orchestrator, "build_chunks", lambda *_args, **_kwargs: chunks)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
+    monkeypatch.setattr(orchestrator, "render_to_html", fake_render_to_html)
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+    monkeypatch.setattr(
+        orchestrator,
+        "render_evaluation_summary",
+        lambda diagnostics: {
+            "kind": "render_evaluation",
+            "accepted": render_calls >= 2,
+            "quality_flag_counts": diagnostics.get("quality_flag_counts", {}),
+            "layout_issue_count": len(diagnostics.get("layout_issues", [])),
+            "blocking_flags": {} if render_calls >= 2 else {"overflow_clipped": 1},
+            "repair_recommended": render_calls < 2,
+        },
+    )
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "paper.pdf",
+            tmp_path / "paper.pdf",
+            "zh-CN",
+        )
+    )
+
+    assert render_calls == 2
+    assert "<!-- repaired -->" in storage.preview_html_path("doc_1").read_text(encoding="utf-8")
+    workflow = storage.read_output_json("doc_1", "workflow-run.json")
+    repair_step = [step for step in workflow["steps"] if step["name"] == "repair"][-1]
+    assert "preview" in repair_step["output_artifacts"]
+
+
 def test_process_document_job_persists_scanned_pdf_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -377,13 +484,149 @@ def test_text_workflow_runs_to_artifacts(
     status = storage.load_status("job_1")
     workflow = storage.read_output_json("doc_1", "workflow-run.json")
     normalized = storage.read_output_json("doc_1", "normalized-input.json")
+    semantic = storage.read_output_json("doc_1", "semantic-analysis.json")
     layout_plan = storage.read_output_json("doc_1", "layout-intent-plan.json")
 
     assert status.status == JobState.COMPLETED
     assert workflow["status"] == "completed"
+    assert "semantic_recognize" in {step["name"] for step in workflow["steps"]}
+    assert "export_pdf" in {step["name"] for step in workflow["steps"]}
     assert normalized["input_sources"][0]["input_type"] == "text"
+    assert semantic["quality_flags"]
     assert layout_plan["blocks"]
+    assert "semantic_analysis_considered" in layout_plan["quality_flags"]
+    assert "planner_fallback" in layout_plan["quality_flags"]
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
+
+
+def test_pdf_workflow_records_content_and_layout_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+    content_pdf = tmp_path / "content.pdf"
+    layout_pdf = tmp_path / "layout.pdf"
+    content_pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+    layout_pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda *_args: document)
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "content.pdf",
+            content_pdf,
+            "zh-CN",
+            layout_pdf_path=layout_pdf,
+            layout_filename="layout.pdf",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    normalized = storage.read_output_json("doc_1", "normalized-input.json")
+    workflow = storage.read_output_json("doc_1", "workflow-run.json")
+    semantic = storage.read_output_json("doc_1", "semantic-analysis.json")
+
+    assert status.status == JobState.COMPLETED
+    assert [source["source_role"] for source in normalized["input_sources"]] == [
+        "content",
+        "layout_reference",
+    ]
+    assert normalized["layout_reference"]["filename"] == "layout.pdf"
+    assert "layout_reference_source_available" in semantic["quality_flags"]
+    assert [source["source_role"] for source in workflow["input_sources"]] == [
+        "content",
+        "layout_reference",
+    ]
+
+
+def test_pdf_workflow_marks_layout_source_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+    content_pdf = tmp_path / "content.pdf"
+    content_pdf.write_bytes(b"%PDF-1.7\n%%EOF")
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda *_args: document)
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "content.pdf",
+            content_pdf,
+            "zh-CN",
+        )
+    )
+
+    normalized = storage.read_output_json("doc_1", "normalized-input.json")
+    semantic = storage.read_output_json("doc_1", "semantic-analysis.json")
+
+    assert normalized["input_sources"][1]["source_role"] == "layout_reference"
+    assert "layout_source_fallback_to_content" in normalized["quality_flags"]
+    assert "layout_source_fallback_to_content" in semantic["quality_flags"]
 
 
 def test_image_workflow_uses_deterministic_ocr_mock_and_assets(
@@ -420,10 +663,12 @@ def test_image_workflow_uses_deterministic_ocr_mock_and_assets(
 
     status = storage.load_status("job_1")
     asset_ir = storage.read_output_json("doc_1", "asset-ir.json")
+    semantic = storage.read_output_json("doc_1", "semantic-analysis.json")
     diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
     html = storage.preview_html_path("doc_1").read_text(encoding="utf-8")
 
     assert status.status == JobState.COMPLETED
     assert asset_ir[0]["quality_flags"] == ["deterministic_ocr_mock", "ocr_uncertain"]
+    assert "vision_analysis_disabled" in semantic["quality_flags"]
     assert diagnostics["kind"] == "image_adapter_diagnostics"
     assert 'data-asset-id="doc_1_asset_0001"' in html

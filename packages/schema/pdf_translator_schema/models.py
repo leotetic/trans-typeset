@@ -70,6 +70,11 @@ class InputKind(StrEnum):
     PDF = "pdf"
 
 
+class InputSourceRole(StrEnum):
+    CONTENT = "content"
+    LAYOUT_REFERENCE = "layout_reference"
+
+
 class OutputKind(StrEnum):
     TRANSLATION = "translation"
     TYPESET_DOCUMENT = "typeset_document"
@@ -105,19 +110,32 @@ class WorkflowStepStatus(StrEnum):
 class WorkflowStepName(StrEnum):
     READ_INPUT = "read_input"
     ANALYZE_INTENT = "analyze_intent"
+    SEMANTIC_RECOGNIZE = "semantic_recognize"
     BUILD_PLAN = "build_plan"
     VALIDATE_PLAN = "validate_plan"
     TRANSLATE = "translate"
     RENDER = "render"
     EVALUATE_RENDER = "evaluate_render"
     REPAIR = "repair"
+    EXPORT_PDF = "export_pdf"
     COMPLETE = "complete"
     FAIL = "fail"
+
+
+class TypesettingStandard(StrEnum):
+    NONE = "none"
+    GB_T_7713_1_2025 = "gb_t_7713_1_2025"
+
+
+class LayoutMode(StrEnum):
+    SOURCE_BBOX = "source_bbox"
+    CONTINUOUS_REFLOW = "continuous_reflow"
 
 
 class InputSource(StrictBaseModel):
     source_id: str = Field(min_length=1)
     input_type: InputKind
+    source_role: InputSourceRole = InputSourceRole.CONTENT
     filename: str | None = None
     mime_type: str | None = None
     size_bytes: int = Field(default=0, ge=0)
@@ -151,6 +169,7 @@ class UserIntent(StrictBaseModel):
     target_lang: str = "zh-CN"
     output_kind: OutputKind = OutputKind.TRANSLATION
     style_intent: StyleIntent = StyleIntent.ACADEMIC
+    typesetting_standard: TypesettingStandard = TypesettingStandard.NONE
     instruction: str = ""
     preserve_policy: list[
         Literal["citations", "formulas", "tables", "figures", "reference_markers"]
@@ -193,6 +212,64 @@ class WorkflowRun(StrictBaseModel):
     artifacts: dict[str, str] = Field(default_factory=dict)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+
+
+class SemanticBlockSignal(NoLayoutCoordinatesModel):
+    source_block_id: str = Field(min_length=1)
+    role_candidates: list[BlockRole] = Field(default_factory=list)
+    section_hint: str | None = None
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class SemanticAssetSignal(NoLayoutCoordinatesModel):
+    asset_id: str = Field(min_length=1)
+    usage_hint: Literal[
+        "preserve",
+        "inline_reference",
+        "background_reference",
+        "ignore",
+        "unknown",
+    ] = "unknown"
+    text_hint: str = ""
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class SemanticLayoutAnalysis(NoLayoutCoordinatesModel):
+    schema_version: Literal["0.1"] = "0.1"
+    analysis_id: str = Field(min_length=1)
+    doc_id: str = Field(min_length=1)
+    target_lang: str = "zh-CN"
+    block_signals: list[SemanticBlockSignal] = Field(default_factory=list)
+    asset_signals: list[SemanticAssetSignal] = Field(default_factory=list)
+    section_hints: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+    @field_validator("block_signals")
+    @classmethod
+    def validate_no_duplicate_block_signals(
+        cls, signals: list[SemanticBlockSignal]
+    ) -> list[SemanticBlockSignal]:
+        seen: set[str] = set()
+        for signal in signals:
+            if signal.source_block_id in seen:
+                raise ValueError(f"duplicate source_block_id: {signal.source_block_id}")
+            seen.add(signal.source_block_id)
+        return signals
+
+    @field_validator("asset_signals")
+    @classmethod
+    def validate_no_duplicate_asset_signals(
+        cls, signals: list[SemanticAssetSignal]
+    ) -> list[SemanticAssetSignal]:
+        seen: set[str] = set()
+        for signal in signals:
+            if signal.asset_id in seen:
+                raise ValueError(f"duplicate asset_id: {signal.asset_id}")
+            seen.add(signal.asset_id)
+        return signals
 
 
 class LayoutIntentBlock(NoLayoutCoordinatesModel):
@@ -417,6 +494,64 @@ class PreservePolicy(StrictBaseModel):
     ]["line_breaks"]
 
 
+class PageLayoutDefaults(StrictBaseModel):
+    width_pt: float = Field(default=DEFAULT_RENDER_DEFAULTS["page_layout"]["width_pt"], gt=0)
+    height_pt: float = Field(default=DEFAULT_RENDER_DEFAULTS["page_layout"]["height_pt"], gt=0)
+    margin_top_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["page_layout"]["margin_top_pt"],
+        ge=0,
+    )
+    margin_right_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["page_layout"]["margin_right_pt"],
+        ge=0,
+    )
+    margin_bottom_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["page_layout"]["margin_bottom_pt"],
+        ge=0,
+    )
+    margin_left_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["page_layout"]["margin_left_pt"],
+        ge=0,
+    )
+
+    @model_validator(mode="after")
+    def validate_margins_fit_page(self) -> PageLayoutDefaults:
+        if self.margin_left_pt + self.margin_right_pt >= self.width_pt:
+            raise ValueError("horizontal page margins must fit inside page width")
+        if self.margin_top_pt + self.margin_bottom_pt >= self.height_pt:
+            raise ValueError("vertical page margins must fit inside page height")
+        return self
+
+
+class RoleStyleDefaults(StrictBaseModel):
+    font_size_pt: float = Field(gt=0)
+    bold: bool = False
+    italic: bool = False
+    alignment: TextAlignment = "left"
+    line_height: float = Field(default=1.5, gt=0)
+    first_line_indent_em: float = Field(default=0.0, ge=0)
+    space_before_pt: float = Field(default=0.0, ge=0)
+    space_after_pt: float = Field(default=0.0, ge=0)
+
+
+def _role_style(role: str) -> RoleStyleDefaults:
+    return RoleStyleDefaults.model_validate(DEFAULT_RENDER_DEFAULTS["role_styles"][role])
+
+
+class RoleStyles(StrictBaseModel):
+    title: RoleStyleDefaults = Field(default_factory=lambda: _role_style("title"))
+    abstract: RoleStyleDefaults = Field(default_factory=lambda: _role_style("abstract"))
+    heading: RoleStyleDefaults = Field(default_factory=lambda: _role_style("heading"))
+    paragraph: RoleStyleDefaults = Field(default_factory=lambda: _role_style("paragraph"))
+    caption: RoleStyleDefaults = Field(default_factory=lambda: _role_style("caption"))
+    formula: RoleStyleDefaults = Field(default_factory=lambda: _role_style("formula"))
+    table: RoleStyleDefaults = Field(default_factory=lambda: _role_style("table"))
+    figure: RoleStyleDefaults = Field(default_factory=lambda: _role_style("figure"))
+    footnote: RoleStyleDefaults = Field(default_factory=lambda: _role_style("footnote"))
+    reference: RoleStyleDefaults = Field(default_factory=lambda: _role_style("reference"))
+    unknown: RoleStyleDefaults = Field(default_factory=lambda: _role_style("unknown"))
+
+
 class RenderDefaults(StrictBaseModel):
     target_lang: str = DEFAULT_RENDER_DEFAULTS["target_lang"]
     font_stack: list[str] = Field(
@@ -427,6 +562,9 @@ class RenderDefaults(StrictBaseModel):
     paragraph_spacing_em: float = Field(
         default=DEFAULT_RENDER_DEFAULTS["paragraph_spacing_em"], ge=0
     )
+    layout_mode: LayoutMode = LayoutMode(DEFAULT_RENDER_DEFAULTS["layout_mode"])
+    page_layout: PageLayoutDefaults = Field(default_factory=PageLayoutDefaults)
+    role_styles: RoleStyles = Field(default_factory=RoleStyles)
     alignment: AlignmentDefaults = Field(default_factory=AlignmentDefaults)
     overflow_policy: OverflowPolicy = Field(default_factory=OverflowPolicy)
     preserve_policy: PreservePolicy = Field(default_factory=PreservePolicy)

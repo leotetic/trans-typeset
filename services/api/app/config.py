@@ -24,6 +24,10 @@ class Settings:
     max_upload_bytes: int = 50 * 1024 * 1024
     translation_concurrency: int = 2
     translator_max_attempts: int = 2
+    agent_max_repair_attempts: int = 2
+    agent_enable_vision_analysis: bool = False
+    layout_planner_model: str = ""
+    vision_analyzer_model: str = ""
     render_font_stack: tuple[str, ...] = (
         "Noto Sans CJK SC",
         "Source Han Sans SC",
@@ -55,6 +59,15 @@ def parse_float(value: str, fallback: float) -> float:
     return parsed if parsed > 0 else fallback
 
 
+def parse_bool(value: str, fallback: bool) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return fallback
+
+
 def _dotenv_values() -> dict[str, str]:
     if dotenv_values is None or find_dotenv is None:
         return {}
@@ -84,6 +97,14 @@ def load_settings() -> Settings:
         _provider_value(dotenv_config, "OPENAI_MODEL", "gpt-4.1-mini").strip()
         or "gpt-4.1-mini"
     )
+    layout_planner_model = (
+        _provider_value(dotenv_config, "LAYOUT_PLANNER_MODEL", "").strip()
+        or openai_model
+    )
+    vision_analyzer_model = (
+        _provider_value(dotenv_config, "VISION_ANALYZER_MODEL", "").strip()
+        or openai_model
+    )
     return Settings(
         openai_base_url=_provider_value(
             dotenv_config,
@@ -102,6 +123,16 @@ def load_settings() -> Settings:
         max_upload_bytes=parse_int(os.getenv("MAX_UPLOAD_BYTES", ""), 50 * 1024 * 1024),
         translation_concurrency=parse_int(os.getenv("TRANSLATION_CONCURRENCY", ""), 2),
         translator_max_attempts=parse_int(os.getenv("TRANSLATOR_MAX_ATTEMPTS", ""), 2),
+        agent_max_repair_attempts=parse_int(
+            os.getenv("AGENT_MAX_REPAIR_ATTEMPTS", ""),
+            2,
+        ),
+        agent_enable_vision_analysis=parse_bool(
+            os.getenv("AGENT_ENABLE_VISION_ANALYSIS", ""),
+            False,
+        ),
+        layout_planner_model=layout_planner_model,
+        vision_analyzer_model=vision_analyzer_model,
         render_font_stack=parse_csv(
             os.getenv(
                 "RENDER_FONT_STACK",

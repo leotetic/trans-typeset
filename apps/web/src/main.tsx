@@ -18,7 +18,7 @@ import {
   X,
   XCircle
 } from "lucide-react";
-import type { JobStatus, OutputKind, StyleIntent } from "@trans-typesetting/schema";
+import type { JobStatus, OutputKind, StyleIntent, UserConstraints } from "@trans-typesetting/schema";
 import {
   ApiError,
   cancelJob,
@@ -111,14 +111,33 @@ const statusDetail: Record<JobStatus["status"], string> = {
   canceled: "任务已取消"
 };
 
+type PdfSlot = "content" | "layout";
+
+type ConstraintDraft = Required<Pick<
+  UserConstraints,
+  "page_width_pt" | "page_height_pt" | "target_font_size_pt" | "allow_continuation" | "preserve_images"
+>>;
+
+const DEFAULT_CONSTRAINTS: ConstraintDraft = {
+  page_width_pt: 612,
+  page_height_pt: 792,
+  target_font_size_pt: 11,
+  allow_continuation: true,
+  preserve_images: true
+};
+
 function App() {
   const [inputMode, setInputMode] = useState<InputMode>("text");
   const [files, setFiles] = useState<File[]>([]);
+  const [contentPdfFile, setContentPdfFile] = useState<File | null>(null);
+  const [layoutPdfFile, setLayoutPdfFile] = useState<File | null>(null);
   const [textInput, setTextInput] = useState("Title\n\nAbstract This paper studies local smart typesetting [1].");
   const [targetLang, setTargetLang] = useState("zh-CN");
   const [outputKind, setOutputKind] = useState<OutputKind>("typeset_document");
   const [styleIntent, setStyleIntent] = useState<StyleIntent>("academic");
   const [instruction, setInstruction] = useState("按照gb-GB/T 7713.1 进行排版");
+  const [isConstraintsOpen, setIsConstraintsOpen] = useState(false);
+  const [constraintDraft, setConstraintDraft] = useState<ConstraintDraft>(DEFAULT_CONSTRAINTS);
   const [job, setJob] = useState<JobStatus | null>(null);
   const [docId, setDocId] = useState<string | null>(null);
   const [healthState, setHealthState] = useState<HealthState>("checking");
@@ -142,6 +161,7 @@ function App() {
   const [isUploading, setIsUploading] = useState(false);
   const [isCanceling, setIsCanceling] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [draggingPdfSlot, setDraggingPdfSlot] = useState<PdfSlot | null>(null);
   const [isRetryingStatus, setIsRetryingStatus] = useState(false);
   const [isRetryingJob, setIsRetryingJob] = useState(false);
   const [previewState, setPreviewState] = useState<PreviewState>("idle");
@@ -155,6 +175,8 @@ function App() {
   const [uploadIssue, setUploadIssue] = useState<UploadIssue | null>(null);
   const [taskIssue, setTaskIssue] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const contentPdfInputRef = useRef<HTMLInputElement | null>(null);
+  const layoutPdfInputRef = useRef<HTMLInputElement | null>(null);
   const pollDelayRef = useRef(1200);
 
   const activeDocId = job?.doc_id ?? docId;
@@ -170,7 +192,11 @@ function App() {
     ? ["queued", "parsing", "translating", "rendering"].includes(job.status)
     : false;
   const hasSubmitInput =
-    inputMode === "text" ? Boolean(textInput.trim()) : files.length > 0;
+    inputMode === "text"
+      ? Boolean(textInput.trim())
+      : inputMode === "pdf"
+        ? Boolean(contentPdfFile)
+        : files.length > 0;
   const canSubmit = hasSubmitInput && !isUploading && !isTaskRunning && healthState === "online";
   const isComplete = job?.status === "completed" && Boolean(previewUrl);
   const hasBackendFailure = healthState === "offline";
@@ -385,12 +411,63 @@ function App() {
     if (inputRef.current) {
       inputRef.current.value = "";
     }
+    if (contentPdfInputRef.current) {
+      contentPdfInputRef.current.value = "";
+    }
+    if (layoutPdfInputRef.current) {
+      layoutPdfInputRef.current.value = "";
+    }
   }
 
   function clearFile() {
     setFiles([]);
+    setContentPdfFile(null);
+    setLayoutPdfFile(null);
     setUploadIssue(null);
     resetFileInput();
+  }
+
+  function clearPdfSlot(slot: PdfSlot) {
+    if (slot === "content") {
+      setContentPdfFile(null);
+      if (contentPdfInputRef.current) {
+        contentPdfInputRef.current.value = "";
+      }
+    } else {
+      setLayoutPdfFile(null);
+      if (layoutPdfInputRef.current) {
+        layoutPdfInputRef.current.value = "";
+      }
+    }
+    setUploadIssue(null);
+  }
+
+  function handlePdfSlotFiles(slot: PdfSlot, nextFiles: FileList | File[] | null | undefined) {
+    const selectedFile = Array.from(nextFiles ?? [])[0];
+    if (!selectedFile) {
+      return;
+    }
+    if (!isPdfFile(selectedFile)) {
+      setUploadIssue({ kind: "error", message: "仅支持 PDF 文件，请重新选择。" });
+      clearPdfSlot(slot);
+      return;
+    }
+    if (selectedFile.size > maxUploadBytes) {
+      setUploadIssue({
+        kind: "error",
+        message: `PDF 文件不能超过 ${formatFileSize(maxUploadBytes)}。`
+      });
+      clearPdfSlot(slot);
+      return;
+    }
+    if (slot === "content") {
+      setContentPdfFile(selectedFile);
+      setUploadIssue({ kind: "info", message: "已选择待翻译 PDF，可以开始排版。" });
+    } else {
+      setLayoutPdfFile(selectedFile);
+      setUploadIssue({ kind: "info", message: "已选择版式参考 PDF，后端会作为语义排版源。" });
+    }
+    setTaskIssue(null);
   }
 
   function handleFiles(nextFiles: FileList | File[] | null | undefined) {
@@ -434,6 +511,25 @@ function App() {
             : `已选择 ${selectedFiles.length} 个 PDF，可以批量翻译。`
     });
     setTaskIssue(null);
+  }
+
+  function handlePdfDragOver(event: React.DragEvent<HTMLButtonElement>, slot: PdfSlot) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDraggingPdfSlot(slot);
+  }
+
+  function handlePdfDragLeave(event: React.DragEvent<HTMLButtonElement>) {
+    const nextTarget = event.relatedTarget;
+    if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) {
+      setDraggingPdfSlot(null);
+    }
+  }
+
+  function handlePdfDrop(event: React.DragEvent<HTMLButtonElement>, slot: PdfSlot) {
+    event.preventDefault();
+    setDraggingPdfSlot(null);
+    handlePdfSlotFiles(slot, event.dataTransfer.files);
   }
 
   function handleDragOver(event: React.DragEvent<HTMLButtonElement>) {
@@ -533,20 +629,37 @@ function App() {
     if (!hasSubmitInput) {
       setUploadIssue({
         kind: "error",
-        message: inputMode === "text" ? "请输入要排版的文本。" : "请选择输入文件。"
+        message:
+          inputMode === "text"
+            ? "请输入要排版的文本。"
+            : inputMode === "pdf"
+              ? "请选择待翻译 PDF。"
+              : "请选择输入文件。"
       });
       return;
     }
 
     if (
-      inputMode !== "text" &&
+      inputMode === "image" &&
       files.some((selectedFile) =>
-        inputMode === "image"
-          ? !isImageFile(selectedFile) || selectedFile.size > maxUploadBytes
-          : !isPdfFile(selectedFile) || selectedFile.size > maxUploadBytes
+        !isImageFile(selectedFile) || selectedFile.size > maxUploadBytes
       )
     ) {
       handleFiles(files);
+      return;
+    }
+
+    if (
+      inputMode === "pdf" &&
+      (!contentPdfFile ||
+        !isPdfFile(contentPdfFile) ||
+        contentPdfFile.size > maxUploadBytes ||
+        (layoutPdfFile !== null && (!isPdfFile(layoutPdfFile) || layoutPdfFile.size > maxUploadBytes)))
+    ) {
+      handlePdfSlotFiles("content", contentPdfFile ? [contentPdfFile] : []);
+      if (layoutPdfFile) {
+        handlePdfSlotFiles("layout", [layoutPdfFile]);
+      }
       return;
     }
 
@@ -560,7 +673,12 @@ function App() {
       if (!(await checkHealth())) {
         throw new Error("后端服务不可用，请先启动 API。");
       }
-      const intent = { output_kind: outputKind, style_intent: styleIntent, instruction };
+      const intent = {
+        output_kind: outputKind,
+        style_intent: styleIntent,
+        instruction,
+        constraints: isConstraintsOpen ? constraintDraft : undefined
+      };
       if (inputMode === "text") {
         const payload = await createTextWorkflow(textInput, targetLang, intent);
         setDocId(payload.doc_id);
@@ -569,11 +687,16 @@ function App() {
         const payload = await createImageWorkflow(files[0], targetLang, intent);
         setDocId(payload.doc_id);
         await refreshJob(payload.job_id);
-      } else if (files.length === 1) {
-        const payload = await createDocument(files[0], targetLang, intent);
+      } else if (contentPdfFile) {
+        const payload = await createDocument({
+          contentFile: contentPdfFile,
+          layoutReferenceFile: layoutPdfFile,
+          targetLang,
+          intent
+        });
         setDocId(payload.doc_id);
         await refreshJob(payload.job_id);
-      } else {
+      } else if (files.length) {
         const payload = await createDocumentsBatch(files, targetLang, intent);
         if (payload.jobs[0]) {
           setDocId(payload.jobs[0].doc_id);
@@ -615,6 +738,8 @@ function App() {
                   onClick={() => {
                     setInputMode(mode.value);
                     setFiles([]);
+                    setContentPdfFile(null);
+                    setLayoutPdfFile(null);
                     setUploadIssue(null);
                     resetFileInput();
                   }}
@@ -633,6 +758,36 @@ function App() {
                 }}
                 aria-label="Text input"
               />
+            ) : inputMode === "pdf" ? (
+              <div className="pdf-source-grid">
+                <PdfUploadSlot
+                  label="待翻译 PDF"
+                  meta="必填，作为翻译与排版内容源"
+                  file={contentPdfFile}
+                  required
+                  issueKind={uploadIssue?.kind}
+                  isDragging={draggingPdfSlot === "content"}
+                  inputRef={contentPdfInputRef}
+                  onSelect={(files) => handlePdfSlotFiles("content", files)}
+                  onClear={() => clearPdfSlot("content")}
+                  onDragOver={(event) => handlePdfDragOver(event, "content")}
+                  onDragLeave={handlePdfDragLeave}
+                  onDrop={(event) => handlePdfDrop(event, "content")}
+                />
+                <PdfUploadSlot
+                  label="版式参考 PDF"
+                  meta="可选，作为排版语义输入源"
+                  file={layoutPdfFile}
+                  issueKind={uploadIssue?.kind}
+                  isDragging={draggingPdfSlot === "layout"}
+                  inputRef={layoutPdfInputRef}
+                  onSelect={(files) => handlePdfSlotFiles("layout", files)}
+                  onClear={() => clearPdfSlot("layout")}
+                  onDragOver={(event) => handlePdfDragOver(event, "layout")}
+                  onDragLeave={handlePdfDragLeave}
+                  onDrop={(event) => handlePdfDrop(event, "layout")}
+                />
+              </div>
             ) : (
               <>
                 <button
@@ -681,25 +836,20 @@ function App() {
                   ref={inputRef}
                   className="hidden-input"
                   type="file"
-                  multiple={inputMode === "pdf"}
-                  accept={inputMode === "image" ? "image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp" : "application/pdf,.pdf"}
+                  accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
                   onChange={(event) => handleFiles(event.target.files)}
                 />
               </>
             )}
             <div className="upload-footer" id="upload-feedback">
               <InlineNotice issue={uploadIssue} />
-              {files.length ? (
+              {files.length || contentPdfFile || layoutPdfFile ? (
                 <button className="ghost-button" type="button" onClick={clearFile}>
                   <X size={15} />
-                  移除文件
+                  移除输入
                 </button>
               ) : null}
             </div>
-          </section>
-
-          <section className="tool-section" aria-labelledby="config-heading">
-            <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="配置" />
             <label className="field">
               <span>
                 <Globe2 size={16} />
@@ -742,6 +892,16 @@ function App() {
                 aria-label="Typesetting instruction"
               />
             </label>
+            <ConstraintPanel
+              isOpen={isConstraintsOpen}
+              draft={constraintDraft}
+              onToggle={() => setIsConstraintsOpen((current) => !current)}
+              onChange={setConstraintDraft}
+            />
+          </section>
+
+          <section className="tool-section" aria-labelledby="config-heading">
+            <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="运行配置" />
             <RuntimeConfigCard
               config={runtimeConfig}
               draft={configDraft}
@@ -906,6 +1066,165 @@ function SectionTitle({ icon, id, title }: { icon: React.ReactNode; id: string; 
       {icon}
       {title}
     </h2>
+  );
+}
+
+function PdfUploadSlot({
+  label,
+  meta,
+  file,
+  required = false,
+  issueKind,
+  isDragging,
+  inputRef,
+  onSelect,
+  onClear,
+  onDragOver,
+  onDragLeave,
+  onDrop
+}: {
+  label: string;
+  meta: string;
+  file: File | null;
+  required?: boolean;
+  issueKind?: UploadIssue["kind"];
+  isDragging: boolean;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onSelect: (files: FileList | null) => void;
+  onClear: () => void;
+  onDragOver: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragLeave: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDrop: (event: React.DragEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <div className="pdf-slot">
+      <button
+        className={`upload-zone compact${file ? " has-file" : ""}${isDragging ? " is-dragging" : ""}${issueKind === "error" && required && !file ? " has-error" : ""}`}
+        type="button"
+        onClick={() => inputRef.current?.click()}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        <span className="upload-icon" aria-hidden="true">
+          <FileText size={24} />
+        </span>
+        <span className="upload-main">
+          <span className="file-name">{file ? file.name : label}</span>
+          <span className="file-meta">{file ? formatFileSize(file.size) : meta}</span>
+        </span>
+        <span className="upload-action">
+          {file ? "更换" : "浏览"}
+          <ChevronRight size={16} />
+        </span>
+      </button>
+      <input
+        ref={inputRef}
+        className="hidden-input"
+        type="file"
+        accept="application/pdf,.pdf"
+        onChange={(event) => onSelect(event.target.files)}
+      />
+      {file ? (
+        <button className="ghost-button slot-clear" type="button" onClick={onClear}>
+          <X size={14} />
+          移除
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function ConstraintPanel({
+  isOpen,
+  draft,
+  onToggle,
+  onChange
+}: {
+  isOpen: boolean;
+  draft: ConstraintDraft;
+  onToggle: () => void;
+  onChange: React.Dispatch<React.SetStateAction<ConstraintDraft>>;
+}) {
+  return (
+    <div className="constraint-panel">
+      <button className="constraint-toggle" type="button" onClick={onToggle} aria-expanded={isOpen}>
+        <span>自定义强约束</span>
+        <ChevronRight className={isOpen ? "is-open" : ""} size={16} />
+      </button>
+      {isOpen ? (
+        <div className="constraint-body">
+          <div className="config-numbers">
+            <label>
+              <span>页宽 pt</span>
+              <input
+                type="number"
+                min={240}
+                max={2000}
+                value={draft.page_width_pt}
+                onChange={(event) =>
+                  onChange((current) => ({
+                    ...current,
+                    page_width_pt: clampNumber(event.target.value, 240, 2000)
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span>页高 pt</span>
+              <input
+                type="number"
+                min={240}
+                max={3000}
+                value={draft.page_height_pt}
+                onChange={(event) =>
+                  onChange((current) => ({
+                    ...current,
+                    page_height_pt: clampNumber(event.target.value, 240, 3000)
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span>字号 pt</span>
+              <input
+                type="number"
+                min={6}
+                max={32}
+                step={0.5}
+                value={draft.target_font_size_pt}
+                onChange={(event) =>
+                  onChange((current) => ({
+                    ...current,
+                    target_font_size_pt: clampNumber(event.target.value, 6, 32)
+                  }))
+                }
+              />
+            </label>
+          </div>
+          <label className="toggle-field">
+            <input
+              type="checkbox"
+              checked={draft.allow_continuation}
+              onChange={(event) =>
+                onChange((current) => ({ ...current, allow_continuation: event.target.checked }))
+              }
+            />
+            <span>允许续页</span>
+          </label>
+          <label className="toggle-field">
+            <input
+              type="checkbox"
+              checked={draft.preserve_images}
+              onChange={(event) =>
+                onChange((current) => ({ ...current, preserve_images: event.target.checked }))
+              }
+            />
+            <span>保留图片资产</span>
+          </label>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1496,6 +1815,8 @@ function artifactLabel(name: string) {
       return "Intent";
     case "workflow-run":
       return "Workflow";
+    case "semantic-analysis":
+      return "Semantic";
     case "layout-intent-plan":
       return "Layout";
     case "validation-and-repair":

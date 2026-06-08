@@ -13,6 +13,8 @@ export type BlockRole =
 
 export type InputKind = "text" | "image" | "pdf";
 
+export type InputSourceRole = "content" | "layout_reference";
+
 export type OutputKind =
   | "translation"
   | "typeset_document"
@@ -34,14 +36,20 @@ export type WorkflowStepStatus =
 export type WorkflowStepName =
   | "read_input"
   | "analyze_intent"
+  | "semantic_recognize"
   | "build_plan"
   | "validate_plan"
   | "translate"
   | "render"
   | "evaluate_render"
   | "repair"
+  | "export_pdf"
   | "complete"
   | "fail";
+
+export type TypesettingStandard = "none" | "gb_t_7713_1_2025";
+
+export type LayoutMode = "source_bbox" | "continuous_reflow";
 
 export interface BoundingBox {
   x0: number;
@@ -99,6 +107,7 @@ export interface DocumentIR {
 export interface InputSource {
   source_id: string;
   input_type: InputKind;
+  source_role?: InputSourceRole;
   filename?: string | null;
   mime_type?: string | null;
   size_bytes?: number;
@@ -132,6 +141,7 @@ export interface UserIntent {
   target_lang?: string;
   output_kind?: OutputKind;
   style_intent?: StyleIntent;
+  typesetting_standard?: TypesettingStandard;
   instruction?: string;
   preserve_policy?: Array<
     "citations" | "formulas" | "tables" | "figures" | "reference_markers"
@@ -166,6 +176,39 @@ export interface WorkflowRun {
   artifacts?: Record<string, string>;
   diagnostics?: Record<string, unknown>;
   error?: string | null;
+}
+
+export interface SemanticBlockSignal extends NoLayoutCoordinates {
+  source_block_id: string;
+  role_candidates?: BlockRole[];
+  section_hint?: string | null;
+  confidence?: number;
+  quality_flags?: string[];
+}
+
+export interface SemanticAssetSignal extends NoLayoutCoordinates {
+  asset_id: string;
+  usage_hint?:
+    | "preserve"
+    | "inline_reference"
+    | "background_reference"
+    | "ignore"
+    | "unknown";
+  text_hint?: string;
+  confidence?: number;
+  quality_flags?: string[];
+}
+
+export interface SemanticLayoutAnalysis extends NoLayoutCoordinates {
+  schema_version?: "0.1";
+  analysis_id: string;
+  doc_id: string;
+  target_lang?: string;
+  block_signals?: SemanticBlockSignal[];
+  asset_signals?: SemanticAssetSignal[];
+  section_hints?: string[];
+  confidence?: number;
+  quality_flags?: string[];
 }
 
 export interface LayoutIntentBlock extends NoLayoutCoordinates {
@@ -237,11 +280,48 @@ export interface PreservePolicy {
   line_breaks?: "allow_reflow" | "preserve";
 }
 
+export interface PageLayoutDefaults {
+  width_pt?: number;
+  height_pt?: number;
+  margin_top_pt?: number;
+  margin_right_pt?: number;
+  margin_bottom_pt?: number;
+  margin_left_pt?: number;
+}
+
+export interface RoleStyleDefaults {
+  font_size_pt: number;
+  bold?: boolean;
+  italic?: boolean;
+  alignment?: TextAlignment;
+  line_height?: number;
+  first_line_indent_em?: number;
+  space_before_pt?: number;
+  space_after_pt?: number;
+}
+
+export interface RoleStyles {
+  title?: RoleStyleDefaults;
+  abstract?: RoleStyleDefaults;
+  heading?: RoleStyleDefaults;
+  paragraph?: RoleStyleDefaults;
+  caption?: RoleStyleDefaults;
+  formula?: RoleStyleDefaults;
+  table?: RoleStyleDefaults;
+  figure?: RoleStyleDefaults;
+  footnote?: RoleStyleDefaults;
+  reference?: RoleStyleDefaults;
+  unknown?: RoleStyleDefaults;
+}
+
 export interface RenderDefaults {
   target_lang?: string;
   font_stack?: string[];
   line_height?: number;
   paragraph_spacing_em?: number;
+  layout_mode?: LayoutMode;
+  page_layout?: PageLayoutDefaults;
+  role_styles?: RoleStyles;
   alignment?: AlignmentDefaults;
   overflow_policy?: OverflowPolicy;
   preserve_policy?: PreservePolicy;

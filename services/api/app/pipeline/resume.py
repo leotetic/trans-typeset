@@ -18,7 +18,7 @@ async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
     for status in storage.list_statuses(limit):
         if status.status not in RESUMABLE_STATES or not status.doc_id:
             continue
-        pdf_path = storage.find_upload(status.doc_id)
+        pdf_path = storage.find_upload(status.doc_id, role="content")
         if pdf_path is None:
             status.status = JobState.FAILED
             status.progress = 1
@@ -27,6 +27,7 @@ async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
             storage.save_status(status)
             continue
         target_lang = status.target_lang or "zh-CN"
+        layout_pdf_path = storage.find_upload(status.doc_id, role="layout")
         schedule_job(
             process_document_job,
             status.job_id,
@@ -34,6 +35,8 @@ async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
             status.filename,
             pdf_path,
             target_lang,
+            None,
+            layout_pdf_path,
         )
         resumed += 1
     return resumed

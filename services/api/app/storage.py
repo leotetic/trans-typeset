@@ -30,9 +30,16 @@ class Storage:
     def new_job_id(self) -> str:
         return f"job_{uuid4().hex}"
 
-    async def save_upload(self, doc_id: str, upload: UploadFile, max_bytes: int) -> Path:
+    async def save_upload(
+        self,
+        doc_id: str,
+        upload: UploadFile,
+        max_bytes: int,
+        role: str | None = None,
+    ) -> Path:
         suffix = Path(upload.filename or "upload.pdf").suffix or ".pdf"
-        path = self.uploads / f"{doc_id}{suffix}"
+        stem = f"{doc_id}.{_upload_role_stem(role)}" if role else doc_id
+        path = self.uploads / f"{stem}{suffix}"
         total_bytes = 0
         with path.open("wb") as out:
             while chunk := await upload.read(1024 * 1024):
@@ -62,9 +69,19 @@ class Storage:
                 out.write(chunk)
         return path
 
-    def find_upload(self, doc_id: str) -> Path | None:
-        for path in self.uploads.glob(f"{doc_id}.*"):
+    def find_upload(self, doc_id: str, role: str | None = None) -> Path | None:
+        if role:
+            for path in self.uploads.glob(f"{doc_id}.{_upload_role_stem(role)}.*"):
+                if path.is_file():
+                    return path
+            if _upload_role_stem(role) != "content":
+                return None
+
+        for path in self.uploads.glob(f"{doc_id}.content.*"):
             if path.is_file():
+                return path
+        for path in self.uploads.glob(f"{doc_id}.*"):
+            if path.is_file() and ".layout." not in path.name:
                 return path
         return None
 
@@ -156,3 +173,12 @@ class Storage:
 
 
 storage = Storage(settings.storage_dir)
+
+
+def _upload_role_stem(role: str | None) -> str:
+    normalized = (role or "").strip().lower().replace("_", "-")
+    if normalized in {"layout", "layout-reference", "layout_source", "layout-source"}:
+        return "layout"
+    if normalized in {"content", "content-source", "source"}:
+        return "content"
+    return "".join(char for char in normalized if char.isalnum() or char == "-") or "upload"

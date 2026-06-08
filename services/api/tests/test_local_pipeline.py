@@ -79,6 +79,7 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     progress = storage.read_output_json("doc_1", "translation-progress.json")
     parser_diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
     renderer_diagnostics = storage.read_output_json("doc_1", "renderer-diagnostics.json")
+    layout_trace = storage.read_output_json("doc_1", "layout-trace.json")
     workflow_run = storage.read_output_json("doc_1", "workflow-run.json")
     normalized_input = storage.read_output_json("doc_1", "normalized-input.json")
     user_intent = storage.read_output_json("doc_1", "user-intent.json")
@@ -118,6 +119,9 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     assert parser_diagnostics["text_block_count"] == len(source_block_ids)
     assert renderer_diagnostics["doc_id"] == "doc_1"
     assert renderer_diagnostics["page_count"] >= 1
+    assert layout_trace["kind"] == "layout_trace"
+    assert layout_trace["layout_mode"] == "source_bbox"
+    assert layout_trace["output"]["page_count"] >= 1
     assert workflow_run["status"] == "completed"
     assert {step["name"] for step in workflow_run["steps"]} >= {
         "read_input",
