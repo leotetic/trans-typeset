@@ -46,6 +46,12 @@ def test_extract_preserve_tokens_keeps_citation_formula_and_reference_markers() 
     assert tokens == ["Eq. 2", "y = f(x)", "(Smith, 2024)", "Fig. 3", "[7; 9]"]
 
 
+def test_extract_preserve_tokens_keeps_formula_refs() -> None:
+    tokens = extract_preserve_tokens("The result is {{formula:p0001_formula_abc123}}.")
+
+    assert tokens == ["{{formula:p0001_formula_abc123}}"]
+
+
 def test_build_chunks_keeps_block_ids_and_tokens() -> None:
     block = make_block("p1_b1", "This is a paragraph with [3].")
     document = make_document([block])

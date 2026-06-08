@@ -52,16 +52,16 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 ## 默认排版值
 
 - `target_lang`: `zh-CN`
-- `font_stack`: `Noto Sans CJK SC`, `Source Han Sans SC`, `Arial Unicode MS`, `sans-serif`
+- `font_stack`: `Times New Roman`, `SimSun`, `Songti SC`, `Noto Serif CJK SC`, `Source Han Serif SC`, `serif`。英文优先 Times New Roman；中文优先宋体/宋体兼容字体，系统缺少 SimSun 时由 Songti SC、Noto Serif CJK SC 或 Source Han Serif SC fallback。
 - `line_height`: `1.35`
 - `paragraph_spacing_em`: `0.45`
-- `layout_mode`: `source_bbox`
+- `layout_mode`: `continuous_reflow`
 - `page_layout`: A4 `595.28 x 841.89pt`，上/左 `70.87pt`，下/右 `56.69pt`
-- `role_styles`: GB/T 连续重排使用 title 18pt、heading 14pt、paragraph/abstract 12pt、caption/reference/footnote 10.5pt，并按角色设置加粗、对齐、首行缩进和段前后间距。
+- `role_styles`: 默认 GB/T 7713.1 中文可读重排使用 title 18pt、heading 14pt、paragraph/abstract 12pt、caption/reference/footnote 10.5pt，并按角色设置加粗、对齐、首行缩进和段前后间距。
 - `overflow_policy.strategy`: `scale_then_expand_then_continue`
 - `overflow_policy.min_font_scale`: `0.86`
 
-`layout_mode=source_bbox` 保留原 PDF 页面尺寸和 bbox，并按缩放、扩盒、续页实现 overflow policy。`layout_mode=continuous_reflow` 用于 GB/T 7713.1 中文可读重排：renderer 按全局阅读顺序生成连续 A4 页面和确定性 bbox，跳过竖排时间戳、重复页脚、无 path 的 vector placeholder，对长段做句子/词边界分页，并输出居中阿拉伯页码。
+`layout_mode=continuous_reflow` 是默认 GB/T 7713.1 中文可读重排：renderer 按全局阅读顺序生成连续 A4 页面和确定性 bbox，跳过竖排时间戳、重复页脚、无 path 的 vector placeholder，对长段做句子/词边界分页，并输出居中阿拉伯页码。`layout_mode=source_bbox` 可用于保留原 PDF 页面尺寸和 bbox，但字体、字号、行高、对齐和缩进仍应优先遵循 `RenderDefaults.role_styles`，再按缩放、扩盒、续页实现 overflow policy。
 
 `RenderDefaults` 也可以通过本地运行配置持久化。`GET /api/config` 返回当前有效默认值，`PUT /api/config` 可更新字体栈、行高、段距和 `overflow_policy.min_font_scale` 等字段。后端会把同一份 `RenderDefaults` 写入 `TranslationChunk.render_defaults` 并传给 renderer；LLM 仍只能消费这些语义级约束，不能返回坐标或页面定位字段。
 
@@ -93,7 +93,9 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 
 Renderer 仍以 `DocumentIR` 为坐标事实来源，在原页面 bbox 位置渲染图片。缺失 asset path 时不会静默丢弃，而是输出 `asset_missing_path` 质量 flag 和占位元素。
 
-表格样文本和公式文本当前作为 `DocumentBlock` 保留，角色分别标记为 `table` 和 `formula`，renderer 会使用专用 table/formula/footnote CSS 规则。复杂表格结构、公式矢量图和 PDF vector graphics 仍不是完整结构化资产；较大的 vector drawing 会以 `figure` placeholder asset 保留 bbox，`parser-diagnostics.fallback_flags[]` 会暴露 `table_text_fallback`、`formula_text_fallback`、`vector_asset_placeholder`、`vector_assets_not_rasterized` 等状态，便于前端和测试识别当前保真边界。
+表格样文本仍作为 `DocumentBlock(role="table")` 保留。公式现在是一等 metadata：公式 enrichment 会在 parser 后识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、`Asset(kind="formula")` 和 `{{formula:formula_id}}` preserve token。`FormulaIR` 保存 `formula_id`、page/block/asset 引用、LaTeX、display mode、confidence、source kind 和 quality flags；视觉模型返回的 `FormulaRecognitionResult` 继承无坐标约束，只允许 LaTeX 语义结果。未配置 `OPENAI_API_KEY` 时使用 deterministic recognizer，文本层公式会直接保留为 LaTeX，视觉候选会标记 `formula_recognition_mock`。
+
+公式相关调试输出为 `formula-recognition.json` 和 `formula-diagnostics.json`。Renderer 以 `DocumentIR` 的 bbox 和 reading order 为布局事实，用 KaTeX-compatible HTML/CSS 渲染公式 LaTeX；无效 LaTeX 或缺失识别结果会回退原文本/占位并标记 `formula_render_failed` 或 `formula_missing_latex`。
 
 `renderer-diagnostics.layout_issues[]` 是轻量视觉回归信号，记录同页 item overlap、bbox 越页和空 block 等风险。它不是像素级截图 diff，但可作为端到端验收前的 deterministic 门禁。
 

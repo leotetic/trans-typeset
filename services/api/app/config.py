@@ -31,10 +31,12 @@ class Settings:
     layout_planner_model: str = ""
     vision_analyzer_model: str = ""
     render_font_stack: tuple[str, ...] = (
-        "Noto Sans CJK SC",
-        "Source Han Sans SC",
-        "Arial Unicode MS",
-        "sans-serif",
+        "Times New Roman",
+        "SimSun",
+        "Songti SC",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+        "serif",
     )
     render_line_height: float = 1.35
     render_paragraph_spacing_em: float = 0.45
@@ -139,7 +141,7 @@ def load_settings() -> Settings:
         render_font_stack=parse_csv(
             os.getenv(
                 "RENDER_FONT_STACK",
-                "Noto Sans CJK SC,Source Han Sans SC,Arial Unicode MS,sans-serif",
+                "Times New Roman,SimSun,Songti SC,Noto Serif CJK SC,Source Han Serif SC,serif",
             )
         ),
         render_line_height=parse_float(os.getenv("RENDER_LINE_HEIGHT", ""), 1.35),

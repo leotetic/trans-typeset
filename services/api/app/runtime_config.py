@@ -1,11 +1,25 @@
 from __future__ import annotations
 
-from pdf_translator_schema import LayoutMode, RenderDefaults, TypesettingStandard, UserIntent
+from pdf_translator_schema import (
+    DEFAULT_RENDER_DEFAULTS,
+    LayoutMode,
+    RenderDefaults,
+    TypesettingStandard,
+    UserIntent,
+)
 
 from .config import settings
 from .models import RuntimeConfig
 from .provider_config import ProviderConfigError, normalize_openai_base_url
 from .storage import Storage
+
+_LEGACY_SANS_FONT_STACK = [
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "Arial Unicode MS",
+    "sans-serif",
+]
+_GBT_FONT_STACK = list(DEFAULT_RENDER_DEFAULTS["font_stack"])
 
 
 def _render_defaults_from_payload(payload: object, target_lang: str | None = None) -> RenderDefaults:
@@ -118,7 +132,10 @@ def render_defaults_for_intent(
 ) -> RenderDefaults:
     configured = render_defaults_for_target(storage, target_lang)
     if intent.typesetting_standard == TypesettingStandard.GB_T_7713_1_2025:
-        return configured.model_copy(update={"layout_mode": LayoutMode.CONTINUOUS_REFLOW}, deep=True)
+        updates: dict[str, object] = {"layout_mode": LayoutMode.CONTINUOUS_REFLOW}
+        if configured.font_stack == _LEGACY_SANS_FONT_STACK:
+            updates["font_stack"] = _GBT_FONT_STACK
+        return configured.model_copy(update=updates, deep=True)
     return configured
 
 

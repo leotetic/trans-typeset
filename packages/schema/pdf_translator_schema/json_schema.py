@@ -6,6 +6,7 @@ from pathlib import Path
 from .models import (
     AssetIR,
     DocumentIR,
+    FormulaRecognitionResult,
     InputSource,
     LayoutIntentPlan,
     SemanticLayoutAnalysis,
@@ -34,6 +35,9 @@ def export_schema(output_dir: Path) -> None:
         "document-ir.schema.json": _with_metadata(DocumentIR.model_json_schema()),
         "input-source.schema.json": _with_metadata(InputSource.model_json_schema()),
         "asset-ir.schema.json": _with_metadata(AssetIR.model_json_schema()),
+        "formula-recognition.schema.json": _with_metadata(
+            FormulaRecognitionResult.model_json_schema()
+        ),
         "user-intent.schema.json": _with_metadata(UserIntent.model_json_schema()),
         "workflow-run.schema.json": _with_metadata(WorkflowRun.model_json_schema()),
         "layout-intent-plan.schema.json": _with_metadata(

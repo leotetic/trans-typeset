@@ -132,6 +132,17 @@ class LayoutMode(StrEnum):
     CONTINUOUS_REFLOW = "continuous_reflow"
 
 
+class FormulaSourceKind(StrEnum):
+    TEXT_LAYER = "text_layer"
+    VECTOR_CANDIDATE = "vector_candidate"
+    IMAGE_CANDIDATE = "image_candidate"
+    MOCK = "mock"
+    UNKNOWN = "unknown"
+
+
+FormulaDisplayMode = Literal["inline", "display"]
+
+
 class InputSource(StrictBaseModel):
     source_id: str = Field(min_length=1)
     input_type: InputKind
@@ -367,6 +378,7 @@ class Asset(StrictBaseModel):
     bbox: BoundingBox
     path: str | None = None
     alt_text: str | None = None
+    formula_id: str | None = None
 
 
 class DocumentBlock(StrictBaseModel):
@@ -379,6 +391,32 @@ class DocumentBlock(StrictBaseModel):
     source_text: str = ""
     span_refs: list[str] = Field(default_factory=list)
     style_seed: StyleSeed = Field(default_factory=StyleSeed)
+    formula_id: str | None = None
+
+
+class FormulaIR(StrictBaseModel):
+    formula_id: str = Field(min_length=1)
+    page_id: str = Field(min_length=1)
+    source_block_id: str | None = None
+    asset_id: str | None = None
+    latex: str = ""
+    display_mode: FormulaDisplayMode = "display"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    source_kind: FormulaSourceKind = FormulaSourceKind.UNKNOWN
+    quality_flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_source_ref(self) -> FormulaIR:
+        if not self.source_block_id and not self.asset_id:
+            raise ValueError("formula must reference a source block or asset")
+        return self
+
+
+class FormulaRecognitionResult(NoLayoutCoordinatesModel):
+    latex: str
+    display_mode: FormulaDisplayMode = "display"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
 
 
 class DocumentPage(StrictBaseModel):
@@ -407,15 +445,20 @@ class DocumentPage(StrictBaseModel):
 class DocumentIR(StrictBaseModel):
     doc_id: str = Field(min_length=1)
     pages: list[DocumentPage] = Field(min_length=1)
+    formulas: list[FormulaIR] = Field(default_factory=list)
 
     def blocks_by_id(self) -> dict[str, DocumentBlock]:
         return {block.block_id: block for page in self.pages for block in page.blocks}
+
+    def formulas_by_id(self) -> dict[str, FormulaIR]:
+        return {formula.formula_id: formula for formula in self.formulas}
 
     @model_validator(mode="after")
     def validate_unique_ids(self) -> DocumentIR:
         page_ids: set[str] = set()
         block_ids: set[str] = set()
         asset_ids: set[str] = set()
+        formula_ids: set[str] = set()
         for page in self.pages:
             if page.page_id in page_ids:
                 raise ValueError(f"duplicate page_id: {page.page_id}")
@@ -428,6 +471,25 @@ class DocumentIR(StrictBaseModel):
                 if asset.asset_id in asset_ids:
                     raise ValueError(f"duplicate asset_id: {asset.asset_id}")
                 asset_ids.add(asset.asset_id)
+        for formula in self.formulas:
+            if formula.formula_id in formula_ids:
+                raise ValueError(f"duplicate formula_id: {formula.formula_id}")
+            formula_ids.add(formula.formula_id)
+            if formula.page_id not in page_ids:
+                raise ValueError(f"formula {formula.formula_id} points to another page")
+            if formula.source_block_id and formula.source_block_id not in block_ids:
+                raise ValueError(
+                    f"formula {formula.formula_id} points to unknown source block"
+                )
+            if formula.asset_id and formula.asset_id not in asset_ids:
+                raise ValueError(f"formula {formula.formula_id} points to unknown asset")
+        for page in self.pages:
+            for block in page.blocks:
+                if block.formula_id and block.formula_id not in formula_ids:
+                    raise ValueError(f"block {block.block_id} points to unknown formula")
+            for asset in page.assets:
+                if asset.formula_id and asset.formula_id not in formula_ids:
+                    raise ValueError(f"asset {asset.asset_id} points to unknown formula")
         return self
 
 

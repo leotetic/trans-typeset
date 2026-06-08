@@ -24,6 +24,11 @@ from ..storage import storage
 from .agents import run_typesetting_graph
 from .agents.state import TypesettingGraphContext
 from .chunker import build_chunks
+from .formulas import (
+    DeterministicFormulaRecognizer,
+    OpenAIFormulaRecognizer,
+    enrich_document_formulas,
+)
 from .parser import UnsupportedPdfError, build_parser_diagnostics, parse_pdf
 from .translator import Translator, build_translator
 from .workflow import (
@@ -278,6 +283,7 @@ def _graph_context() -> TypesettingGraphContext:
         load_saved_workflow=_load_saved_workflow,
         parse_pdf=parse_pdf,
         build_parser_diagnostics=build_parser_diagnostics,
+        enrich_document_formulas=_enrich_document_formulas,
         build_chunks=build_chunks,
         build_translator=build_translator,
         translate_chunks=_translate_chunks,
@@ -298,6 +304,32 @@ def _graph_context() -> TypesettingGraphContext:
             "render_evaluation_summary": render_evaluation_summary,
             "safe_validate_layout_intent_plan": safe_validate_layout_intent_plan,
         },
+    )
+
+
+async def _enrich_document_formulas(
+    document: DocumentIR,
+    *,
+    doc_id: str,
+    pdf_path: Path | None = None,
+) -> Any:
+    runtime_config = effective_runtime_config(storage)
+    recognizer: Any
+    if runtime_config["openai_api_key"]:
+        recognizer = OpenAIFormulaRecognizer(
+            base_url=runtime_config["openai_base_url"],
+            api_key=runtime_config["openai_api_key"],
+            model=runtime_config["vision_analyzer_model"],
+            asset_base_path=storage.asset_dir(doc_id),
+        )
+    else:
+        recognizer = DeterministicFormulaRecognizer()
+    return await enrich_document_formulas(
+        document,
+        doc_id=doc_id,
+        asset_output_dir=storage.asset_dir(doc_id),
+        pdf_path=pdf_path,
+        recognizer=recognizer,
     )
 
 

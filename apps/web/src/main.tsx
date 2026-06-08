@@ -134,7 +134,7 @@ const DEFAULT_CONSTRAINTS: ConstraintDraft = {
 };
 
 function App() {
-  const [inputMode, setInputMode] = useState<InputMode>("text");
+  const [inputMode, setInputMode] = useState<InputMode>("pdf");
   const [files, setFiles] = useState<File[]>([]);
   const [contentPdfFile, setContentPdfFile] = useState<File | null>(null);
   const [layoutPdfFile, setLayoutPdfFile] = useState<File | null>(null);
@@ -194,10 +194,11 @@ function App() {
   const isTaskRunning = job
     ? ["queued", "parsing", "translating", "rendering"].includes(job.status)
     : false;
+  const isPdfWorkflow = inputMode === "pdf";
   const hasSubmitInput =
     inputMode === "text"
       ? Boolean(textInput.trim())
-      : inputMode === "pdf"
+      : isPdfWorkflow
         ? Boolean(contentPdfFile)
         : files.length > 0;
   const canSubmit = hasSubmitInput && !isUploading && !isTaskRunning && healthState === "online";
@@ -447,6 +448,14 @@ function App() {
     }
   }
 
+  function clearRequirementsInput() {
+    if (isPdfWorkflow) {
+      clearPdfSlot("layout");
+      return;
+    }
+    clearFile();
+  }
+
   function handlePdfSlotFiles(slot: PdfSlot, nextFiles: FileList | File[] | null | undefined) {
     const selectedFile = Array.from(nextFiles ?? [])[0];
     if (!selectedFile) {
@@ -644,11 +653,11 @@ function App() {
     if (!hasSubmitInput) {
       setUploadIssue({
         kind: "error",
-        target: inputMode === "pdf" ? "document" : "requirements",
+        target: isPdfWorkflow ? "document" : "requirements",
         message:
           inputMode === "text"
             ? "请输入要排版的文本。"
-            : inputMode === "pdf"
+            : isPdfWorkflow
               ? "请选择待翻译 PDF。"
               : "请选择输入文件。"
       });
@@ -666,7 +675,7 @@ function App() {
     }
 
     if (
-      inputMode === "pdf" &&
+      isPdfWorkflow &&
       (!contentPdfFile ||
         !isPdfFile(contentPdfFile) ||
         contentPdfFile.size > maxUploadBytes ||
@@ -743,7 +752,7 @@ function App() {
 
           <section className="tool-section" aria-labelledby="config-heading">
             <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="文献配置" />
-            {inputMode === "pdf" ? (
+            {isPdfWorkflow ? (
               <>
                 <PdfUploadSlot
                   label="待翻译 PDF"
@@ -821,7 +830,7 @@ function App() {
                 }}
                 aria-label="Text input"
               />
-            ) : inputMode === "pdf" ? (
+            ) : isPdfWorkflow ? (
               <div className="pdf-source-grid">
                 <PdfUploadSlot
                   label="版式参考 PDF"
@@ -893,10 +902,10 @@ function App() {
             <div className="upload-footer" id="upload-feedback">
               <InlineNotice
                 issue={uploadIssue?.target !== "document" ? uploadIssue : null}
-                fallback={inputMode === "pdf" ? "版式参考 PDF 可选。" : "等待输入。"}
+                fallback={isPdfWorkflow ? "版式参考 PDF 可选。" : "等待输入。"}
               />
-              {files.length || (inputMode === "pdf" && layoutPdfFile) ? (
-                <button className="ghost-button" type="button" onClick={clearFile}>
+              {files.length || (isPdfWorkflow && layoutPdfFile) ? (
+                <button className="ghost-button" type="button" onClick={clearRequirementsInput}>
                   <X size={15} />
                   移除输入
                 </button>
@@ -1849,6 +1858,10 @@ function artifactLabel(name: string) {
       return "Repair";
     case "asset-ir":
       return "Assets";
+    case "formula-recognition":
+      return "Formula";
+    case "formula-diagnostics":
+      return "Formula QA";
     case "document-ir":
       return "IR";
     case "translation-chunks":

@@ -2,10 +2,17 @@ DEFAULT_TARGET_LANG = "zh-CN"
 
 DEFAULT_RENDER_DEFAULTS = {
     "target_lang": DEFAULT_TARGET_LANG,
-    "font_stack": ["Noto Sans CJK SC", "Source Han Sans SC", "Arial Unicode MS", "sans-serif"],
+    "font_stack": [
+        "Times New Roman",
+        "SimSun",
+        "Songti SC",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+        "serif",
+    ],
     "line_height": 1.35,
     "paragraph_spacing_em": 0.45,
-    "layout_mode": "source_bbox",
+    "layout_mode": "continuous_reflow",
     "page_layout": {
         "width_pt": 595.28,
         "height_pt": 841.89,

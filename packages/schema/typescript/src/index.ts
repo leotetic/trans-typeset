@@ -51,6 +51,15 @@ export type TypesettingStandard = "none" | "gb_t_7713_1_2025";
 
 export type LayoutMode = "source_bbox" | "continuous_reflow";
 
+export type FormulaSourceKind =
+  | "text_layer"
+  | "vector_candidate"
+  | "image_candidate"
+  | "mock"
+  | "unknown";
+
+export type FormulaDisplayMode = "inline" | "display";
+
 export interface BoundingBox {
   x0: number;
   y0: number;
@@ -81,6 +90,7 @@ export interface DocumentBlock {
   source_text?: string;
   span_refs?: string[];
   style_seed?: StyleSeed;
+  formula_id?: string | null;
 }
 
 export interface Asset {
@@ -90,6 +100,26 @@ export interface Asset {
   bbox: BoundingBox;
   path?: string | null;
   alt_text?: string | null;
+  formula_id?: string | null;
+}
+
+export interface FormulaIR {
+  formula_id: string;
+  page_id: string;
+  source_block_id?: string | null;
+  asset_id?: string | null;
+  latex?: string;
+  display_mode?: FormulaDisplayMode;
+  confidence?: number;
+  source_kind?: FormulaSourceKind;
+  quality_flags?: string[];
+}
+
+export interface FormulaRecognitionResult extends NoLayoutCoordinates {
+  latex: string;
+  display_mode?: FormulaDisplayMode;
+  confidence?: number;
+  quality_flags?: string[];
 }
 
 export interface DocumentPage {
@@ -102,6 +132,7 @@ export interface DocumentPage {
 export interface DocumentIR {
   doc_id: string;
   pages: DocumentPage[];
+  formulas?: FormulaIR[];
 }
 
 export interface InputSource {

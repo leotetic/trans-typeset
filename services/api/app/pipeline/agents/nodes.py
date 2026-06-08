@@ -165,6 +165,56 @@ async def _read_input(
                 raise
             assets = []
             parser_diagnostics = context.build_parser_diagnostics(document)
+            try:
+                formula_result = await context.enrich_document_formulas(
+                    document,
+                    doc_id=doc_id,
+                    pdf_path=source_path,
+                )
+                document = formula_result.document
+                context.storage.write_json(
+                    doc_id,
+                    "formula-recognition.json",
+                    [
+                        formula.model_dump(mode="json")
+                        for formula in formula_result.formulas
+                    ],
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "formula-diagnostics.json",
+                    formula_result.diagnostics,
+                )
+                parser_diagnostics["formula_count"] = len(formula_result.formulas)
+                parser_diagnostics["fallback_flags"] = _unique(
+                    [
+                        *parser_diagnostics.get("fallback_flags", []),
+                        *formula_result.diagnostics.get("quality_flags", []),
+                    ]
+                )
+            except Exception as exc:
+                context.storage.write_json(
+                    doc_id,
+                    "formula-recognition.json",
+                    [],
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "formula-diagnostics.json",
+                    {
+                        "kind": "formula_diagnostics",
+                        "candidate_count": 0,
+                        "recognized_count": 0,
+                        "quality_flags": ["formula_enrichment_failed"],
+                        "error": str(exc),
+                    },
+                )
+                parser_diagnostics["fallback_flags"] = _unique(
+                    [
+                        *parser_diagnostics.get("fallback_flags", []),
+                        "formula_enrichment_failed",
+                    ]
+                )
             normalized = helpers["normalized_input_payload"](
                 input_sources=[input_source, layout_input_source],
                 document=document,
@@ -182,7 +232,13 @@ async def _read_input(
                     "filename": state.get("layout_source_filename") or filename,
                     "artifact_path": str(layout_source_path),
                 }
-            output_artifacts = ["normalized-input", "document-ir", "parser-diagnostics"]
+            output_artifacts = [
+                "normalized-input",
+                "document-ir",
+                "parser-diagnostics",
+                "formula-recognition",
+                "formula-diagnostics",
+            ]
         elif input_kind == InputKind.TEXT:
             text = state.get("input_text", "")
             input_source = helpers["build_input_source"](

@@ -86,6 +86,8 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     layout_intent_plan = storage.read_output_json("doc_1", "layout-intent-plan.json")
     render_evaluation = storage.read_output_json("doc_1", "render-evaluation.json")
     validation_and_repair = storage.read_output_json("doc_1", "validation-and-repair.json")
+    formula_recognition = storage.read_output_json("doc_1", "formula-recognition.json")
+    formula_diagnostics = storage.read_output_json("doc_1", "formula-diagnostics.json")
     html = storage.preview_html_path("doc_1").read_text(encoding="utf-8")
 
     source_block_ids = {
@@ -120,8 +122,10 @@ def test_local_pipeline_runs_digital_pdf_to_artifacts(
     assert renderer_diagnostics["doc_id"] == "doc_1"
     assert renderer_diagnostics["page_count"] >= 1
     assert layout_trace["kind"] == "layout_trace"
-    assert layout_trace["layout_mode"] == "source_bbox"
+    assert layout_trace["layout_mode"] == "continuous_reflow"
     assert layout_trace["output"]["page_count"] >= 1
+    assert isinstance(formula_recognition, list)
+    assert formula_diagnostics["kind"] == "formula_diagnostics"
     assert workflow_run["status"] == "completed"
     assert {step["name"] for step in workflow_run["steps"]} >= {
         "read_input",

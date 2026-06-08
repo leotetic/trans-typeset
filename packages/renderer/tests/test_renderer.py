@@ -14,6 +14,7 @@ from pdf_translator_schema import (
     BoundingBox,
     DocumentIR,
     DocumentPage,
+    FormulaIR,
     LayoutIntentBlock,
     LayoutIntentPlan,
     PageSize,
@@ -62,6 +63,26 @@ def _plan(*blocks: TranslationBlockPlan) -> TranslationLayoutPlan:
     return TranslationLayoutPlan(chunk_id="chunk_1", blocks=list(blocks))
 
 
+def _source_bbox_defaults(**updates: object) -> RenderDefaults:
+    return RenderDefaults(target_lang="zh-CN", layout_mode="source_bbox", **updates)
+
+
+def _render_source_bbox(
+    document: DocumentIR,
+    plans: list[TranslationLayoutPlan] | None = None,
+    *,
+    layout_intent_plan: LayoutIntentPlan | None = None,
+    defaults: RenderDefaults | None = None,
+) -> RenderDocument:
+    return RenderDocument.from_ir_and_plans(
+        document,
+        plans or [],
+        "zh-CN",
+        render_defaults=defaults or _source_bbox_defaults(),
+        layout_intent_plan=layout_intent_plan,
+    )
+
+
 def test_render_to_html_uses_original_page_size() -> None:
     block = _block(
         "p1_b1",
@@ -69,14 +90,14 @@ def test_render_to_html_uses_original_page_size() -> None:
         BoundingBox(x0=72, y0=72, x1=300, y1=110),
     )
 
-    html = render_to_html(RenderDocument.from_ir_and_plans(_document([block]), [], "zh-CN"))
+    html = render_to_html(_render_source_bbox(_document([block])))
 
     assert "size: 612.0pt 792.0pt" in html
     assert "--page-width-pt: 612.0pt" in html
     assert "--page-height-pt: 792.0pt" in html
 
 
-def test_render_to_html_uses_schema_default_chinese_font_stack() -> None:
+def test_render_to_html_uses_schema_default_gbt_font_stack() -> None:
     block = _block(
         "p1_b1",
         BlockRole.PARAGRAPH,
@@ -86,9 +107,10 @@ def test_render_to_html_uses_schema_default_chinese_font_stack() -> None:
     html = render_to_html(RenderDocument.from_ir_and_plans(_document([block]), [], "zh-CN"))
 
     assert (
-        'font-family: "Noto Sans CJK SC", "Source Han Sans SC", '
-        '"Arial Unicode MS", sans-serif'
+        'font-family: "Times New Roman", "SimSun", "Songti SC", '
+        '"Noto Serif CJK SC", "Source Han Serif SC", serif'
     ) in html
+    assert "Noto Sans CJK SC" not in html
 
 
 def test_render_to_html_uses_configured_render_defaults() -> None:
@@ -102,6 +124,7 @@ def test_render_to_html_uses_configured_render_defaults() -> None:
         font_stack=["Custom CJK", "serif"],
         line_height=1.55,
         paragraph_spacing_em=0.25,
+        layout_mode="source_bbox",
     )
 
     html = render_to_html(
@@ -114,7 +137,7 @@ def test_render_to_html_uses_configured_render_defaults() -> None:
     )
 
     assert 'font-family: "Custom CJK", serif' in html
-    assert "line-height: 1.55" in html
+    assert "line-height: var(--line-height, 1.55)" in html
 
 
 def test_render_to_pdf_falls_back_when_playwright_driver_fails(
@@ -271,18 +294,122 @@ def test_structured_roles_have_dedicated_rendering_rules() -> None:
         reading_order=2,
     )
 
-    html = render_to_html(
-        RenderDocument.from_ir_and_plans(_document([table, formula, footnote]), [], "zh-CN")
-    )
+    html = render_to_html(_render_source_bbox(_document([table, formula, footnote])))
 
     assert 'class="block role-table intent-normal quality-missing-translation"' in html
     assert 'class="block role-formula intent-normal quality-missing-translation"' in html
     assert 'class="block role-footnote intent-normal quality-missing-translation"' in html
     assert ".role-table" in html
-    assert "ui-monospace" in html
+    assert "ui-monospace" not in html
     assert ".role-formula" in html
-    assert "Cambria Math" in html
     assert ".role-footnote" in html
+
+
+def test_formula_block_renders_internal_latex_markup() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=200, x1=420, y1=230),
+        source_text="{{formula:formula_1}}",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+
+    assert 'class="katex-display"' in html
+    assert 'data-latex="E = mc^2"' in html
+    assert "{{formula:formula_1}}" not in html
+
+
+def test_invalid_formula_latex_falls_back_with_quality_flag() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=200, x1=420, y1=230),
+        source_text="{{formula:formula_bad}}",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_bad",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\frac{x",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+
+    assert "quality-formula-render-failed" in html
+    assert r"\frac{x" in html
+
+
+def test_formula_renderer_structures_common_latex_commands() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=200, x1=420, y1=230),
+        source_text="{{formula:formula_1}}",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\frac{\alpha^2}{\sqrt{x}}",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+
+    assert 'class="katex-frac"' in html
+    assert "α<sup>2</sup>" in html
+    assert 'class="katex-sqrt"' in html
 
 
 def test_original_bbox_is_a_hard_constraint() -> None:
@@ -292,7 +419,7 @@ def test_original_bbox_is_a_hard_constraint() -> None:
         BoundingBox(x0=72, y0=120, x1=420, y1=180),
     )
 
-    html = render_to_html(RenderDocument.from_ir_and_plans(_document([block]), [], "zh-CN"))
+    html = render_to_html(_render_source_bbox(_document([block])))
 
     assert "--x-pt: 72.0pt" in html
     assert "--y-pt: 120.0pt" in html
@@ -317,13 +444,41 @@ def test_compact_intent_scales_font_and_expands_box_before_continuation() -> Non
         )
     )
 
-    render_document = RenderDocument.from_ir_and_plans(_document([block]), [plan], "zh-CN")
+    render_document = _render_source_bbox(_document([block]), [plan])
     render_block = render_document.pages[0].blocks[0]
     html = render_to_html(render_document)
 
-    assert render_block.font_size_pt < block.style_seed.font_size
+    assert render_block.font_scale < 1
+    assert render_block.font_size_pt < 12.0
     assert render_block.bbox.y1 > block.bbox.y1
     assert "quality-box-expanded" in html
+
+
+def test_source_bbox_uses_role_styles_for_typography() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        font_size=8,
+    )
+    title = _block(
+        "p1_title",
+        BlockRole.TITLE,
+        BoundingBox(x0=72, y0=72, x1=420, y1=108),
+        font_size=9,
+        reading_order=1,
+    )
+
+    render_document = _render_source_bbox(_document([paragraph, title]))
+    rendered = {block.block_id: block for block in render_document.pages[0].blocks}
+
+    assert rendered["p1_body"].font_size_pt == pytest.approx(12.0)
+    assert rendered["p1_body"].line_height == pytest.approx(1.5)
+    assert rendered["p1_body"].text_align == "justify"
+    assert rendered["p1_body"].first_line_indent_em == pytest.approx(2.0)
+    assert rendered["p1_title"].font_size_pt == pytest.approx(18.0)
+    assert rendered["p1_title"].font_weight == 700
+    assert rendered["p1_title"].text_align == "center"
 
 
 def test_layout_intent_plan_applies_semantic_intent_without_overriding_bbox() -> None:
@@ -354,10 +509,9 @@ def test_layout_intent_plan_applies_semantic_intent_without_overriding_bbox() ->
         ],
     )
 
-    render_document = RenderDocument.from_ir_and_plans(
+    render_document = _render_source_bbox(
         _document([block]),
         [plan],
-        "zh-CN",
         layout_intent_plan=layout_intent,
     )
     render_block = render_document.pages[0].blocks[0]
@@ -382,10 +536,11 @@ def test_normal_intent_scales_font_when_overflow_risk_is_detected() -> None:
         )
     )
 
-    render_document = RenderDocument.from_ir_and_plans(_document([block]), [plan], "zh-CN")
+    render_document = _render_source_bbox(_document([block]), [plan])
     render_block = render_document.pages[0].blocks[0]
 
-    assert render_block.font_size_pt < block.style_seed.font_size
+    assert render_block.font_scale < 1
+    assert render_block.font_size_pt < 12.0
     assert "font_scaled" in render_block.quality_flags
 
 
@@ -403,14 +558,13 @@ def test_overflow_scaling_uses_configured_min_font_scale() -> None:
             role=BlockRole.PARAGRAPH,
         )
     )
-    defaults = RenderDefaults(target_lang="zh-CN")
+    defaults = _source_bbox_defaults()
     defaults.overflow_policy.min_font_scale = 0.7
 
-    render_document = RenderDocument.from_ir_and_plans(
+    render_document = _render_source_bbox(
         _document([block]),
         [plan],
-        "zh-CN",
-        render_defaults=defaults,
+        defaults=defaults,
     )
     render_block = render_document.pages[0].blocks[0]
 
@@ -432,7 +586,7 @@ def test_overflow_creates_continuation_page_after_scaling_and_expansion() -> Non
         )
     )
 
-    render_document = RenderDocument.from_ir_and_plans(_document([block]), [plan], "zh-CN")
+    render_document = _render_source_bbox(_document([block]), [plan])
     html = render_to_html(render_document)
 
     assert len(render_document.pages) > 1
@@ -585,9 +739,7 @@ def test_render_document_diagnostics_reports_quality_flags() -> None:
         font_size=12,
     )
 
-    diagnostics = RenderDocument.from_ir_and_plans(
-        _document([block]), [], "zh-CN"
-    ).diagnostics()
+    diagnostics = _render_source_bbox(_document([block])).diagnostics()
 
     assert diagnostics["doc_id"] == "doc_1"
     assert diagnostics["page_count"] == 1
@@ -611,9 +763,7 @@ def test_render_to_html_preserves_image_assets_at_document_bbox() -> None:
         alt_text="Figure asset",
     )
 
-    html = render_to_html(
-        RenderDocument.from_ir_and_plans(_document([block], [asset]), [], "zh-CN")
-    )
+    html = render_to_html(_render_source_bbox(_document([block], [asset])))
 
     assert 'data-asset-id="asset_1"' in html
     assert 'src="/api/documents/doc_1/assets/asset_1.png"' in html
@@ -629,7 +779,7 @@ def test_missing_asset_path_is_diagnostic_not_silent() -> None:
         bbox=BoundingBox(x0=90, y0=80, x1=240, y1=140),
     )
 
-    render_document = RenderDocument.from_ir_and_plans(_document([], [asset]), [], "zh-CN")
+    render_document = _render_source_bbox(_document([], [asset]))
     diagnostics = render_document.diagnostics()
     html = render_to_html(render_document)
 
@@ -647,7 +797,7 @@ def test_vector_placeholder_asset_preserves_bbox_and_reports_missing_path() -> N
         alt_text="PDF vector drawing placeholder",
     )
 
-    render_document = RenderDocument.from_ir_and_plans(_document([], [asset]), [], "zh-CN")
+    render_document = _render_source_bbox(_document([], [asset]))
     html = render_to_html(render_document)
 
     assert 'data-asset-id="vector_1"' in html
@@ -680,9 +830,7 @@ def test_layout_issues_detect_overlap_and_outside_page() -> None:
         bbox=BoundingBox(x0=580, y0=760, x1=640, y1=820),
     )
 
-    diagnostics = RenderDocument.from_ir_and_plans(
-        _document([first, second], [asset]), [], "zh-CN"
-    ).diagnostics()
+    diagnostics = _render_source_bbox(_document([first, second], [asset])).diagnostics()
 
     issue_kinds = {issue["kind"] for issue in diagnostics["layout_issues"]}
     assert "overlap" in issue_kinds

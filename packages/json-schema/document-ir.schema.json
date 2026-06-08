@@ -51,6 +51,18 @@
           ],
           "default": null,
           "title": "Alt Text"
+        },
+        "formula_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formula Id"
         }
       },
       "required": [
@@ -156,6 +168,18 @@
         },
         "style_seed": {
           "$ref": "#/$defs/StyleSeed"
+        },
+        "formula_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formula Id"
         }
       },
       "required": [
@@ -199,6 +223,94 @@
       ],
       "title": "DocumentPage",
       "type": "object"
+    },
+    "FormulaIR": {
+      "additionalProperties": false,
+      "properties": {
+        "formula_id": {
+          "minLength": 1,
+          "title": "Formula Id",
+          "type": "string"
+        },
+        "page_id": {
+          "minLength": 1,
+          "title": "Page Id",
+          "type": "string"
+        },
+        "source_block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Block Id"
+        },
+        "asset_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Asset Id"
+        },
+        "latex": {
+          "default": "",
+          "title": "Latex",
+          "type": "string"
+        },
+        "display_mode": {
+          "default": "display",
+          "enum": [
+            "inline",
+            "display"
+          ],
+          "title": "Display Mode",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/FormulaSourceKind",
+          "default": "unknown"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "formula_id",
+        "page_id"
+      ],
+      "title": "FormulaIR",
+      "type": "object"
+    },
+    "FormulaSourceKind": {
+      "enum": [
+        "text_layer",
+        "vector_candidate",
+        "image_candidate",
+        "mock",
+        "unknown"
+      ],
+      "title": "FormulaSourceKind",
+      "type": "string"
     },
     "PageSize": {
       "additionalProperties": false,
@@ -275,6 +387,13 @@
       },
       "minItems": 1,
       "title": "Pages",
+      "type": "array"
+    },
+    "formulas": {
+      "items": {
+        "$ref": "#/$defs/FormulaIR"
+      },
+      "title": "Formulas",
       "type": "array"
     }
   },

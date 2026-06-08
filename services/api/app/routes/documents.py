@@ -38,6 +38,8 @@ JSON_ARTIFACTS = {
     "layout-intent-plan": ("layout-intent-plan.json", "layout-intent-plan"),
     "validation-and-repair": ("validation-and-repair.json", "validation-and-repair"),
     "asset-ir": ("asset-ir.json", "asset-ir"),
+    "formula-recognition": ("formula-recognition.json", "formula-recognition"),
+    "formula-diagnostics": ("formula-diagnostics.json", "formula-diagnostics"),
     "document-ir": ("document_ir", "document-ir"),
     "translation-chunks": ("translation-chunks.json", "translation-chunks"),
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
@@ -116,24 +118,12 @@ def _load_user_intent(doc_id: str) -> UserIntent | None:
         return None
 
 
-@router.get(
-    "/config",
-    response_model=RuntimeConfig,
-    response_model_exclude={
-        "render_defaults": {"layout_mode", "page_layout", "role_styles"}
-    },
-)
+@router.get("/config", response_model=RuntimeConfig)
 async def get_config() -> RuntimeConfig:
     return runtime_config_response(storage)
 
 
-@router.put(
-    "/config",
-    response_model=RuntimeConfig,
-    response_model_exclude={
-        "render_defaults": {"layout_mode", "page_layout", "role_styles"}
-    },
-)
+@router.put("/config", response_model=RuntimeConfig)
 async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
     current = effective_runtime_config(storage)
     updates = payload.model_dump(exclude_none=True)

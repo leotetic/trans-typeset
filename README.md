@@ -96,7 +96,7 @@ PDF export 会写入 `pdf-export-diagnostics.json`，记录 Playwright version�
 
 Parser 会从数字版 PDF 的 image block 提取栅格图片资产，写入 `DocumentIR.pages[].assets[]`，并保存到本地输出目录。Renderer 会按 `DocumentIR` 中的 asset bbox 在原页面位置保留图片；缺失 asset path 时输出 `asset_missing_path` 诊断和占位。
 
-Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本和公式文本会分别标记为 `table` 和 `formula`。Renderer 对 `table`、`formula`、`footnote` 有专用 CSS 规则，避免全部按正文段落处理。复杂表格、公式矢量图和矢量图形当前不会被完全重建；parser 会把较大的 vector drawing 作为 `figure` placeholder asset 保留其 bbox，并在 parser diagnostics 暴露 `table_text_fallback`、`formula_text_fallback`、`vector_asset_placeholder` 和 `vector_assets_not_rasterized` 等 flags。
+Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本会标记为 `table`。公式会进入独立 enrichment：系统识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、公式 asset 和 `{{formula:formula_id}}` preserve token；未配置模型密钥时 deterministic recognizer 会保留文本层公式，并把视觉候选标记为 mock。Renderer 用 KaTeX-compatible HTML/CSS 渲染 LaTeX，失败时回退原文本/占位并输出公式质量 flag。
 
 扫描版或 image-only PDF 会在 parser 阶段明确失败为 `unsupported_scanned_pdf`，并写入 `parser-diagnostics.json`，其中包含 `reason`、页数、文本块数、资产数和 `next_step`。当前 OCR 尚未实现；该 fallback 使前端能展示可恢复错误，而不是让任务在 chunking 阶段以模糊错误失败。
 

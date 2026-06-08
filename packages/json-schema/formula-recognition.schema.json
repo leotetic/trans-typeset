@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "latex": {
+      "title": "Latex",
+      "type": "string"
+    },
+    "display_mode": {
+      "default": "display",
+      "enum": [
+        "inline",
+        "display"
+      ],
+      "title": "Display Mode",
+      "type": "string"
+    },
+    "confidence": {
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    }
+  },
+  "required": [
+    "latex"
+  ],
+  "title": "FormulaRecognitionResult",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.1"
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pdf_renderer import RenderDocument, render_to_html
+from pdf_translator_schema.models import RenderDefaults
 
 from fixtures.visual_regression import build_visual_regression_fixture
 
@@ -26,6 +27,7 @@ def test_visual_regression_fixture_detects_layout_risks() -> None:
         fixture.document,
         fixture.plans,
         "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="source_bbox"),
     )
     diagnostics = render_document.diagnostics()
     html = render_to_html(render_document)

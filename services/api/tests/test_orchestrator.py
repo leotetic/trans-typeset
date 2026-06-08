@@ -213,6 +213,8 @@ def test_process_document_job_persists_chunk_progress_artifact(
 
     status = storage.load_status("job_1")
     progress = storage.read_output_json("doc_1", "translation-progress.json")
+    formula_recognition = storage.read_output_json("doc_1", "formula-recognition.json")
+    formula_diagnostics = storage.read_output_json("doc_1", "formula-diagnostics.json")
 
     assert status.status == JobState.COMPLETED
     assert [chunk.status for chunk in status.chunks] == ["completed", "completed"]
@@ -222,6 +224,119 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert captured["chunk_render_defaults"].font_stack == ["Configured Sans", "serif"]
     assert captured["renderer_render_defaults"].line_height == 1.58
     assert captured["renderer_render_defaults"].overflow_policy.min_font_scale == 0.77
+    assert formula_recognition == []
+    assert formula_diagnostics["kind"] == "formula_diagnostics"
+
+
+def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    render_defaults = RenderDefaults(
+        target_lang="zh-CN",
+        font_stack=[
+            "Noto Sans CJK SC",
+            "Source Han Sans SC",
+            "Arial Unicode MS",
+            "sans-serif",
+        ],
+    ).model_dump()
+    storage.write_runtime_config(
+        {
+            "translation_concurrency": 1,
+            "translator_max_attempts": 1,
+            "render_defaults": render_defaults,
+        }
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    )
+                ],
+            )
+        ],
+    )
+    chunks = [
+        TranslationChunk(
+            chunk_id="chunk_1",
+            source_blocks=[
+                SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Alpha")
+            ],
+        )
+    ]
+
+    class FakeTranslator:
+        async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+            return TranslationLayoutPlan(
+                chunk_id=chunk.chunk_id,
+                blocks=[
+                    TranslationBlockPlan(
+                        source_block_id="b1",
+                        translated_text="阿尔法",
+                        role=BlockRole.PARAGRAPH,
+                    )
+                ],
+            )
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    captured: dict[str, object] = {}
+
+    def fake_build_chunks(*_args, **kwargs):
+        captured["chunk_render_defaults"] = kwargs["render_defaults"]
+        return chunks
+
+    def fake_from_ir_and_plans(*_args, **kwargs):
+        captured["renderer_render_defaults"] = kwargs["render_defaults"]
+        return RenderDocument(doc_id="doc_1", target_lang="zh-CN", pages=[])
+
+    monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
+    monkeypatch.setattr(orchestrator, "build_chunks", fake_build_chunks)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
+    monkeypatch.setattr(orchestrator.RenderDocument, "from_ir_and_plans", fake_from_ir_and_plans)
+    monkeypatch.setattr(orchestrator, "render_to_html", lambda _document: "<html></html>")
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_1",
+            "doc_1",
+            "paper.pdf",
+            tmp_path / "paper.pdf",
+            "zh-CN",
+            coerce_user_intent(
+                "zh-CN",
+                output_kind="typeset_document",
+                instruction="按照 GB/T 7713.1 标准排版",
+            ),
+        )
+    )
+
+    assert captured["chunk_render_defaults"].layout_mode == "continuous_reflow"
+    assert captured["renderer_render_defaults"].layout_mode == "continuous_reflow"
+    assert captured["chunk_render_defaults"].font_stack == [
+        "Times New Roman",
+        "SimSun",
+        "Songti SC",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+        "serif",
+    ]
 
 
 def test_process_document_job_completes_with_unparseable_chunk_fallback_diagnostics(

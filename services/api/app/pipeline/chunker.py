@@ -14,6 +14,7 @@ from pdf_translator_schema import (
 
 TOKEN_PATTERN = re.compile(
     r"("
+    r"\{\{formula:[A-Za-z0-9_.:-]+\}\}|"
     r"\[[0-9,\-\s;]+\]|"
     r"\([A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\)|"
     r"\b[A-Z][A-Za-z'’\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'’\-]+|\s+et al\.?)?,?\s+\d{4}[a-z]?\b|"

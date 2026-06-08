@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from math import ceil
+from html import escape
 from typing import Any
 
 from pdf_translator_schema import (
@@ -94,6 +95,157 @@ def _enum_value(value: object) -> str:
     if hasattr(value, "value"):
         return str(value.value)
     return str(value)
+
+
+_FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
+
+
+def _formula_html_for_text(
+    text: str,
+    document: DocumentIR,
+    *,
+    role: BlockRole,
+) -> tuple[str | None, list[str]]:
+    if not _FORMULA_REF_PATTERN.search(text):
+        return None, []
+    formulas = document.formulas_by_id()
+    flags: list[str] = []
+    parts: list[str] = []
+    last_index = 0
+    for match in _FORMULA_REF_PATTERN.finditer(text):
+        parts.append(escape(text[last_index : match.start()]))
+        formula_id = match.group(1)
+        formula = formulas.get(formula_id)
+        if formula is None or not formula.latex.strip():
+            parts.append(escape(match.group(0)))
+            flags.append("formula_missing_latex")
+        elif not _latex_looks_renderable(formula.latex):
+            parts.append(escape(formula.latex or match.group(0)))
+            flags.append("formula_render_failed")
+        else:
+            display = formula.display_mode == "display" or role == BlockRole.FORMULA
+            parts.append(_katex_like_html(formula.latex, display=display))
+        last_index = match.end()
+    parts.append(escape(text[last_index:]))
+    return "".join(parts), _unique_flags(flags)
+
+
+def _katex_like_html(latex: str, *, display: bool) -> str:
+    class_name = "katex-display" if display else "katex"
+    visual_html = _latex_to_visual_html(latex)
+    return (
+        f'<span class="{class_name}" data-latex="{escape(latex, quote=True)}">'
+        f'<span class="katex-mathml"><math><semantics>'
+        f'<annotation encoding="application/x-tex">{escape(latex)}</annotation>'
+        f'</semantics></math></span>'
+        f'<span class="katex-html" aria-hidden="true">{visual_html}</span>'
+        f"</span>"
+    )
+
+
+_LATEX_SYMBOLS = {
+    "alpha": "α",
+    "beta": "β",
+    "gamma": "γ",
+    "delta": "δ",
+    "epsilon": "ε",
+    "theta": "θ",
+    "lambda": "λ",
+    "mu": "μ",
+    "pi": "π",
+    "sigma": "σ",
+    "phi": "φ",
+    "omega": "ω",
+    "sum": "∑",
+    "int": "∫",
+    "infty": "∞",
+    "le": "≤",
+    "ge": "≥",
+    "ne": "≠",
+    "approx": "≈",
+    "times": "×",
+    "cdot": "·",
+    "pm": "±",
+    "to": "→",
+    "left": "",
+    "right": "",
+}
+
+
+def _latex_to_visual_html(latex: str) -> str:
+    html, _ = _parse_latex(latex, 0, None)
+    return html
+
+
+def _parse_latex(text: str, index: int, stop: str | None) -> tuple[str, int]:
+    parts: list[str] = []
+    while index < len(text):
+        char = text[index]
+        if stop is not None and char == stop:
+            return "".join(parts), index + 1
+        if char == "\\":
+            command, index = _read_command(text, index + 1)
+            if command == "frac":
+                numerator, index = _read_latex_group(text, index)
+                denominator, index = _read_latex_group(text, index)
+                parts.append(
+                    '<span class="katex-frac">'
+                    f'<span class="katex-num">{numerator}</span>'
+                    f'<span class="katex-den">{denominator}</span>'
+                    "</span>"
+                )
+            elif command == "sqrt":
+                radicand, index = _read_latex_group(text, index)
+                parts.append(f'<span class="katex-sqrt">√<span>{radicand}</span></span>')
+            else:
+                parts.append(escape(_LATEX_SYMBOLS.get(command, f"\\{command}")))
+        elif char in {"^", "_"}:
+            script, index = _read_latex_group(text, index + 1)
+            tag = "sup" if char == "^" else "sub"
+            parts.append(f"<{tag}>{script}</{tag}>")
+        elif char == "{":
+            inner, index = _parse_latex(text, index + 1, "}")
+            parts.append(inner)
+        elif char == "}":
+            parts.append(escape(char))
+            index += 1
+        else:
+            parts.append(escape(char))
+            index += 1
+    return "".join(parts), index
+
+
+def _read_command(text: str, index: int) -> tuple[str, int]:
+    start = index
+    while index < len(text) and text[index].isalpha():
+        index += 1
+    if index == start and index < len(text):
+        return text[index], index + 1
+    return text[start:index], index
+
+
+def _read_latex_group(text: str, index: int) -> tuple[str, int]:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return "", index
+    if text[index] == "{":
+        return _parse_latex(text, index + 1, "}")
+    if text[index] == "\\":
+        command, next_index = _read_command(text, index + 1)
+        return escape(_LATEX_SYMBOLS.get(command, f"\\{command}")), next_index
+    return escape(text[index]), index + 1
+
+
+def _latex_looks_renderable(latex: str) -> bool:
+    stripped = latex.strip()
+    if not stripped:
+        return False
+    pairs = [("{", "}"), ("(", ")"), ("[", "]")]
+    for left, right in pairs:
+        if stripped.count(left) != stripped.count(right):
+            return False
+    return True
 
 
 def _text_overflows(
@@ -218,6 +370,7 @@ class RenderBlock:
     text: str
     style_seed: StyleSeed
     font_size_pt: float
+    html: str | None = None
     font_scale: float = 1.0
     render_intent: str = "normal"
     text_align: str | None = None
@@ -429,7 +582,6 @@ class RenderDocument:
             )
         min_font_scale = float(defaults.overflow_policy.min_font_scale)
         compact_font_scale = max(min_font_scale, 0.92)
-        line_height = defaults.line_height
         overflow_policy = defaults.overflow_policy
         translations = {
             block.source_block_id: block
@@ -470,18 +622,26 @@ class RenderDocument:
                         quality_flags.append("role_mismatch")
                 if layout_intent is not None:
                     quality_flags.extend(layout_intent.quality_flags)
+                html, formula_flags = _formula_html_for_text(
+                    text,
+                    document,
+                    role=block.role,
+                )
+                quality_flags.extend(formula_flags)
 
+                style = _style_for_role(defaults, block.role)
                 font_scale = 1.0
                 if render_intent == "compact":
                     font_scale = compact_font_scale
-                font_size_pt = block.style_seed.font_size * font_scale
+                font_size_pt = style.font_size_pt * font_scale
+                line_height = style.line_height
 
                 render_bbox = block.bbox
 
                 if _text_overflows(text, render_bbox, font_size_pt, line_height):
                     if font_scale > min_font_scale and overflow_policy.strategy != "continue_without_scaling":
                         font_scale = min_font_scale
-                        font_size_pt = block.style_seed.font_size * font_scale
+                        font_size_pt = style.font_size_pt * font_scale
                         quality_flags.append("font_scaled")
                     if _text_overflows(text, render_bbox, font_size_pt, line_height):
                         expanded_bbox = (
@@ -518,9 +678,13 @@ class RenderDocument:
                                         font_size_pt,
                                         font_scale,
                                         render_intent,
+                                        style.alignment,
+                                        700 if style.bold else 400,
+                                        "italic" if style.italic else "normal",
                                         line_height,
                                     )
                                 )
+                                html = None
                             else:
                                 quality_flags.append("overflow_clipped")
                         else:
@@ -535,7 +699,13 @@ class RenderDocument:
                         style_seed=block.style_seed,
                         font_size_pt=font_size_pt,
                         font_scale=font_scale,
+                        html=html,
                         render_intent=render_intent,
+                        text_align=style.alignment,
+                        font_weight=700 if style.bold else 400,
+                        font_style="italic" if style.italic else "normal",
+                        first_line_indent_em=style.first_line_indent_em,
+                        line_height=line_height,
                         quality_flags=_unique_flags(quality_flags),
                     )
                 )
@@ -755,6 +925,12 @@ def _from_ir_and_plans_continuous_reflow(
             flags.append("compact_reflow")
         if layout_intent is not None:
             flags.extend(layout_intent.quality_flags)
+        html, formula_flags = _formula_html_for_text(
+            text,
+            document,
+            role=block.role,
+        )
+        flags.extend(formula_flags)
 
         if block.role == BlockRole.REFERENCE and current_blocks:
             finish_page()
@@ -772,12 +948,16 @@ def _from_ir_and_plans_continuous_reflow(
         ):
             finish_page()
             first_fragment_height = content_bottom - cursor_y - style.space_before_pt
-        fragments = _split_reflow_text(
-            text,
-            content_width,
-            content_bottom - content_y0,
-            style,
-            first_max_height_pt=first_fragment_height if current_blocks else None,
+        fragments = (
+            [text]
+            if html is not None
+            else _split_reflow_text(
+                text,
+                content_width,
+                content_bottom - content_y0,
+                style,
+                first_max_height_pt=first_fragment_height if current_blocks else None,
+            )
         )
         fragment_count = len(fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
@@ -817,6 +997,7 @@ def _from_ir_and_plans_continuous_reflow(
                     font_scale=style.font_size_pt / block.style_seed.font_size
                     if block.style_seed.font_size
                     else 1.0,
+                    html=html if fragment_count == 1 else None,
                     render_intent=render_intent,
                     text_align=style.alignment,
                     font_weight=700 if style.bold else 400,
@@ -1183,6 +1364,9 @@ def _make_continuation_blocks(
     font_size_pt: float,
     font_scale: float,
     render_intent: str,
+    text_align: str,
+    font_weight: int,
+    font_style: str,
     line_height: float,
 ) -> list[RenderBlock]:
     bbox = _continuation_bbox(page_size)
@@ -1212,6 +1396,11 @@ def _make_continuation_blocks(
                 font_size_pt=font_size_pt,
                 font_scale=font_scale,
                 render_intent=render_intent,
+                text_align=text_align,
+                font_weight=font_weight,
+                font_style=font_style,
+                first_line_indent_em=0.0,
+                line_height=line_height,
                 quality_flags=flags,
             )
         )

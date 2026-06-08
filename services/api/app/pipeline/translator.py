@@ -40,7 +40,10 @@ class Translator:
 
 
 def _inline_item_for_token(token: str) -> InlineItem:
-    if re.fullmatch(r"\[[0-9,\-\s;]+\]", token):
+    formula_ref = re.fullmatch(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}", token)
+    if formula_ref:
+        kind = "formula"
+    elif re.fullmatch(r"\[[0-9,\-\s;]+\]", token):
         kind = "reference_marker"
     elif re.search(r"\b\d{4}[a-z]?\b", token) or token.startswith(
         ("Fig", "Figure", "Table", "Sec", "Section")
@@ -53,7 +56,12 @@ def _inline_item_for_token(token: str) -> InlineItem:
         kind = "formula"
     else:
         kind = "citation"
-    return InlineItem(kind=kind, text=token, source_token=token)
+    return InlineItem(
+        kind=kind,
+        text=token,
+        source_token=token,
+        asset_id=formula_ref.group(1) if formula_ref else None,
+    )
 
 
 class DeterministicTranslator(Translator):
@@ -456,7 +464,9 @@ class OpenAICompatibleTranslator(Translator):
         )
         return (
             "Translate the following academic paper chunk. Preserve citation, formula, "
-            "reference marker, figure, and table tokens. Cover every input block exactly once. "
+            "reference marker, figure, and table tokens. Formula refs such as "
+            "{{formula:formula_id}} are renderer-owned LaTeX placeholders: copy them exactly "
+            "and do not rewrite their LaTeX. Cover every input block exactly once. "
             "Use glossary entries consistently when they are provided in the chunk JSON. "
             "Use the chunk context for local continuity, but translate only the listed blocks. "
             "Return valid JSON object only.\n\n"

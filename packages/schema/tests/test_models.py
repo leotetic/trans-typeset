@@ -8,6 +8,8 @@ from pdf_translator_schema import (
     BoundingBox,
     DocumentIR,
     DocumentPage,
+    FormulaIR,
+    FormulaRecognitionResult,
     InputSource,
     PageSize,
     LayoutIntentBlock,
@@ -42,8 +44,15 @@ def test_render_defaults_are_available_on_chunk() -> None:
     )
 
     assert chunk.target_lang == "zh-CN"
-    assert chunk.render_defaults.font_stack[0] == "Noto Sans CJK SC"
-    assert chunk.render_defaults.layout_mode == "source_bbox"
+    assert chunk.render_defaults.font_stack == [
+        "Times New Roman",
+        "SimSun",
+        "Songti SC",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+        "serif",
+    ]
+    assert chunk.render_defaults.layout_mode == "continuous_reflow"
     assert chunk.render_defaults.page_layout.width_pt == 595.28
     assert chunk.render_defaults.page_layout.margin_top_pt == 70.87
     assert chunk.render_defaults.role_styles.paragraph.font_size_pt == 12.0
@@ -208,6 +217,94 @@ def test_document_rejects_duplicate_page_asset_and_reading_order_ids() -> None:
                         )
                     ],
                 ),
+            ],
+        )
+
+
+def test_document_can_reference_formula_ir_from_block_and_asset() -> None:
+    block = DocumentBlock(
+        block_id="b_formula",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        source_text="x = y + 1",
+        formula_id="formula_1",
+    )
+    asset = Asset(
+        asset_id="asset_formula",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        formula_id="formula_1",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[block],
+                assets=[asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="b_formula",
+                asset_id="asset_formula",
+                latex="x = y + 1",
+                display_mode="display",
+                source_kind="text_layer",
+                confidence=0.95,
+            )
+        ],
+    )
+
+    assert document.formulas_by_id()["formula_1"].latex == "x = y + 1"
+    assert document.pages[0].blocks[0].formula_id == "formula_1"
+    assert document.pages[0].assets[0].formula_id == "formula_1"
+
+
+def test_document_rejects_invalid_formula_refs() -> None:
+    block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        formula_id="missing_formula",
+    )
+
+    with pytest.raises(ValidationError):
+        DocumentIR(
+            doc_id="doc_1",
+            pages=[
+                DocumentPage(
+                    page_id="p1",
+                    size=PageSize(width=100, height=100),
+                    blocks=[block],
+                )
+            ],
+        )
+
+    with pytest.raises(ValidationError):
+        DocumentIR(
+            doc_id="doc_1",
+            pages=[
+                DocumentPage(
+                    page_id="p1",
+                    size=PageSize(width=100, height=100),
+                )
+            ],
+            formulas=[
+                FormulaIR(
+                    formula_id="formula_1",
+                    page_id="p1",
+                    source_block_id="missing_block",
+                    latex="x",
+                )
             ],
         )
 
@@ -396,6 +493,14 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
                 "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
             },
         ),
+        (
+            FormulaRecognitionResult,
+            {
+                "latex": "x = y + 1",
+                "display_mode": "display",
+                "page": 1,
+            },
+        ),
     ],
 )
 def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) -> None:
@@ -410,6 +515,7 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
         "document-ir.schema.json",
         "input-source.schema.json",
         "asset-ir.schema.json",
+        "formula-recognition.schema.json",
         "user-intent.schema.json",
         "workflow-run.schema.json",
         "layout-intent-plan.schema.json",

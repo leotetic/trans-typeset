@@ -315,7 +315,7 @@
         },
         "layout_mode": {
           "$ref": "#/$defs/LayoutMode",
-          "default": "source_bbox"
+          "default": "continuous_reflow"
         },
         "page_layout": {
           "$ref": "#/$defs/PageLayoutDefaults"

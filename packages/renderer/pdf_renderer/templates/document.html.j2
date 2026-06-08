@@ -89,48 +89,76 @@
         font-style: italic;
       }
 
-      .role-title {
-        line-height: 1.18;
-      }
-
-      .role-heading {
-        line-height: 1.22;
-      }
-
       .role-abstract,
       .role-paragraph {
         text-align: var(--text-align, justify);
       }
 
       .role-reference {
-        font-size: calc(var(--font-size-pt) * 0.94);
-        line-height: 1.25;
         overflow-wrap: break-word;
       }
 
       .role-table {
-        font-family: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
-        font-size: calc(var(--font-size-pt) * 0.92);
-        line-height: 1.22;
         white-space: pre-wrap;
-        overflow-wrap: normal;
       }
 
       .role-formula {
-        font-family: "Cambria Math", "STIX Two Math", "Times New Roman", serif;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
 
-      .role-footnote {
-        font-size: calc(var(--font-size-pt) * 0.86);
+      .katex,
+      .katex-display {
+        font-family: "KaTeX_Main", "Cambria Math", "STIX Two Math", "Times New Roman", serif;
+        font-size: 1em;
         line-height: 1.2;
-        color: #222222;
+        white-space: normal;
       }
 
-      .role-caption {
-        font-size: calc(var(--font-size-pt) * 0.92);
-        line-height: 1.25;
+      .katex-display {
+        display: block;
+        width: 100%;
+        text-align: center;
+      }
+
+      .katex-mathml {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(1px, 1px, 1px, 1px);
+      }
+
+      .katex-html {
+        white-space: pre-wrap;
+      }
+
+      .katex-frac {
+        display: inline-grid;
+        grid-template-rows: auto auto;
+        align-items: center;
+        justify-items: center;
+        vertical-align: middle;
+        margin: 0 0.12em;
+      }
+
+      .katex-num {
+        border-bottom: 0.08em solid currentColor;
+        padding: 0 0.16em 0.08em;
+      }
+
+      .katex-den {
+        padding: 0.08em 0.16em 0;
+      }
+
+      .katex-sqrt {
+        display: inline-flex;
+        gap: 0.04em;
+        align-items: baseline;
+      }
+
+      .role-footnote {
+        color: #222222;
       }
 
       .page-footer {
@@ -141,6 +169,7 @@
         text-align: center;
         font-size: 10.5pt;
         line-height: 1;
+        font-family: {{ document.font_stack | css_font_stack }};
         color: #111111;
       }
 
@@ -242,7 +271,7 @@
               --first-line-indent-em: {{ block.first_line_indent_em }}em;
               color: {{ block.style_seed.color }};
             "
-          >{{ block.text }}</div>
+          >{% if block.html %}{{ block.html | safe }}{% else %}{{ block.text }}{% endif %}</div>
         {% endfor %}
         {% if page.footer_text %}
           <div class="page-footer">{{ page.footer_text }}</div>

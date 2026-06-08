@@ -17,6 +17,7 @@ from pdf_translator_schema import (
     PageSize,
     RenderDefaults,
 )
+from app.pipeline.workflow import coerce_user_intent
 from pdf_translator_schema.models import DocumentBlock
 
 
@@ -183,7 +184,7 @@ def test_config_uses_persisted_provider_when_env_has_no_key(
     assert "persisted-secret" not in response.text
 
 
-def test_config_ignores_legacy_render_default_fields(tmp_path: Path, monkeypatch) -> None:
+def test_config_returns_complete_render_defaults(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     storage.write_runtime_config(
         {
@@ -210,9 +211,50 @@ def test_config_ignores_legacy_render_default_fields(tmp_path: Path, monkeypatch
     assert payload["render_defaults"]["target_lang"] == "zh-CN"
     assert payload["render_defaults"]["font_stack"] == ["Configured Sans", "serif"]
     assert payload["render_defaults"]["line_height"] == 1.42
-    assert "layout_mode" not in payload["render_defaults"]
-    assert "page_layout" not in payload["render_defaults"]
-    assert "role_styles" not in payload["render_defaults"]
+    assert payload["render_defaults"]["layout_mode"] == "source_bbox"
+    assert payload["render_defaults"]["page_layout"]["width_pt"] == 595.28
+    assert payload["render_defaults"]["role_styles"]["paragraph"]["font_size_pt"] == 12
+
+
+def test_gbt_intent_upgrades_legacy_sans_font_stack(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config(
+        {
+            "default_target_lang": "zh-CN",
+            "render_defaults": {
+                "target_lang": "zh-CN",
+                "font_stack": [
+                    "Noto Sans CJK SC",
+                    "Source Han Sans SC",
+                    "Arial Unicode MS",
+                    "sans-serif",
+                ],
+                "line_height": 1.35,
+            },
+        }
+    )
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    defaults = runtime_config.render_defaults_for_intent(
+        storage,
+        "zh-CN",
+        coerce_user_intent(
+            "zh-CN",
+            output_kind="typeset_document",
+            instruction="按照 GB/T 7713.1 标准排版",
+        ),
+    )
+
+    assert defaults.layout_mode == "continuous_reflow"
+    assert defaults.font_stack == [
+        "Times New Roman",
+        "SimSun",
+        "Songti SC",
+        "Noto Serif CJK SC",
+        "Source Han Serif SC",
+        "serif",
+    ]
 
 
 def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: Path, monkeypatch) -> None:
@@ -899,6 +941,16 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     )
     storage.write_json("doc_1", "layout-trace.json", {"kind": "layout_trace"})
     storage.write_json("doc_1", "parser-diagnostics.json", {"kind": "parser_diagnostics"})
+    storage.write_json(
+        "doc_1",
+        "formula-recognition.json",
+        [{"formula_id": "formula_1", "latex": "x = y"}],
+    )
+    storage.write_json(
+        "doc_1",
+        "formula-diagnostics.json",
+        {"kind": "formula_diagnostics"},
+    )
     client = TestClient(app)
 
     summary = client.get("/api/documents/doc_1/artifacts")
@@ -912,6 +964,8 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert artifacts["translation-chunks"]["available"] is True
     assert artifacts["translation-diagnostics"]["available"] is True
     assert artifacts["layout-trace"]["available"] is True
+    assert artifacts["formula-recognition"]["available"] is True
+    assert artifacts["formula-diagnostics"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False
     assert artifacts["parser-diagnostics"]["available"] is True
 
@@ -921,6 +975,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
         "/api/documents/doc_1/artifacts/translation-diagnostics"
     )
     parser_response = client.get("/api/documents/doc_1/artifacts/parser-diagnostics")
+    formula_response = client.get("/api/documents/doc_1/artifacts/formula-recognition")
+    formula_diagnostics_response = client.get(
+        "/api/documents/doc_1/artifacts/formula-diagnostics"
+    )
     trace_response = client.get("/api/documents/doc_1/artifacts/layout-trace")
 
     assert document_response.status_code == 200
@@ -933,6 +991,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     ]
     assert parser_response.status_code == 200
     assert parser_response.json() == {"kind": "parser_diagnostics"}
+    assert formula_response.status_code == 200
+    assert formula_response.json() == [{"formula_id": "formula_1", "latex": "x = y"}]
+    assert formula_diagnostics_response.status_code == 200
+    assert formula_diagnostics_response.json() == {"kind": "formula_diagnostics"}
     assert trace_response.status_code == 200
     assert trace_response.json() == {"kind": "layout_trace"}
 
