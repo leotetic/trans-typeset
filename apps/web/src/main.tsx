@@ -13,6 +13,7 @@ import {
   Loader2,
   Search,
   RefreshCw,
+  SlidersHorizontal,
   Settings2,
   Upload,
   X,
@@ -148,11 +149,7 @@ function App() {
     openai_model: "",
     openai_api_key: "",
     translation_concurrency: 2,
-    translator_max_attempts: 2,
-    render_font_stack: "Noto Sans CJK SC, Source Han Sans SC, Arial Unicode MS, sans-serif",
-    render_line_height: 1.35,
-    render_paragraph_spacing_em: 0.45,
-    render_min_font_scale: 0.86
+    translator_max_attempts: 2
   });
   const [configIssue, setConfigIssue] = useState<string | null>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -229,11 +226,7 @@ function App() {
         openai_model: config.openai_model,
         openai_api_key: "",
         translation_concurrency: config.translation_concurrency,
-        translator_max_attempts: config.translator_max_attempts,
-        render_font_stack: config.render_defaults.font_stack?.join(", ") ?? "",
-        render_line_height: config.render_defaults.line_height ?? 1.35,
-        render_paragraph_spacing_em: config.render_defaults.paragraph_spacing_em ?? 0.45,
-        render_min_font_scale: config.render_defaults.overflow_policy?.min_font_scale ?? 0.86
+        translator_max_attempts: config.translator_max_attempts
       });
       setConfigIssue(null);
       if (!config.allowed_target_langs.includes(targetLang)) {
@@ -607,13 +600,11 @@ function App() {
     setIsSavingConfig(true);
     try {
       const config = await updateRuntimeConfig({
-        default_target_lang: targetLang,
         openai_base_url: configDraft.openai_base_url,
         openai_model: configDraft.openai_model,
         openai_api_key: configDraft.openai_api_key || undefined,
         translation_concurrency: configDraft.translation_concurrency,
-        translator_max_attempts: configDraft.translator_max_attempts,
-        render_defaults: buildRenderDefaultsPayload(runtimeConfig, configDraft, targetLang)
+        translator_max_attempts: configDraft.translator_max_attempts
       });
       setRuntimeConfig(config);
       setConfigDraft((draft) => ({ ...draft, openai_api_key: "" }));
@@ -726,7 +717,7 @@ function App() {
           </header>
 
           <section className="tool-section" aria-labelledby="upload-heading">
-            <SectionTitle id="upload-heading" icon={<Upload size={16} />} title="上传" />
+            <SectionTitle id="upload-heading" icon={<Upload size={16} />} title="文献上传" />
             <div className="segmented" role="tablist" aria-label="Input mode">
               {inputModes.map((mode) => (
                 <button
@@ -850,6 +841,10 @@ function App() {
                 </button>
               ) : null}
             </div>
+          </section>
+
+          <section className="tool-section" aria-labelledby="typesetting-heading">
+            <SectionTitle id="typesetting-heading" icon={<SlidersHorizontal size={16} />} title="排版需求" />
             <label className="field">
               <span>
                 <Globe2 size={16} />
@@ -1256,10 +1251,6 @@ function RuntimeConfigCard({
     openai_api_key: string;
     translation_concurrency: number;
     translator_max_attempts: number;
-    render_font_stack: string;
-    render_line_height: number;
-    render_paragraph_spacing_em: number;
-    render_min_font_scale: number;
   };
   issue: string | null;
   isSaving: boolean;
@@ -1269,10 +1260,6 @@ function RuntimeConfigCard({
     openai_api_key: string;
     translation_concurrency: number;
     translator_max_attempts: number;
-    render_font_stack: string;
-    render_line_height: number;
-    render_paragraph_spacing_em: number;
-    render_min_font_scale: number;
   }>>;
   onSave: () => void;
 }) {
@@ -1286,7 +1273,7 @@ function RuntimeConfigCard({
           <strong>{issue ? issue : provider === "deterministic" ? "Deterministic 本地模式" : config?.openai_model}</strong>
           <small>
             {config
-              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · 尝试 ${config.translator_max_attempts} · 行高 ${config.render_defaults.line_height}`
+              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · 尝试 ${config.translator_max_attempts}`
               : "读取后端配置中"}
           </small>
         </div>
@@ -1350,65 +1337,6 @@ function RuntimeConfigCard({
               onDraftChange((current) => ({
                 ...current,
                 translator_max_attempts: clampInt(event.target.value, 1, 5)
-              }))
-            }
-          />
-        </label>
-      </div>
-      <label>
-        <span>字体栈</span>
-        <input
-          value={draft.render_font_stack}
-          onChange={(event) =>
-            onDraftChange((current) => ({ ...current, render_font_stack: event.target.value }))
-          }
-        />
-      </label>
-      <div className="config-numbers">
-        <label>
-          <span>行高</span>
-          <input
-            type="number"
-            min={1}
-            max={2}
-            step={0.05}
-            value={draft.render_line_height}
-            onChange={(event) =>
-              onDraftChange((current) => ({
-                ...current,
-                render_line_height: clampNumber(event.target.value, 1, 2)
-              }))
-            }
-          />
-        </label>
-        <label>
-          <span>段距</span>
-          <input
-            type="number"
-            min={0}
-            max={2}
-            step={0.05}
-            value={draft.render_paragraph_spacing_em}
-            onChange={(event) =>
-              onDraftChange((current) => ({
-                ...current,
-                render_paragraph_spacing_em: clampNumber(event.target.value, 0, 2)
-              }))
-            }
-          />
-        </label>
-        <label>
-          <span>最小缩放</span>
-          <input
-            type="number"
-            min={0.5}
-            max={1}
-            step={0.01}
-            value={draft.render_min_font_scale}
-            onChange={(event) =>
-              onDraftChange((current) => ({
-                ...current,
-                render_min_font_scale: clampNumber(event.target.value, 0.5, 1)
               }))
             }
           />
@@ -1753,44 +1681,6 @@ function clampNumber(value: string, min: number, max: number) {
     return min;
   }
   return Math.min(max, Math.max(min, Number(parsed.toFixed(2))));
-}
-
-function parseFontStack(value: string) {
-  const fonts = value
-    .split(",")
-    .map((font) => font.trim())
-    .filter(Boolean);
-  return fonts.length ? fonts : ["Noto Sans CJK SC", "Source Han Sans SC", "Arial Unicode MS", "sans-serif"];
-}
-
-function buildRenderDefaultsPayload(
-  config: RuntimeConfig | null,
-  draft: {
-    render_font_stack: string;
-    render_line_height: number;
-    render_paragraph_spacing_em: number;
-    render_min_font_scale: number;
-  },
-  targetLang: string
-) {
-  const current = config?.render_defaults;
-  return {
-    ...current,
-    target_lang: targetLang,
-    font_stack: parseFontStack(draft.render_font_stack),
-    line_height: draft.render_line_height,
-    paragraph_spacing_em: draft.render_paragraph_spacing_em,
-    alignment: current?.alignment,
-    overflow_policy: {
-      strategy: "scale_then_expand_then_continue" as const,
-      max_font_scale: 1,
-      allow_box_expansion: true,
-      allow_continuation_page: true,
-      ...current?.overflow_policy,
-      min_font_scale: draft.render_min_font_scale
-    },
-    preserve_policy: current?.preserve_policy
-  };
 }
 
 function apiMessage(reason: unknown, fallback: string) {

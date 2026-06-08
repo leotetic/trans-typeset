@@ -168,6 +168,38 @@ def test_config_uses_persisted_provider_when_env_has_no_key(
     assert "persisted-secret" not in response.text
 
 
+def test_config_ignores_legacy_render_default_fields(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config(
+        {
+            "default_target_lang": "zh-CN",
+            "render_defaults": {
+                "target_lang": "en-US",
+                "font_stack": ["Configured Sans", "serif"],
+                "line_height": 1.42,
+                "layout_mode": "source_bbox",
+                "page_layout": {"width_pt": 595.28, "height_pt": 841.89},
+                "role_styles": {"paragraph": {"font_size_pt": 12}},
+            },
+        }
+    )
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    monkeypatch.setattr(runtime_config, "settings", config)
+    client = TestClient(app)
+
+    response = client.get("/api/config")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["render_defaults"]["target_lang"] == "zh-CN"
+    assert payload["render_defaults"]["font_stack"] == ["Configured Sans", "serif"]
+    assert payload["render_defaults"]["line_height"] == 1.42
+    assert "layout_mode" not in payload["render_defaults"]
+    assert "page_layout" not in payload["render_defaults"]
+    assert "role_styles" not in payload["render_defaults"]
+
+
 def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     config = Settings(openai_api_key="", openai_api_key_from_env=False)

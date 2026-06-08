@@ -9,7 +9,11 @@ from .storage import Storage
 
 def _render_defaults_from_payload(payload: object, target_lang: str | None = None) -> RenderDefaults:
     if isinstance(payload, dict):
-        values = dict(payload)
+        values = {
+            key: value
+            for key, value in payload.items()
+            if key in RenderDefaults.model_fields
+        }
         if target_lang is not None:
             values["target_lang"] = target_lang
         return RenderDefaults.model_validate(values)

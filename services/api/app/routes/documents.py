@@ -114,12 +114,24 @@ def _load_user_intent(doc_id: str) -> UserIntent | None:
         return None
 
 
-@router.get("/config", response_model=RuntimeConfig)
+@router.get(
+    "/config",
+    response_model=RuntimeConfig,
+    response_model_exclude={
+        "render_defaults": {"layout_mode", "page_layout", "role_styles"}
+    },
+)
 async def get_config() -> RuntimeConfig:
     return runtime_config_response(storage)
 
 
-@router.put("/config", response_model=RuntimeConfig)
+@router.put(
+    "/config",
+    response_model=RuntimeConfig,
+    response_model_exclude={
+        "render_defaults": {"layout_mode", "page_layout", "role_styles"}
+    },
+)
 async def update_config(payload: UpdateRuntimeConfig) -> RuntimeConfig:
     current = effective_runtime_config(storage)
     updates = payload.model_dump(exclude_none=True)
