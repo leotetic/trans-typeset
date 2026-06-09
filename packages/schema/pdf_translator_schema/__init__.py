@@ -1,5 +1,4 @@
 from .defaults import DEFAULT_RENDER_DEFAULTS, DEFAULT_TARGET_LANG
-from .json_schema import all_schemas, export_schema, schema_for
 from .models import (
     Asset,
     AssetIR,
@@ -54,6 +53,25 @@ from .models import (
     WorkflowStepStatus,
 )
 from .validation import validate_layout_intent_plan, validate_layout_plan
+
+
+def schema_for(name: str):
+    from .json_schema import schema_for as _schema_for
+
+    return _schema_for(name)
+
+
+def all_schemas():
+    from .json_schema import all_schemas as _all_schemas
+
+    return _all_schemas()
+
+
+def export_schema(output_dir):
+    from .json_schema import export_schema as _export_schema
+
+    return _export_schema(output_dir)
+
 
 __all__ = [
     "Asset",
