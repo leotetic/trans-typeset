@@ -11,6 +11,7 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
     monkeypatch,
 ) -> None:
     storage = Storage(tmp_path)
+    storage.write_runtime_config({"translation_concurrency": 4})
     (storage.uploads / "doc_1.pdf").write_bytes(b"%PDF-1.7\n%%EOF")
     storage.save_status(
         JobStatus(
@@ -45,6 +46,7 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
         storage.uploads / "doc_1.pdf",
         "zh-CN",
     )
+    assert scheduled[0][2]["max_concurrency"] == 4
 
 
 def test_resume_incomplete_jobs_marks_missing_upload_failed(tmp_path: Path) -> None:

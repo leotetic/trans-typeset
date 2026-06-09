@@ -82,6 +82,10 @@ def ensure_target_lang(target_lang: str) -> None:
         )
 
 
+def _job_max_concurrency() -> int:
+    return max(1, int(effective_runtime_config(storage)["translation_concurrency"]))
+
+
 @router.get("/config", response_model=RuntimeConfig)
 async def get_config() -> RuntimeConfig:
     return runtime_config_response(storage)
@@ -139,7 +143,14 @@ async def create_document(
     )
     storage.save_status(status)
     schedule_job(
-        process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang, user_intent
+        process_document_job,
+        job_id,
+        doc_id,
+        file.filename,
+        pdf_path,
+        target_lang,
+        user_intent,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -178,6 +189,7 @@ async def create_text_workflow(
         text,
         target_lang,
         user_intent,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -221,6 +233,7 @@ async def create_image_workflow(
         target_lang,
         file.content_type,
         user_intent,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -235,6 +248,7 @@ async def create_documents_batch(
         raise HTTPException(status_code=400, detail="At least one PDF is required")
 
     jobs: list[CreateDocumentResponse] = []
+    job_max_concurrency = _job_max_concurrency()
     for file in files:
         await ensure_pdf_upload(file)
         doc_id = storage.new_doc_id()
@@ -251,7 +265,13 @@ async def create_documents_batch(
         )
         storage.save_status(status)
         schedule_job(
-            process_document_job, job_id, doc_id, file.filename, pdf_path, target_lang
+            process_document_job,
+            job_id,
+            doc_id,
+            file.filename,
+            pdf_path,
+            target_lang,
+            max_concurrency=job_max_concurrency,
         )
         jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
     return BatchCreateDocumentResponse(jobs=jobs)
@@ -324,6 +344,7 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         status.filename,
         pdf_path,
         target_lang,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
 

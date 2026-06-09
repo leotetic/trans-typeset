@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..jobs import schedule_job
 from ..models import JobState
+from ..runtime_config import effective_runtime_config
 from ..storage import Storage
 from .orchestrator import process_document_job
 
@@ -15,6 +16,10 @@ RESUMABLE_STATES = {
 
 async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
     resumed = 0
+    job_max_concurrency = max(
+        1,
+        int(effective_runtime_config(storage)["translation_concurrency"]),
+    )
     for status in storage.list_statuses(limit):
         if status.status not in RESUMABLE_STATES or not status.doc_id:
             continue
@@ -34,6 +39,7 @@ async def resume_incomplete_jobs(storage: Storage, limit: int = 100) -> int:
             status.filename,
             pdf_path,
             target_lang,
+            max_concurrency=job_max_concurrency,
         )
         resumed += 1
     return resumed
