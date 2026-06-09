@@ -70,6 +70,29 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 
 ## 调试 Artifact
 
+## JSON Schema 导出
+
+Python 包提供 JSON Schema helper，默认 CLI 导出目录是 `packages/json-schema`：
+
+```python
+from pathlib import Path
+
+from pdf_translator_schema import all_schemas, export_schema, schema_for
+
+layout_plan_schema = schema_for("translation-layout-plan")
+schemas = all_schemas()
+exported_paths = export_schema(Path("packages/json-schema"))
+```
+
+也可以直接运行：
+
+```bash
+.venv/bin/python -m pdf_translator_schema.json_schema
+```
+
+导出文件包含 v2 workflow contract、semantic/layout intent contract、`DocumentIR`、`TranslationChunk`
+和 `TranslationLayoutPlan` 等公开 schema，并统一带有 `$schema` 和 `x-schema-version` metadata。
+
 任务完成后，后端会保存并通过 debug endpoint 暴露以下 JSON artifact：
 
 - `normalized-input`: v2 adapter 归一化后的输入摘要，包含 `InputSource[]`、block/asset 数和质量 flags。

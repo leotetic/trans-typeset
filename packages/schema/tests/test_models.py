@@ -26,6 +26,8 @@ from pdf_translator_schema import (
     WorkflowRun,
     WorkflowStep,
     TypesettingStandard,
+    all_schemas,
+    schema_for,
     validate_layout_intent_plan,
     validate_layout_plan,
 )
@@ -414,6 +416,17 @@ def test_chunk_rejects_duplicate_source_block_ids() -> None:
         TranslationChunk(chunk_id="chunk_1", source_blocks=[block, block])
 
 
+@pytest.mark.parametrize("tokens", [[""], ["[1]", "[1]"]])
+def test_source_block_rejects_invalid_preserve_tokens(tokens: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        SourceBlock(
+            block_id="b1",
+            role=BlockRole.PARAGRAPH,
+            source_text="See [1].",
+            preserve_tokens=tokens,
+        )
+
+
 def test_layout_plan_requires_all_known_blocks() -> None:
     chunk = TranslationChunk(
         chunk_id="chunk_1",
@@ -617,9 +630,7 @@ def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) 
 
 
 def test_json_schema_export_includes_metadata(tmp_path) -> None:
-    export_schema(tmp_path)
-
-    for filename in (
+    expected_filenames = (
         "document-ir.schema.json",
         "input-source.schema.json",
         "asset-ir.schema.json",
@@ -631,7 +642,41 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
         "semantic-layout-analysis.schema.json",
         "translation-chunk.schema.json",
         "translation-layout-plan.schema.json",
-    ):
+    )
+
+    exported = export_schema(tmp_path)
+    assert tuple(exported) == expected_filenames
+
+    for filename in expected_filenames:
         schema_text = (tmp_path / filename).read_text(encoding="utf-8")
         assert '"$schema": "https://json-schema.org/draft/2020-12/schema"' in schema_text
         assert '"x-schema-version": "0.1"' in schema_text
+        assert exported[filename] == tmp_path / filename
+
+
+def test_json_schema_helpers_include_contract_models() -> None:
+    schemas = all_schemas()
+    layout_plan_schema = schema_for("translation-layout-plan")
+
+    assert layout_plan_schema["title"] == "TranslationLayoutPlan"
+    assert schemas["translation-layout-plan.schema.json"] == layout_plan_schema
+    assert sorted(schemas) == [
+        "asset-ir.schema.json",
+        "document-ir.schema.json",
+        "formula-recognition.schema.json",
+        "input-source.schema.json",
+        "layout-intent-plan.schema.json",
+        "ocr-recognition.schema.json",
+        "semantic-layout-analysis.schema.json",
+        "translation-chunk.schema.json",
+        "translation-layout-plan.schema.json",
+        "user-intent.schema.json",
+        "workflow-run.schema.json",
+    ]
+    assert layout_plan_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert layout_plan_schema["x-schema-version"] == "0.1"
+
+
+def test_json_schema_helper_rejects_unknown_schema() -> None:
+    with pytest.raises(ValueError, match="unknown schema"):
+        schema_for("missing")

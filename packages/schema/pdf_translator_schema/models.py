@@ -717,6 +717,18 @@ class SourceBlock(StrictBaseModel):
     preserve_tokens: list[str] = Field(default_factory=list)
     requires_translation: bool = True
 
+    @field_validator("preserve_tokens")
+    @classmethod
+    def validate_preserve_tokens(cls, tokens: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for token in tokens:
+            if not token:
+                raise ValueError("preserve_tokens entries must not be empty")
+            if token in seen:
+                raise ValueError(f"duplicate preserve_token: {token}")
+            seen.add(token)
+        return tokens
+
 
 class TranslationConstraints(StrictBaseModel):
     max_output_ratio: float = Field(default=1.8, gt=0)

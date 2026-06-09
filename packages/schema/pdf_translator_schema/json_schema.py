@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from .models import (
     AssetIR,
@@ -21,6 +22,20 @@ from .models import (
 SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_VERSION = "0.1"
 
+SCHEMA_MODELS = {
+    "document-ir": DocumentIR,
+    "input-source": InputSource,
+    "asset-ir": AssetIR,
+    "formula-recognition": FormulaRecognitionResult,
+    "ocr-recognition": OCRRecognitionResult,
+    "user-intent": UserIntent,
+    "workflow-run": WorkflowRun,
+    "layout-intent-plan": LayoutIntentPlan,
+    "semantic-layout-analysis": SemanticLayoutAnalysis,
+    "translation-chunk": TranslationChunk,
+    "translation-layout-plan": TranslationLayoutPlan,
+}
+
 
 def _with_metadata(schema: dict) -> dict:
     return {
@@ -30,36 +45,33 @@ def _with_metadata(schema: dict) -> dict:
     }
 
 
-def export_schema(output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    schemas = {
-        "document-ir.schema.json": _with_metadata(DocumentIR.model_json_schema()),
-        "input-source.schema.json": _with_metadata(InputSource.model_json_schema()),
-        "asset-ir.schema.json": _with_metadata(AssetIR.model_json_schema()),
-        "formula-recognition.schema.json": _with_metadata(
-            FormulaRecognitionResult.model_json_schema()
-        ),
-        "ocr-recognition.schema.json": _with_metadata(
-            OCRRecognitionResult.model_json_schema()
-        ),
-        "user-intent.schema.json": _with_metadata(UserIntent.model_json_schema()),
-        "workflow-run.schema.json": _with_metadata(WorkflowRun.model_json_schema()),
-        "layout-intent-plan.schema.json": _with_metadata(
-            LayoutIntentPlan.model_json_schema()
-        ),
-        "semantic-layout-analysis.schema.json": _with_metadata(
-            SemanticLayoutAnalysis.model_json_schema()
-        ),
-        "translation-chunk.schema.json": _with_metadata(TranslationChunk.model_json_schema()),
-        "translation-layout-plan.schema.json": _with_metadata(
-            TranslationLayoutPlan.model_json_schema()
-        ),
+def schema_for(name: str) -> dict[str, Any]:
+    try:
+        model = SCHEMA_MODELS[name]
+    except KeyError as exc:
+        available = ", ".join(sorted(SCHEMA_MODELS))
+        raise ValueError(f"unknown schema {name!r}; available schemas: {available}") from exc
+    return _with_metadata(model.model_json_schema())
+
+
+def all_schemas() -> dict[str, dict[str, Any]]:
+    return {
+        f"{name}.schema.json": schema_for(name)
+        for name in SCHEMA_MODELS
     }
-    for filename, schema in schemas.items():
-        (output_dir / filename).write_text(
+
+
+def export_schema(output_dir: Path) -> dict[str, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    exported: dict[str, Path] = {}
+    for filename, schema in all_schemas().items():
+        output_path = output_dir / filename
+        output_path.write_text(
             json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        exported[filename] = output_path
+    return exported
 
 
 if __name__ == "__main__":
