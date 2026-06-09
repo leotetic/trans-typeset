@@ -586,6 +586,38 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.session-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #b8d2c1;
+  background: #f5fbf7;
+  color: #2f7548;
+  padding: 8px;
+}
+
+.session-notice span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.session-notice button {
+  flex: 0 0 auto;
+  min-height: 26px;
+  border: 1px solid #a9cdb7;
+  background: #ffffff;
+  color: #2f7548;
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 720;
+}
+
 .history-list {
   display: grid;
   gap: 6px;

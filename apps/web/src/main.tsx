@@ -52,7 +52,15 @@ type PreviewState = "idle" | "loading" | "ready" | "error";
 type InspectorState = "idle" | "loading" | "ready" | "error";
 type InputMode = "text" | "image" | "pdf";
 
+type SavedTaskSnapshot = {
+  job: JobStatus;
+  docId: string | null;
+  targetLang: string;
+  savedAt: string;
+};
+
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const LAST_TASK_STORAGE_KEY = "trans-typesetting:last-task";
 
 const languageOptions = [
   { label: "简体中文", value: "zh-CN" },
@@ -92,6 +100,7 @@ const statuses: JobStatus["status"][] = [
   "rendering",
   "completed"
 ];
+const jobStatusValues = new Set<JobStatus["status"]>([...statuses, "failed", "canceled"]);
 
 type BaseUrlValidation = {
   error: string | null;
@@ -166,6 +175,7 @@ function App() {
   const [isSavingConfig, setIsSavingConfig] = useState(false);
   const [jobHistory, setJobHistory] = useState<JobStatus[]>([]);
   const [historyIssue, setHistoryIssue] = useState<string | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [isCanceling, setIsCanceling] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -281,6 +291,39 @@ function App() {
     }
     return nextJob;
   }, []);
+
+  function restoreJobSnapshot(nextJob: JobStatus) {
+    setJob(nextJob);
+    setDocId(nextJob.doc_id ?? null);
+    setTaskIssue(nextJob.error ?? null);
+    setPreviewIssue(null);
+    setPreviewState(nextJob.status === "completed" ? "loading" : "idle");
+  }
+
+  useEffect(() => {
+    const savedTask = readSavedTaskSnapshot();
+    if (!savedTask) {
+      return;
+    }
+
+    restoreJobSnapshot(savedTask.job);
+    setTargetLang(isKnownLanguage(savedTask.targetLang) ? savedTask.targetLang : "zh-CN");
+    setSessionNotice(`已恢复最近任务：${savedTask.job.filename}`);
+  }, []);
+
+  useEffect(() => {
+    if (!job) {
+      removeSavedTaskSnapshot();
+      return;
+    }
+
+    writeSavedTaskSnapshot({
+      job,
+      docId: activeDocId ?? null,
+      targetLang,
+      savedAt: new Date().toISOString()
+    });
+  }, [activeDocId, job, targetLang]);
 
   useEffect(() => {
     void checkHealth();
@@ -439,6 +482,16 @@ function App() {
     setLayoutPdfFile(null);
     setUploadIssue(null);
     resetFileInput();
+  }
+
+  function clearSavedTask() {
+    removeSavedTaskSnapshot();
+    setJob(null);
+    setDocId(null);
+    setTaskIssue(null);
+    setPreviewIssue(null);
+    setSessionNotice(null);
+    setPreviewState("idle");
   }
 
   function clearPdfSlot(slot: PdfSlot, options: { preserveIssue?: boolean } = {}) {
@@ -706,6 +759,7 @@ function App() {
     setIsUploading(true);
     setUploadIssue(null);
     setTaskIssue(null);
+    setSessionNotice(null);
     setJob(null);
     setDocId(null);
 
@@ -981,15 +1035,14 @@ function App() {
             <HistoryList
               jobs={jobHistory}
               issue={historyIssue}
+              sessionNotice={sessionNotice}
               activeJobId={job?.job_id ?? null}
               onRefresh={() => void refreshHistory()}
               onRestore={(historyJob) => {
-                setJob(historyJob);
-                setDocId(historyJob.doc_id ?? null);
-                setTaskIssue(historyJob.error ?? null);
-                setPreviewIssue(null);
-                setPreviewState(historyJob.status === "completed" ? "loading" : "idle");
+                restoreJobSnapshot(historyJob);
+                setSessionNotice(null);
               }}
+              onClearSavedTask={clearSavedTask}
             />
           </section>
 
@@ -1469,15 +1522,19 @@ function RuntimeConfigCard({
 function HistoryList({
   jobs,
   issue,
+  sessionNotice,
   activeJobId,
   onRefresh,
-  onRestore
+  onRestore,
+  onClearSavedTask
 }: {
   jobs: JobStatus[];
   issue: string | null;
+  sessionNotice: string | null;
   activeJobId: string | null;
   onRefresh: () => void;
   onRestore: (job: JobStatus) => void;
+  onClearSavedTask: () => void;
 }) {
   return (
     <div className="history-box">
@@ -1488,6 +1545,14 @@ function HistoryList({
         </button>
       </div>
       {issue ? <p className="history-issue">{issue}</p> : null}
+      {sessionNotice ? (
+        <div className="session-notice">
+          <span>{sessionNotice}</span>
+          <button type="button" onClick={onClearSavedTask}>
+            清除
+          </button>
+        </div>
+      ) : null}
       {jobs.length ? (
         <ul className="history-list">
           {jobs.slice(0, 5).map((historyJob) => (
@@ -1781,6 +1846,68 @@ function normalizeProgress(progress: number) {
     return 0;
   }
   return Math.min(1, Math.max(0, progress));
+}
+
+function isKnownLanguage(value: string) {
+  return languageOptions.some((option) => option.value === value);
+}
+
+function readSavedTaskSnapshot(): SavedTaskSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_TASK_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const payload = JSON.parse(raw) as Partial<SavedTaskSnapshot>;
+    if (
+      !payload ||
+      !isSavedJobStatus(payload.job) ||
+      typeof payload.targetLang !== "string" ||
+      typeof payload.savedAt !== "string"
+    ) {
+      return null;
+    }
+    return {
+      job: payload.job,
+      docId: typeof payload.docId === "string" || payload.docId === null ? payload.docId : null,
+      targetLang: payload.targetLang,
+      savedAt: payload.savedAt
+    };
+  } catch {
+    removeSavedTaskSnapshot();
+    return null;
+  }
+}
+
+function isSavedJobStatus(value: unknown): value is JobStatus {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const payload = value as Record<string, unknown>;
+  return (
+    typeof payload.job_id === "string" &&
+    typeof payload.filename === "string" &&
+    typeof payload.status === "string" &&
+    (jobStatusValues as Set<string>).has(payload.status) &&
+    typeof payload.progress === "number" &&
+    typeof payload.message === "string"
+  );
+}
+
+function writeSavedTaskSnapshot(snapshot: SavedTaskSnapshot) {
+  try {
+    window.localStorage.setItem(LAST_TASK_STORAGE_KEY, JSON.stringify(snapshot));
+  } catch {
+    // Local storage is a convenience only; failing to persist must not interrupt the workflow.
+  }
+}
+
+function removeSavedTaskSnapshot() {
+  try {
+    window.localStorage.removeItem(LAST_TASK_STORAGE_KEY);
+  } catch {
+    // Ignore storage cleanup failures for private browsing or quota-restricted environments.
+  }
 }
 
 function clampInt(value: string, min: number, max: number) {
