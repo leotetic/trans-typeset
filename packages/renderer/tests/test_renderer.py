@@ -340,6 +340,50 @@ def test_formula_block_renders_internal_latex_markup() -> None:
     assert "{{formula:formula_1}}" not in html
 
 
+def test_small_bbox_display_formula_expands_before_font_scaling() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=200, x1=420, y1=212),
+        source_text="{{formula:formula_1}}",
+        font_size=12,
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\frac{\partial V}{\partial t} = \nabla^2 V + \sum_i x_i",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    render_document = _render_source_bbox(document)
+    render_block = render_document.pages[0].blocks[0]
+    html = render_to_html(render_document)
+
+    assert render_block.bbox.y1 > formula.bbox.y1
+    assert render_block.font_scale == pytest.approx(1.0)
+    assert render_block.font_size_pt == pytest.approx(12.0)
+    assert "box_expanded" in render_block.quality_flags
+    assert "font_scaled" not in render_block.quality_flags
+    assert 'class="katex-display"' in html
+    assert "quality-box-expanded" in html
+    assert "--h-pt: 12.0pt" not in html
+
+
 def test_inline_formula_ref_renders_inside_paragraph() -> None:
     paragraph = _block(
         "p1_body",

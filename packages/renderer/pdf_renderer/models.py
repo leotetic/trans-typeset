@@ -33,6 +33,9 @@ _MIN_FINAL_FRAGMENT_CHARS = 12
 _MIN_FINAL_FRAGMENT_LINES = 2
 _LOW_UTILIZATION_THRESHOLD = 0.18
 _KATEX_UNAVAILABLE = "__katex_unavailable__"
+_LAYOUT_EPSILON_PT = 0.01
+_DISPLAY_FORMULA_MIN_LINES = 2.35
+_DISPLAY_FORMULA_VERTICAL_MARGIN_EM = 0.36
 _FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 
 
@@ -393,6 +396,96 @@ def _estimated_text_height(
     return estimated_lines * font_size_pt * line_height
 
 
+def _estimated_content_height(
+    text: str,
+    bbox: BoundingBox,
+    font_size_pt: float,
+    line_height: float,
+    document: DocumentIR,
+    block: DocumentBlock,
+) -> float:
+    estimated_height = _estimated_text_height(text, bbox, font_size_pt, line_height)
+    if not _contains_display_formula(text, document, block):
+        return estimated_height
+
+    estimation_text = _formula_estimation_text(text, document, block)
+    estimated_formula_lines = _estimated_line_count(
+        estimation_text,
+        _bbox_width(bbox),
+        font_size_pt,
+    )
+    display_lines = max(_DISPLAY_FORMULA_MIN_LINES, float(estimated_formula_lines))
+    display_height = (
+        display_lines * font_size_pt * max(line_height, 1.2)
+        + font_size_pt * _DISPLAY_FORMULA_VERTICAL_MARGIN_EM
+    )
+    return max(estimated_height, display_height)
+
+
+def _content_overflows(
+    text: str,
+    bbox: BoundingBox,
+    font_size_pt: float,
+    line_height: float,
+    document: DocumentIR,
+    block: DocumentBlock,
+) -> bool:
+    return (
+        _estimated_content_height(text, bbox, font_size_pt, line_height, document, block)
+        > _bbox_height(bbox) + _LAYOUT_EPSILON_PT
+    )
+
+
+def _contains_display_formula(
+    text: str,
+    document: DocumentIR,
+    block: DocumentBlock,
+) -> bool:
+    formulas_by_id = document.formulas_by_id()
+    for match in _FORMULA_REF_PATTERN.finditer(text):
+        formula = formulas_by_id.get(match.group(1))
+        if formula is None:
+            return block.role == BlockRole.FORMULA
+        if formula.display_mode == "display":
+            return True
+
+    legacy_formulas = {formula.placeholder: formula for formula in block.formulas}
+    for match in _FORMULA_PLACEHOLDER_PATTERN.finditer(text):
+        formula = legacy_formulas.get(match.group(0))
+        if formula is None:
+            return block.role == BlockRole.FORMULA
+        if formula.kind == "display":
+            return True
+
+    return False
+
+
+def _formula_estimation_text(
+    text: str,
+    document: DocumentIR,
+    block: DocumentBlock,
+) -> str:
+    formulas_by_id = document.formulas_by_id()
+
+    def replace_formula_ref(match: re.Match[str]) -> str:
+        formula = formulas_by_id.get(match.group(1))
+        if formula is None:
+            return match.group(0)
+        return formula.latex or formula.source_text or match.group(0)
+
+    estimated = _FORMULA_REF_PATTERN.sub(replace_formula_ref, text)
+
+    legacy_formulas = {formula.placeholder: formula for formula in block.formulas}
+
+    def replace_legacy_ref(match: re.Match[str]) -> str:
+        formula = legacy_formulas.get(match.group(0))
+        if formula is None:
+            return match.group(0)
+        return formula.latex or formula.source_text or match.group(0)
+
+    return _FORMULA_PLACEHOLDER_PATTERN.sub(replace_legacy_ref, estimated)
+
+
 def _line_capacity(bbox: BoundingBox, font_size_pt: float) -> int:
     if font_size_pt <= 0:
         return 1
@@ -475,13 +568,25 @@ def _expand_bbox_to_fit(
     page_size: PageSize,
     font_size_pt: float,
     line_height: float,
+    document: DocumentIR,
+    block: DocumentBlock,
 ) -> BoundingBox | None:
-    needed_height = _estimated_text_height(text, bbox, font_size_pt, line_height)
-    if needed_height <= _bbox_height(bbox):
+    needed_height = _estimated_content_height(
+        text,
+        bbox,
+        font_size_pt,
+        line_height,
+        document,
+        block,
+    )
+    if needed_height <= _bbox_height(bbox) + _LAYOUT_EPSILON_PT:
         return bbox
     page_bottom = max(bbox.y1, page_size.height - _CONTINUATION_MARGIN_PT)
     expanded_y1 = min(page_bottom, bbox.y0 + needed_height)
-    if expanded_y1 > bbox.y1 and expanded_y1 - bbox.y0 >= needed_height:
+    if (
+        expanded_y1 > bbox.y1 + _LAYOUT_EPSILON_PT
+        and expanded_y1 - bbox.y0 + _LAYOUT_EPSILON_PT >= needed_height
+    ):
         return BoundingBox(x0=bbox.x0, y0=bbox.y0, x1=bbox.x1, y1=expanded_y1)
     return None
 
@@ -779,12 +884,60 @@ class RenderDocument:
 
                 render_bbox = block.bbox
 
-                if _text_overflows(text, render_bbox, font_size_pt, line_height):
-                    if font_scale > min_font_scale and overflow_policy.strategy != "continue_without_scaling":
+                should_expand_before_scaling = _contains_display_formula(
+                    text,
+                    document,
+                    block,
+                )
+
+                if _content_overflows(
+                    text,
+                    render_bbox,
+                    font_size_pt,
+                    line_height,
+                    document,
+                    block,
+                ):
+                    if (
+                        should_expand_before_scaling
+                        and overflow_policy.allow_box_expansion
+                        and overflow_policy.strategy == "scale_then_expand_then_continue"
+                    ):
+                        expanded_bbox = _expand_bbox_to_fit(
+                            text,
+                            render_bbox,
+                            page.size,
+                            font_size_pt,
+                            line_height,
+                            document,
+                            block,
+                        )
+                        if expanded_bbox is not None:
+                            render_bbox = expanded_bbox
+                            quality_flags.append("box_expanded")
+                    if (
+                        _content_overflows(
+                            text,
+                            render_bbox,
+                            font_size_pt,
+                            line_height,
+                            document,
+                            block,
+                        )
+                        and font_scale > min_font_scale
+                        and overflow_policy.strategy != "continue_without_scaling"
+                    ):
                         font_scale = min_font_scale
                         font_size_pt = style.font_size_pt * font_scale
                         quality_flags.append("font_scaled")
-                    if _text_overflows(text, render_bbox, font_size_pt, line_height):
+                    if _content_overflows(
+                        text,
+                        render_bbox,
+                        font_size_pt,
+                        line_height,
+                        document,
+                        block,
+                    ):
                         expanded_bbox = (
                             _expand_bbox_to_fit(
                                 text,
@@ -792,6 +945,8 @@ class RenderDocument:
                                 page.size,
                                 font_size_pt,
                                 line_height,
+                                document,
+                                block,
                             )
                             if overflow_policy.allow_box_expansion
                             and overflow_policy.strategy == "scale_then_expand_then_continue"
@@ -800,7 +955,14 @@ class RenderDocument:
                         if expanded_bbox is not None:
                             render_bbox = expanded_bbox
                             quality_flags.append("box_expanded")
-                    if _text_overflows(text, render_bbox, font_size_pt, line_height):
+                    if _content_overflows(
+                        text,
+                        render_bbox,
+                        font_size_pt,
+                        line_height,
+                        document,
+                        block,
+                    ):
                         if overflow_policy.allow_continuation_page:
                             visible_text, overflow_text = _split_text_to_fit(
                                 text,
