@@ -122,6 +122,10 @@ def _load_user_intent(doc_id: str) -> UserIntent | None:
         return None
 
 
+def _job_max_concurrency() -> int:
+    return max(1, int(effective_runtime_config(storage)["translation_concurrency"]))
+
+
 @router.get("/config", response_model=RuntimeConfig)
 async def get_config() -> RuntimeConfig:
     return runtime_config_response(storage)
@@ -232,6 +236,7 @@ async def create_document(
         user_intent,
         layout_pdf_path,
         layout_file.filename if layout_file is not None else None,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -287,6 +292,7 @@ async def create_text_workflow(
         text,
         target_lang,
         user_intent,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -347,6 +353,7 @@ async def create_image_workflow(
         target_lang,
         file.content_type,
         user_intent,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -382,6 +389,7 @@ async def create_documents_batch(
     )
 
     jobs: list[CreateDocumentResponse] = []
+    job_max_concurrency = _job_max_concurrency()
     for file in files:
         await ensure_pdf_upload(file)
         doc_id = storage.new_doc_id()
@@ -410,6 +418,7 @@ async def create_documents_batch(
             pdf_path,
             target_lang,
             user_intent,
+            max_concurrency=job_max_concurrency,
         )
         jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
     return BatchCreateDocumentResponse(jobs=jobs)
@@ -486,6 +495,7 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         target_lang,
         user_intent,
         layout_pdf_path,
+        max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
 

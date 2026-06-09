@@ -11,6 +11,7 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
     monkeypatch,
 ) -> None:
     storage = Storage(tmp_path)
+    storage.write_runtime_config({"translation_concurrency": 4})
     (storage.uploads / "doc_1.pdf").write_bytes(b"%PDF-1.7\n%%EOF")
     storage.save_status(
         JobStatus(
@@ -47,6 +48,7 @@ def test_resume_incomplete_jobs_schedules_existing_upload(
     )
     assert scheduled[0][1][5] is None
     assert scheduled[0][1][6] is None
+    assert scheduled[0][2]["max_concurrency"] == 4
 
 
 def test_resume_incomplete_jobs_schedules_layout_upload(
@@ -54,6 +56,7 @@ def test_resume_incomplete_jobs_schedules_layout_upload(
     monkeypatch,
 ) -> None:
     storage = Storage(tmp_path)
+    storage.write_runtime_config({"translation_concurrency": 4})
     content_path = storage.uploads / "doc_1.content.pdf"
     layout_path = storage.uploads / "doc_1.layout.pdf"
     content_path.write_bytes(b"%PDF-1.7\n%%EOF")
@@ -85,6 +88,7 @@ def test_resume_incomplete_jobs_schedules_layout_upload(
     assert resumed == 1
     assert scheduled[0][1][3] == content_path
     assert scheduled[0][1][6] == layout_path
+    assert scheduled[0][2]["max_concurrency"] == 4
 
 
 def test_resume_incomplete_jobs_marks_missing_upload_failed(tmp_path: Path) -> None:

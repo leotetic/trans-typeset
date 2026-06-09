@@ -797,6 +797,7 @@ def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
 
 def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
+    storage.write_runtime_config({"translation_concurrency": 4})
     monkeypatch.setattr(documents_route, "storage", storage)
     scheduled: list[tuple] = []
 
@@ -826,6 +827,7 @@ def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> N
         documents_route.process_document_job,
         documents_route.process_document_job,
     ]
+    assert [item[2]["max_concurrency"] for item in scheduled] == [4, 4]
 
 
 def test_batch_upload_rejects_non_pdf(tmp_path: Path, monkeypatch) -> None:
