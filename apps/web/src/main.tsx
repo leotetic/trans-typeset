@@ -292,9 +292,9 @@ function App() {
     return nextJob;
   }, []);
 
-  function restoreJobSnapshot(nextJob: JobStatus) {
+  function restoreJobSnapshot(nextJob: JobStatus, fallbackDocId: string | null = null) {
     setJob(nextJob);
-    setDocId(nextJob.doc_id ?? null);
+    setDocId(nextJob.doc_id ?? fallbackDocId);
     setTaskIssue(nextJob.error ?? null);
     setPreviewIssue(null);
     setPreviewState(nextJob.status === "completed" ? "loading" : "idle");
@@ -306,14 +306,13 @@ function App() {
       return;
     }
 
-    restoreJobSnapshot(savedTask.job);
+    restoreJobSnapshot(savedTask.job, savedTask.docId);
     setTargetLang(isKnownLanguage(savedTask.targetLang) ? savedTask.targetLang : "zh-CN");
     setSessionNotice(`已恢复最近任务：${savedTask.job.filename}`);
   }, []);
 
   useEffect(() => {
     if (!job) {
-      removeSavedTaskSnapshot();
       return;
     }
 
@@ -762,6 +761,7 @@ function App() {
     setSessionNotice(null);
     setJob(null);
     setDocId(null);
+    removeSavedTaskSnapshot();
 
     try {
       if (!(await checkHealth())) {
