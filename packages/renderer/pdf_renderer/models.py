@@ -4,7 +4,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from math import ceil
-from html import escape
+from html import escape, unescape
 from functools import lru_cache
 from typing import Any
 
@@ -103,6 +103,9 @@ def _enum_value(value: object) -> str:
 
 
 _FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
+_UNRESOLVED_FORMULA_ID_ATTR_PATTERN = re.compile(
+    r'data-unresolved-formula-id="([^"]*)"'
+)
 
 
 def _formula_ir_html_for_text(
@@ -121,21 +124,23 @@ def _formula_ir_html_for_text(
         parts.append(escape(text[last_index : match.start()]))
         formula_id = match.group(1)
         formula = formulas.get(formula_id)
-        if formula is None or not formula.latex.strip():
-            parts.append(escape(match.group(0)))
-            flags.append("formula_missing_latex")
-        elif not _latex_looks_renderable(formula.latex):
-            fallback, fallback_flags = _formula_fallback_html(formula, document)
-            display = formula.display_mode == "display" or role == BlockRole.FORMULA
-            parts.append(_formula_ir_span(formula, fallback, display=display))
-            flags.extend(["formula_render_failed", *fallback_flags])
+        if formula is None:
+            parts.append(
+                _unresolved_formula_html(
+                    formula_id,
+                    display=role == BlockRole.FORMULA,
+                )
+            )
+            flags.append("unresolved_formula_placeholder")
         else:
             display = formula.display_mode == "display" or role == BlockRole.FORMULA
-            rendered = _katex_html(formula.latex, display=display)
+            rendered = None
+            if formula.latex.strip() and _latex_looks_renderable(formula.latex):
+                rendered = _katex_html(formula.latex, display=display)
             if rendered is None:
                 fallback, fallback_flags = _formula_fallback_html(formula, document)
                 parts.append(_formula_ir_span(formula, fallback, display=display))
-                flags.extend(["formula_render_failed", *fallback_flags])
+                flags.extend(fallback_flags)
             else:
                 parts.append(_formula_ir_span(formula, rendered, display=display))
         last_index = match.end()
@@ -153,6 +158,36 @@ def _formula_ir_span(formula: Any, inner_html: str, *, display: bool) -> str:
         f'data-display="{"true" if display else "false"}" '
         f'data-latex="{escape(latex, quote=True)}">'
         f"{inner_html}</span>"
+    )
+
+
+def _formula_plaintext_fallback_text(
+    *candidates: object,
+    formula_id: str = "",
+) -> str:
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if _FORMULA_PLACEHOLDER_PATTERN.fullmatch(text):
+            continue
+        if _FORMULA_REF_PATTERN.fullmatch(text):
+            continue
+        return text
+    return f"formula {formula_id}" if formula_id else "formula"
+
+
+def _formula_plaintext_fallback_html(text: str) -> str:
+    return f'<span class="formula-plaintext-fallback">{escape(text)}</span>'
+
+
+def _unresolved_formula_html(formula_id: str, *, display: bool) -> str:
+    css_kind = "display" if display else "inline"
+    fallback = _formula_plaintext_fallback_text(formula_id=formula_id)
+    return (
+        f'<span class="formula formula-{css_kind} formula-unresolved" '
+        f'data-unresolved-formula-id="{escape(formula_id, quote=True)}">'
+        f"{_formula_plaintext_fallback_html(fallback)}</span>"
     )
 
 
@@ -197,18 +232,26 @@ def _katex_render_to_string(latex: str, *, display: bool) -> str | None:
 
 def _formula_fallback_html(formula: Any, document: DocumentIR) -> tuple[str, list[str]]:
     latex = getattr(formula, "latex", "") or ""
+    formula_id = getattr(formula, "formula_id", "")
+    fallback_text = _formula_plaintext_fallback_text(
+        getattr(formula, "source_text", ""),
+        latex,
+        formula_id=formula_id,
+    )
     asset_id = getattr(formula, "asset_id", None)
     if asset_id:
         for page in document.pages:
             for asset in page.assets:
                 if asset.asset_id == asset_id and asset.path:
                     return (
-                        f'<span class="formula-image-fallback" data-formula-id="{escape(formula.formula_id, quote=True)}">'
-                        f'<img src="{escape(asset.path, quote=True)}" alt="{escape(latex, quote=True)}" />'
+                        f'<span class="formula-image-fallback" '
+                        f'data-fallback-formula-id="{escape(formula_id, quote=True)}">'
+                        f'<img src="{escape(asset.path, quote=True)}" '
+                        f'alt="{escape(fallback_text, quote=True)}" />'
                         f"</span>",
                         ["formula_image_fallback"],
                     )
-    return escape(latex), []
+    return _formula_plaintext_fallback_html(fallback_text), ["formula_plaintext_fallback"]
 
 
 def _katex_like_html(latex: str, *, display: bool) -> str:
@@ -578,6 +621,16 @@ class RenderDocument:
                             "page_id": page.page_id,
                             "block_id": block.block_id,
                             "placeholder": placeholder,
+                        }
+                    )
+                for formula_id in _UNRESOLVED_FORMULA_ID_ATTR_PATTERN.findall(block_html):
+                    formula_id = unescape(formula_id)
+                    unresolved_formula_placeholders.append(
+                        {
+                            "page_id": page.page_id,
+                            "block_id": block.block_id,
+                            "formula_id": formula_id,
+                            "placeholder": f"{{{{formula:{formula_id}}}}}",
                         }
                     )
                 for flag in block.quality_flags:
@@ -1199,8 +1252,6 @@ def _formula_placeholder_html_for_text(
     text: str,
     formulas: list[Formula],
 ) -> tuple[str, list[str]]:
-    if not formulas:
-        return escape(text), ["unresolved_formula_placeholder"]
     formulas_by_placeholder = {formula.placeholder: formula for formula in formulas}
     flags: list[str] = []
     parts: list[str] = []
@@ -1210,30 +1261,56 @@ def _formula_placeholder_html_for_text(
         placeholder = match.group(0)
         formula = formulas_by_placeholder.get(placeholder)
         if formula is None:
-            parts.append(escape(placeholder))
+            parts.append(
+                _unresolved_formula_html(
+                    _legacy_formula_id_from_placeholder(placeholder),
+                    display=False,
+                )
+            )
             flags.append("unresolved_formula_placeholder")
         else:
-            parts.append(_formula_span(formula))
+            html, formula_flags = _formula_span(formula)
+            parts.append(html)
             flags.append("formula_placeholder_resolved")
-            if not formula.latex.strip():
-                flags.append("formula_render_fallback")
+            flags.extend(formula_flags)
         cursor = match.end()
     parts.append(escape(text[cursor:]))
     return "".join(parts), _unique_flags(flags)
 
 
-def _formula_span(formula: Formula) -> str:
+def _formula_span(formula: Formula) -> tuple[str, list[str]]:
     display = "true" if formula.kind == "display" else "false"
     css_kind = "display" if formula.kind == "display" else "inline"
-    latex = formula.latex.strip() or formula.source_text
-    fallback = formula.source_text or formula.placeholder
-    return (
+    latex = formula.latex.strip() or formula.source_text.strip()
+    flags: list[str] = []
+    rendered = None
+    if latex and _latex_looks_renderable(latex):
+        rendered = _katex_html(latex, display=formula.kind == "display")
+    if rendered is None:
+        rendered = _formula_plaintext_fallback_html(
+            _formula_plaintext_fallback_text(
+                formula.source_text,
+                latex,
+                formula_id=formula.formula_id,
+            )
+        )
+        flags.append("formula_plaintext_fallback")
+    html = (
         f'<span class="formula formula-{css_kind}" '
         f'data-formula-id="{escape(formula.formula_id, quote=True)}" '
         f'data-display="{display}" '
         f'data-latex="{escape(latex, quote=True)}">'
-        f'{escape(fallback)}</span>'
+        f"{rendered}</span>"
     )
+    return html, flags
+
+
+def _legacy_formula_id_from_placeholder(placeholder: str) -> str:
+    prefix = "@@FORMULA_"
+    suffix = "@@"
+    if placeholder.startswith(prefix) and placeholder.endswith(suffix):
+        return placeholder[len(prefix) : -len(suffix)]
+    return placeholder
 
 
 def _style_for_role(defaults: RenderDefaults, role: BlockRole) -> RoleStyleDefaults:

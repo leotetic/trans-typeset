@@ -1,11 +1,20 @@
 import asyncio
+import os
+import re
 from pathlib import Path
+
+import pytest
 
 from app.config import Settings
 from app.models import JobState
 from app.pipeline import orchestrator
 from app import runtime_config
 from app.storage import Storage
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ROOT_TEST_PDF = REPO_ROOT / "test.pdf"
+RUN_ROOT_TEST_PDF_GATE_ENV = "RUN_ROOT_TEST_PDF_ACCEPTANCE_GATE"
 
 
 def _write_digital_pdf(path: Path) -> None:
@@ -35,6 +44,128 @@ def _write_digital_pdf(path: Path) -> None:
     )
     document.save(path)
     document.close()
+
+
+def _crop_pdf_pages(source_path: Path, output_path: Path, page_count: int) -> None:
+    import fitz
+
+    source = fitz.open(source_path)
+    try:
+        if source.page_count < page_count:
+            pytest.skip(
+                f"{source_path.name} has {source.page_count} pages; "
+                f"{page_count} pages are required for the acceptance gate"
+            )
+        cropped = fitz.open()
+        try:
+            cropped.insert_pdf(source, from_page=0, to_page=page_count - 1)
+            cropped.save(output_path)
+        finally:
+            cropped.close()
+    finally:
+        source.close()
+
+
+def _assert_no_preview_formula_failures(html: str) -> None:
+    forbidden_fragments = [
+        "@@FORMULA_",
+        "{{formula:",
+        "\ufffd",
+        "quality-formula-render-failed",
+        "quality-formula-missing-latex",
+        "quality-unresolved-formula-placeholder",
+        "color: red",
+        "color:red",
+        "#ff0000",
+        "rgb(255, 0, 0)",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in html
+    assert 'class="formula-render-failed' not in html
+    assert " formula-render-failed" not in html
+    assert re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", html) is None
+
+
+def test_root_test_pdf_first_four_pages_deterministic_acceptance_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.getenv(RUN_ROOT_TEST_PDF_GATE_ENV) != "1":
+        pytest.skip(
+            f"set {RUN_ROOT_TEST_PDF_GATE_ENV}=1 to run the root test.pdf "
+            "first-four-pages acceptance gate"
+        )
+    if not ROOT_TEST_PDF.exists():
+        pytest.skip(f"root acceptance fixture is missing: {ROOT_TEST_PDF}")
+
+    storage = Storage(tmp_path / "storage")
+    cropped_pdf = tmp_path / "test-pages-1-4.pdf"
+    _crop_pdf_pages(ROOT_TEST_PDF, cropped_pdf, page_count=4)
+
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    no_provider_config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", no_provider_config)
+    storage.write_runtime_config(
+        {
+            "openai_api_key": "",
+            "translation_concurrency": 2,
+            "translator_max_attempts": 2,
+            "agent_enable_vision_analysis": False,
+            "ocr_provider_order": ["deterministic"],
+        }
+    )
+
+    asyncio.run(
+        orchestrator.process_document_job(
+            "job_test_pdf_first_four_pages",
+            "doc_test_pdf_first_four_pages",
+            cropped_pdf.name,
+            cropped_pdf,
+            "zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_test_pdf_first_four_pages")
+    formula_diagnostics = storage.read_output_json(
+        "doc_test_pdf_first_four_pages",
+        "formula-diagnostics.json",
+    )
+    renderer_diagnostics = storage.read_output_json(
+        "doc_test_pdf_first_four_pages",
+        "renderer-diagnostics.json",
+    )
+    render_evaluation = storage.read_output_json(
+        "doc_test_pdf_first_four_pages",
+        "render-evaluation.json",
+    )
+    html = storage.preview_html_path("doc_test_pdf_first_four_pages").read_text(
+        encoding="utf-8"
+    )
+    translated_pdf = storage.output_pdf_path("doc_test_pdf_first_four_pages")
+
+    assert status.status == JobState.COMPLETED
+    assert formula_diagnostics.get("candidate_count", 0) > 0, formula_diagnostics
+    assert formula_diagnostics.get("latex_success_count", 0) > 0, formula_diagnostics
+    assert formula_diagnostics["unresolved_placeholders"] == []
+
+    renderer_quality_counts = renderer_diagnostics["quality_flag_counts"]
+    assert renderer_diagnostics["layout_issues"] == []
+    assert renderer_diagnostics["unresolved_formula_placeholders"] == []
+    assert renderer_diagnostics["formula_rendered_count"] > 0
+    for blocking_flag in (
+        "formula_render_failed",
+        "formula_missing_latex",
+        "missing_translation",
+    ):
+        assert renderer_quality_counts.get(blocking_flag, 0) == 0
+
+    assert render_evaluation["accepted"] is True
+    assert render_evaluation["blocking_flags"] == {}
+
+    _assert_no_preview_formula_failures(html)
+    assert translated_pdf.exists()
+    assert translated_pdf.stat().st_size > 0
 
 
 def test_local_pipeline_runs_digital_pdf_to_artifacts(

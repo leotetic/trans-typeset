@@ -57,7 +57,7 @@ VITE_DEV_PORT=5173
 VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 ```
 
-公式 OCR 默认走 deterministic 本地路径，以保证数字版论文翻译主流程不会被可选视觉 OCR 阻塞。需要试用 Pix2Text 时可显式设置 `OCR_PROVIDER_ORDER=pix2text,deterministic`；后端会对 Pix2Text 初始化和识别设置 timeout，失败后继续 deterministic fallback。
+公式识别默认走 deterministic 本地路径，以保证数字版论文翻译主流程不会被可选视觉 OCR 阻塞。系统会从文本层识别行内/行间公式，清理 PDF 常见控制字符和符号编码，保守切分自然语言边界，并把公式作为 preserve token 传给 translator。无法结构化渲染的公式会回退为低调的原文/图片 fallback，并写入非阻塞质量 flag；预览/PDF 不应出现裸 `@@FORMULA_...@@`、裸 `{{formula:...}}`、红色 raw LaTeX 错误文本或空公式框。需要试用 Pix2Text 时可显式设置 `OCR_PROVIDER_ORDER=pix2text,deterministic`；后端会对 Pix2Text 初始化和识别设置 timeout，失败后继续 deterministic fallback。
 
 ## Troubleshooting
 
@@ -133,13 +133,21 @@ npm run acceptance
 
 该验收包含一个本地生成的数字版 PDF 回归样例，覆盖真实 parser、chunker、deterministic translator、HTML renderer、任务状态和 artifact 持久化路径；测试中只替换 Playwright PDF export，以避免快速门禁依赖浏览器进程。
 
+如果仓库根目录存在 `test.pdf`，可额外运行 v3 公式验收门禁：
+
+```bash
+bash scripts/accept-test-pdf-first-four-pages.sh
+```
+
+该脚本会在临时目录裁剪 `test.pdf` 前四页，强制使用 deterministic translator/OCR 路径，跑完整 parse -> formula enrichment -> chunk -> translate -> render -> PDF export，并断言公式 diagnostics、renderer diagnostics、preview HTML 和 `translated.pdf` 都满足无阻塞失败条件。裁剪 PDF 和输出 artifact 不会提交。
+
 ## Known Limitations
 
 - PDF 解析依赖 PyMuPDF 的文本层；当前没有 OCR，扫描版 PDF 会明确失败并输出 `parser-diagnostics`，建议先使用 OCR 工具生成带文本层 PDF 后再上传。
 - 真实模型调用使用 OpenAI-compatible `/chat/completions`，并从响应内容提取 `TranslationLayoutPlan` JSON object；未配置 `OPENAI_API_KEY` 时只生成占位译文。
 - `TranslationLayoutPlan@0.1` 是 LLM 输出 contract；schema 会拒绝 `bbox`、`x`、`y`、`page` 等布局坐标字段。
 - PDF 导出依赖 Playwright Chromium；首次运行前需要执行 `.venv/bin/python -m playwright install chromium`。
-- Renderer 负责 HTML/CSS 分页和 PDF 导出；当前支持提取并保留栅格图片资产、保留表格/公式文本块、保留 vector drawing placeholder bbox 和输出 fallback diagnostics，但复杂表格重建、公式矢量图 rasterization 和高度保真多栏版式仍在后续增强范围。
+- Renderer 负责 HTML/CSS 分页和 PDF 导出；当前支持提取并保留栅格图片资产、保留表格/公式文本块、公式 plaintext/image fallback、保留 vector drawing placeholder bbox 和输出 fallback diagnostics，但复杂表格重建、公式矢量图 rasterization、任意复杂公式的完美 LaTeX 语义还原和高度保真多栏版式仍在后续增强范围。
 - 任务历史和配置目前来自本地 JSON 文件；它们适合单机本地工作台，不是多用户服务器数据库。
 
 并行 worktree 约定见 [docs/worktree.md](/Users/mac/app/trans-typeset/docs/worktree.md)。

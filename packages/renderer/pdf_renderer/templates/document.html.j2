@@ -135,8 +135,10 @@
         margin: 0.18em 0;
       }
 
-      .formula-render-failed {
+      .formula-plaintext-fallback {
         color: #111111;
+        overflow-wrap: anywhere;
+        white-space: normal;
       }
 
       .role-footnote {
@@ -331,17 +333,21 @@
         formulas.forEach((node) => {
           const latex = node.getAttribute("data-latex") || "";
           if (!latex || !window.katex) {
-            node.classList.add("formula-render-failed");
             return;
           }
           try {
-            window.katex.render(latex, node, {
+            const rendered = document.createElement("span");
+            const errorClass = "katex" + "-error";
+            window.katex.render(latex, rendered, {
               displayMode: node.getAttribute("data-display") === "true",
-              throwOnError: false,
+              throwOnError: true,
               strict: "ignore"
             });
+            if (rendered.textContent && !rendered.querySelector(`.${errorClass}`)) {
+              node.replaceChildren(...rendered.childNodes);
+            }
           } catch (_error) {
-            node.classList.add("formula-render-failed");
+            // Keep the renderer-provided plaintext or image fallback intact.
           }
         });
       })();

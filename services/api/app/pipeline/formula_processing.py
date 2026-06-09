@@ -7,40 +7,20 @@ from typing import Literal
 
 from pdf_translator_schema import BlockRole, DocumentIR, Formula
 from pdf_translator_schema.models import DocumentBlock
+from .formulas.normalization import (
+    GREEK_TO_LATEX,
+    SYMBOL_TO_LATEX,
+    contains_natural_language,
+    is_noise_text,
+    latex_from_pdf_text,
+    normalize_pdf_text,
+    truncate_raw_at_language_boundary,
+)
 
 FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 
-_GREEK_TO_LATEX = {
-    "α": r"\alpha",
-    "β": r"\beta",
-    "γ": r"\gamma",
-    "δ": r"\delta",
-    "ε": r"\epsilon",
-    "θ": r"\theta",
-    "λ": r"\lambda",
-    "μ": r"\mu",
-    "ν": r"\nu",
-    "ρ": r"\rho",
-    "σ": r"\sigma",
-    "τ": r"\tau",
-    "φ": r"\phi",
-    "ω": r"\omega",
-    "Ω": r"\Omega",
-    "Δ": r"\Delta",
-    "∇": r"\nabla",
-}
-
-_SYMBOL_TO_LATEX = {
-    "≤": r"\le",
-    "≥": r"\ge",
-    "∑": r"\sum",
-    "∫": r"\int",
-    "×": r"\times",
-    "÷": r"\div",
-    "·": r"\cdot",
-    "−": "-",
-    "¼": "=",
-}
+_GREEK_TO_LATEX = GREEK_TO_LATEX
+_SYMBOL_TO_LATEX = SYMBOL_TO_LATEX
 
 _INLINE_PATTERNS = [
     re.compile(
@@ -140,10 +120,13 @@ def formula_placeholders_for_block(block: DocumentBlock) -> list[str]:
 
 def is_formula_only_block(block: DocumentBlock) -> bool:
     text = (block.text_for_translation or block.source_text).strip()
-    return (
-        block.role == BlockRole.FORMULA
-        and bool(block.formulas)
-        and text in {formula.placeholder for formula in block.formulas}
+    return block.role == BlockRole.FORMULA and (
+        (
+            bool(block.formulas)
+            and text in {formula.placeholder for formula in block.formulas}
+        )
+        or bool(block.formula_id)
+        and re.fullmatch(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}", text) is not None
     )
 
 
@@ -196,8 +179,8 @@ def _normalize_block_formulas(block: DocumentBlock) -> DocumentBlock:
 
 
 def _detect_formula_matches(block: DocumentBlock) -> list[FormulaMatch]:
-    text = block.source_text.strip()
-    if not text:
+    text = normalize_pdf_text(block.source_text)
+    if not text or is_noise_text(text):
         return []
     if block.role == BlockRole.FORMULA or _looks_like_display_formula(text):
         return [FormulaMatch(0, len(block.source_text), text, "display")]
@@ -217,22 +200,32 @@ def _detect_formula_matches(block: DocumentBlock) -> list[FormulaMatch]:
 
 
 def _looks_like_display_formula(text: str) -> bool:
+    text = normalize_pdf_text(text)
+    if is_noise_text(text):
+        return False
     if len(text) > 260:
         return False
-    if re.search(r"\s(?:is|are|was|were|law|shown|solve|scaled)\s", f" {text.lower()} "):
+    if re.search(r"@\S+\.\S+|\b(?:doi|http|https|Fig|Figure|Table|Section|Sec)\b", text):
+        return False
+    if contains_natural_language(text):
         return False
     if re.search(r"[\u4e00-\u9fff]", text):
         return False
-    return _looks_like_formula(text) and _math_signal_count(text) >= 2
+    min_signals = 1 if len(text) <= 24 else 2
+    return _looks_like_formula(text) and _math_signal_count(text) >= min_signals
 
 
 def _looks_like_formula(text: str) -> bool:
-    stripped = text.strip()
+    stripped = normalize_pdf_text(text)
     if len(stripped) < 3:
         return False
-    if re.search(r"\b(?:doi|http|https|Fig|Figure|Table|Section|Sec)\b", stripped):
+    if is_noise_text(stripped):
+        return False
+    if re.search(r"@\S+\.\S+|\b(?:doi|http|https|Fig|Figure|Table|Section|Sec)\b", stripped):
         return False
     if re.fullmatch(r"\([A-Z][A-Za-z'’\-]+,?\s+\d{4}[a-z]?\)", stripped):
+        return False
+    if contains_natural_language(stripped) and _math_signal_count(stripped) < 2:
         return False
     return _math_signal_count(stripped) >= 1 and bool(
         re.search(r"[A-Za-zα-ωΑ-Ω@∇∫∑]", stripped)
@@ -240,22 +233,17 @@ def _looks_like_formula(text: str) -> bool:
 
 
 def _math_signal_count(text: str) -> int:
+    text = normalize_pdf_text(text)
     signals = 0
-    signals += len(re.findall(r"=|¼|≤|≥", text))
-    signals += len(re.findall(r"[∇∫∑]|\\[A-Za-z]+", text))
+    signals += len(re.findall(r"=|≤|≥", text))
+    signals += len(re.findall(r"[∂∇∫∑]|\\[A-Za-z]+", text))
     signals += len(re.findall(r"[@^_]", text))
     signals += len(re.findall(r"\[[A-Za-z0-9_]+\]", text))
     return signals
 
 
 def _trim_formula_candidate(text: str) -> str:
-    candidate = text.strip(" \t\n\r,;。；")
-    candidate = re.sub(r"\s+", " ", candidate)
-    sentence_mark = re.search(r"[。；;]\s*", candidate)
-    if sentence_mark:
-        candidate = candidate[: sentence_mark.start()].strip()
-    if candidate.endswith(".") and not re.search(r"\d\.$", candidate):
-        candidate = candidate[:-1].rstrip()
+    candidate, _truncated = truncate_raw_at_language_boundary(text)
     return candidate
 
 
@@ -265,15 +253,8 @@ def _formula_id(block_id: str, text: str, index: int) -> str:
 
 
 def _text_to_latex(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", text.strip())
-    if not normalized:
-        return ""
-    for symbol, replacement in {**_GREEK_TO_LATEX, **_SYMBOL_TO_LATEX}.items():
-        normalized = normalized.replace(symbol, f" {replacement} ")
-    normalized = re.sub(r"@([A-Za-z][A-Za-z0-9_]*)", r"\\partial \1", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    normalized = normalized.replace(" - ", " - ")
-    return normalized
+    latex, _flags = latex_from_pdf_text(text)
+    return latex
 
 
 def _formula_flag_counts(formulas: list[Formula]) -> dict[str, int]:

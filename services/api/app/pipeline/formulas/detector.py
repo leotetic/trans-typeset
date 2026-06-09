@@ -7,10 +7,12 @@ from dataclasses import dataclass
 from pdf_translator_schema import Asset, BlockRole, BoundingBox, DocumentIR
 from pdf_translator_schema.models import DocumentBlock, FormulaDisplayMode, FormulaSourceKind, TextSpanIR
 
+from .normalization import contains_natural_language, is_noise_text, normalize_pdf_text
+
 
 _FORMULA_REF_PATTERN = re.compile(r"^\{\{formula:[A-Za-z0-9_.:-]+\}\}$")
 _MATH_SIGNAL_PATTERN = re.compile(
-    r"(?:[=≤≥∑∫√∞≈≠]|\\(?:frac|sum|int|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma)|"
+    r"(?:[=≤≥∑∫√∞≈≠∂∇]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma)|"
     r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*[A-Za-z0-9α-ωΑ-Ω])"
 )
 
@@ -131,15 +133,42 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
 
 
 def _looks_like_formula_text(text: str) -> bool:
-    stripped = re.sub(r"\s+", " ", text.strip())
+    if is_noise_text(text):
+        return False
+    stripped = normalize_pdf_text(text)
     if len(stripped) < 3 or len(stripped) > 260:
+        return False
+    if re.search(r"@\S+\.\S+|\b(?:doi|https?|fig|figure|table)\b", stripped, re.IGNORECASE):
         return False
     if not _MATH_SIGNAL_PATTERN.search(stripped):
         return False
+    if contains_natural_language(stripped):
+        if len(stripped) > 40 or re.search(r"[,.;]\s+[A-Za-z]{3,}", stripped):
+            return False
     alpha_words = re.findall(r"[A-Za-z]{3,}", stripped)
-    if any(word.lower() in {"where", "holds", "with", "when", "and", "for"} for word in alpha_words):
+    if any(
+        word.lower()
+        in {
+            "where",
+            "holds",
+            "with",
+            "when",
+            "and",
+            "for",
+            "defined",
+            "ratio",
+            "pressure",
+            "electron",
+            "equation",
+            "notably",
+        }
+        for word in alpha_words
+    ):
         return False
-    return len(alpha_words) <= 12
+    signal_count = len(_MATH_SIGNAL_PATTERN.findall(stripped))
+    if len(alpha_words) > 4 and signal_count < 2:
+        return False
+    return len(alpha_words) <= 8
 
 
 def _asset_formula_source_kind(asset: Asset, *, page_height: float | None = None) -> FormulaSourceKind | None:
@@ -363,8 +392,14 @@ def _span_run_looks_formula(spans: list[TextSpanIR]) -> bool:
 
 
 def _looks_like_inline_formula_text(text: str) -> bool:
-    stripped = re.sub(r"\s+", " ", text.strip())
-    if len(stripped) < 2 or len(stripped) > 120:
+    if is_noise_text(text):
+        return False
+    stripped = normalize_pdf_text(text)
+    if len(stripped) < 2 or len(stripped) > 48:
+        return False
+    if re.search(r"@\S+\.\S+|\b(?:doi|https?)\b", stripped, re.IGNORECASE):
+        return False
+    if contains_natural_language(stripped):
         return False
     if re.fullmatch(r"[A-Za-z]{2,}", stripped):
         return False

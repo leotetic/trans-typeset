@@ -17,6 +17,11 @@ from pdf_translator_schema import (
 from pdf_translator_schema.models import DocumentBlock, TextLineIR, TextSpanIR
 
 from .formula_processing import build_formula_diagnostics, normalize_document_formulas
+from .formulas.normalization import (
+    is_noise_text,
+    normalize_pdf_text,
+    normalize_pdf_text_fragment,
+)
 
 HEADER_FOOTER_BAND_RATIO = 0.08
 MIN_TEXT_BLOCKS_FOR_DIGITAL_PDF = 1
@@ -115,7 +120,7 @@ def _block_text(block: dict) -> str:
         line_text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
         if line_text.strip():
             parts.append(line_text.strip())
-    return re.sub(r"\s+", " ", " ".join(parts)).strip()
+    return normalize_pdf_text(" ".join(parts))
 
 
 def _header_footer_keys(page_dicts: list[dict]) -> set[str]:
@@ -449,7 +454,7 @@ def parse_pdf(
             for line_index, line in enumerate(block.get("lines", [])):
                 line_text = ""
                 for span_index, span in enumerate(line.get("spans", [])):
-                    text = span.get("text", "")
+                    text = normalize_pdf_text_fragment(str(span.get("text", "")))
                     line_text += text
                     size = span.get("size")
                     if isinstance(size, (int, float)):
@@ -466,8 +471,8 @@ def parse_pdf(
                 if line_text.strip():
                     text_parts.append(line_text.strip())
 
-            source_text = " ".join(text_parts).strip()
-            if not source_text:
+            source_text = normalize_pdf_text(" ".join(text_parts))
+            if not source_text or is_noise_text(source_text):
                 continue
 
             bbox = block["bbox"]
@@ -481,7 +486,9 @@ def parse_pdf(
                 line_span_ids: list[str] = []
                 line_bboxes: list[tuple[float, float, float, float]] = []
                 for span_index, span in enumerate(line.get("spans", [])):
-                    text = str(span.get("text", ""))
+                    text = normalize_pdf_text_fragment(str(span.get("text", "")))
+                    if not text:
+                        continue
                     span_bbox_tuple = _coerce_bbox_tuple(span.get("bbox"))
                     if not _valid_bbox_tuple(span_bbox_tuple):
                         continue
@@ -545,6 +552,8 @@ def parse_pdf(
                     reading_order=len(page_blocks),
                     source_text=source_text,
                     span_refs=span_refs,
+                    lines=lines,
+                    spans=spans,
                     style_seed=StyleSeed(
                         font_size=avg_font_size,
                         font_name=font_names[0] if font_names else None,

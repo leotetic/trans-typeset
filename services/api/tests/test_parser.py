@@ -11,6 +11,7 @@ from app.pipeline.parser import (
     _stable_block_id,
     classify_role,
 )
+from app.pipeline.formulas.normalization import normalize_pdf_text
 from app.pipeline.formula_processing import build_formula_diagnostics, normalize_document_formulas
 from pdf_translator_schema import (
     Asset,
@@ -281,6 +282,44 @@ def test_formula_normalization_detects_inline_and_display_formulas() -> None:
     assert diagnostics["formula_count"] == 2
     assert diagnostics["inline_count"] == 1
     assert diagnostics["display_count"] == 1
+
+
+def test_pdf_text_normalization_removes_control_glyphs() -> None:
+    assert normalize_pdf_text("E \x01 B and cm\x032 with a ¼ b þ c") == "E × B and cm-2 with a = b + c"
+
+
+def test_noise_text_blocks_are_not_normalized_as_translatable_formulas() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="noise",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=20, x1=60, y1=30),
+                        reading_order=0,
+                        source_text="\x01 \x03",
+                    ),
+                    DocumentBlock(
+                        block_id="fragment",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=40, x1=60, y1=50),
+                        reading_order=1,
+                        source_text="vn",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+
+    assert all(not block.formulas for block in normalized.pages[0].blocks)
 
 
 def test_unsupported_pdf_error_carries_scanned_pdf_diagnostics() -> None:

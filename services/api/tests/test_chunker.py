@@ -1,5 +1,12 @@
 from app.pipeline.chunker import build_chunks, extract_preserve_tokens
-from pdf_translator_schema import BlockRole, BoundingBox, DocumentIR, DocumentPage, PageSize
+from pdf_translator_schema import (
+    BlockRole,
+    BoundingBox,
+    DocumentIR,
+    DocumentPage,
+    FormulaIR,
+    PageSize,
+)
 from pdf_translator_schema.models import DocumentBlock, Formula, RenderDefaults
 
 
@@ -19,7 +26,7 @@ def make_block(
     )
 
 
-def make_document(blocks: list[DocumentBlock]) -> DocumentIR:
+def make_document(blocks: list[DocumentBlock], formulas: list[FormulaIR] | None = None) -> DocumentIR:
     return DocumentIR(
         doc_id="doc_1",
         pages=[
@@ -29,6 +36,7 @@ def make_document(blocks: list[DocumentBlock]) -> DocumentIR:
                 blocks=blocks,
             )
         ],
+        formulas=formulas or [],
     )
 
 
@@ -192,3 +200,27 @@ def test_build_chunks_marks_formula_only_blocks_as_not_translatable() -> None:
 
     assert chunks[0].source_blocks[0].source_text == placeholder
     assert chunks[0].source_blocks[0].requires_translation is False
+
+
+def test_build_chunks_marks_document_ir_formula_refs_as_not_translatable() -> None:
+    token = "{{formula:p0001_formula_abc123}}"
+    block = make_block(
+        "p1_formula",
+        token,
+        role=BlockRole.FORMULA,
+    ).model_copy(update={"formula_id": "p0001_formula_abc123"}, deep=True)
+    formula = FormulaIR(
+        formula_id="p0001_formula_abc123",
+        page_id="p1",
+        source_block_id="p1_formula",
+        latex="E = mc^2",
+        source_text="E = mc^2",
+        display_mode="display",
+    )
+
+    chunks = build_chunks(make_document([block], formulas=[formula]), target_lang="zh-CN")
+
+    source = chunks[0].source_blocks[0]
+    assert source.source_text == token
+    assert source.preserve_tokens == [token]
+    assert source.requires_translation is False

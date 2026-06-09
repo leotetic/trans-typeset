@@ -234,7 +234,7 @@ def _ensure_formula_candidate_assets(
             if candidate.image_path:
                 updated.append(candidate)
                 continue
-            if candidate.display_mode == "inline" and not candidate.span_ids:
+            if candidate.display_mode == "inline":
                 updated.append(candidate)
                 continue
             page_index = page_indexes.get(candidate.page_id)

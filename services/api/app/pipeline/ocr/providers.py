@@ -7,6 +7,7 @@ from typing import Protocol
 from pdf_translator_schema.models import OCRRecognitionResult
 
 from ..formulas.detector import FormulaCandidate
+from ..formulas.normalization import latex_from_pdf_text
 from ..formulas.recognizer import OpenAIFormulaRecognizer
 
 
@@ -154,8 +155,19 @@ class DeterministicOCRProvider:
         image_path: Path | None = None,
     ) -> OCRRecognitionResult:
         flags: list[str] = []
-        latex = candidate.source_text.strip()
+        latex, normalization_flags = latex_from_pdf_text(candidate.source_text)
+        flags.extend(normalization_flags)
         confidence = 0.96 if latex else 0.0
+        if any(
+            flag in normalization_flags
+            for flag in {
+                "formula_delimiter_repaired",
+                "formula_low_confidence",
+                "formula_text_truncated",
+            }
+        ):
+            confidence = min(confidence, 0.58)
+            flags.append("formula_low_confidence")
         if candidate.source_kind.value in {"image_candidate", "vector_candidate"}:
             flags.extend(
                 [

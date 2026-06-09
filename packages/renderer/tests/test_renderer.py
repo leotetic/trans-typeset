@@ -400,16 +400,134 @@ def test_invalid_formula_latex_falls_back_with_quality_flag() -> None:
                 page_id="p1",
                 source_block_id="p1_formula",
                 latex=r"\frac{x",
+                source_text="x / ?",
                 display_mode="display",
                 source_kind="text_layer",
             )
         ],
     )
 
-    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+    render_document = RenderDocument.from_ir_and_plans(document, [], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
 
-    assert "quality-formula-render-failed" in html
-    assert r"\frac{x" in html
+    assert "quality-formula-plaintext-fallback" in html
+    assert '<span class="formula-plaintext-fallback">x / ?</span>' in html
+    assert diagnostics["quality_flag_counts"]["formula_plaintext_fallback"] == 1
+    assert "quality-formula-render-failed" not in html
+    assert "formula-render-failed" not in html
+    assert "katex-error" not in block_html
+    assert "{{formula:formula_bad}}" not in html
+
+
+def test_missing_formula_ref_does_not_render_raw_placeholder() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Missing {{formula:formula_missing}} should be diagnostic.",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+    )
+
+    render_document = _render_source_bbox(document)
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "{{formula:formula_missing}}" not in html
+    assert 'data-unresolved-formula-id="formula_missing"' in html
+    assert '<span class="formula-plaintext-fallback">formula formula_missing</span>' in html
+    assert diagnostics["quality_flag_counts"]["unresolved_formula_placeholder"] == 1
+    assert diagnostics["unresolved_formula_placeholders"] == [
+        {
+            "page_id": "p1",
+            "block_id": "p1_body",
+            "formula_id": "formula_missing",
+            "placeholder": "{{formula:formula_missing}}",
+        }
+    ]
+
+
+def test_unresolved_legacy_formula_placeholder_does_not_leak_raw_token() -> None:
+    placeholder = "@@FORMULA_Fmissing@@"
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text=f"We solve {placeholder}.",
+    ).model_copy(
+        update={"text_for_translation": f"We solve {placeholder}."},
+        deep=True,
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_b1",
+            translated_text=f"我们求解 {placeholder}。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(_document([block]), [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "@@FORMULA_" not in html
+    assert 'data-unresolved-formula-id="Fmissing"' in html
+    assert '<span class="formula-plaintext-fallback">formula Fmissing</span>' in html
+    assert diagnostics["quality_flag_counts"]["unresolved_formula_placeholder"] == 1
+
+
+def test_invalid_legacy_formula_placeholder_uses_plaintext_fallback() -> None:
+    placeholder = "@@FORMULA_Fbad@@"
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="We solve @bad.",
+    ).model_copy(
+        update={
+            "text_for_translation": f"We solve {placeholder}.",
+            "formulas": [
+                Formula(
+                    formula_id="Fbad",
+                    placeholder=placeholder,
+                    kind="inline",
+                    source_text="x / ?",
+                    latex=r"\frac{x",
+                )
+            ],
+        },
+        deep=True,
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_b1",
+            translated_text=f"我们求解 {placeholder}。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(_document([block]), [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "@@FORMULA_" not in html
+    assert '<span class="formula-plaintext-fallback">x / ?</span>' in html
+    assert diagnostics["quality_flag_counts"]["formula_plaintext_fallback"] == 1
+    assert "quality-formula-render-failed" not in html
+    assert "formula-render-failed" not in html
+    assert "katex-error" not in block_html
 
 
 def test_formula_renderer_structures_common_latex_commands() -> None:

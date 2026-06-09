@@ -148,6 +148,115 @@ def test_detector_finds_inline_formula_candidates_from_span_metadata() -> None:
     assert candidates[0].source_text_range == (6, 14)
 
 
+def test_detector_keeps_inline_formula_boundary_before_explanation() -> None:
+    block = DocumentBlock(
+        block_id="b_inline_boundary",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=260, y1=90),
+        reading_order=0,
+        source_text=(
+            "The reduced magnetic field B=p, defined as the ratio of the "
+            "magnetic field to pressure, triggers oscillations."
+        ),
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert len(candidates) == 1
+    assert candidates[0].display_mode == "inline"
+    assert candidates[0].source_text == "B=p"
+
+
+def test_detector_rejects_author_email_as_formula() -> None:
+    block = DocumentBlock(
+        block_id="b_email",
+        page_id="p1",
+        role=BlockRole.FOOTNOTE,
+        bbox=BoundingBox(x0=20, y0=350, x1=280, y1=370),
+        reading_order=0,
+        source_text="a)Authors to whom correspondence should be addressed: author@example.edu",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    assert detect_formula_candidates(document) == []
+
+
+def test_detector_rejects_operator_only_partial_fragments() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b_fragment",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=20, y0=55, x1=80, y1=70),
+                        reading_order=0,
+                        source_text="@=@",
+                    )
+                ],
+            )
+        ],
+    )
+
+    assert detect_formula_candidates(document) == []
+
+
+def test_deterministic_recognizer_normalizes_pdf_formula_glyphs_and_flags_repairs() -> None:
+    candidate = detect_formula_candidates(
+        DocumentIR(
+            doc_id="doc_1",
+            pages=[
+                DocumentPage(
+                    page_id="p1",
+                    size=PageSize(width=300, height=400),
+                    blocks=[
+                        DocumentBlock(
+                            block_id="b_bad_formula",
+                            page_id="p1",
+                            role=BlockRole.PARAGRAPH,
+                            bbox=BoundingBox(x0=20, y0=55, x1=150, y1=80),
+                            reading_order=0,
+                            source_text="νizμe=Te)1",
+                        )
+                    ],
+                )
+            ],
+        )
+    )[0]
+
+    result = asyncio.run(DeterministicFormulaRecognizer().recognize(candidate))
+
+    assert r"\nu" in result.latex
+    assert r"\mu" in result.latex
+    assert result.latex.count("(") == result.latex.count(")")
+    assert result.confidence < 0.65
+    assert "formula_low_confidence" in result.quality_flags
+
+
 def test_deterministic_recognizer_preserves_text_and_marks_visual_mock() -> None:
     candidates = detect_formula_candidates(_document())
     recognizer = DeterministicFormulaRecognizer()
@@ -295,6 +404,73 @@ def test_formula_service_rewrites_inline_formula_refs(tmp_path) -> None:
     assert result.document.pages[0].blocks[0].role == BlockRole.PARAGRAPH
     assert "{{formula:" in result.document.pages[0].blocks[0].source_text
     assert "E = mc^2" not in result.document.pages[0].blocks[0].source_text
+
+
+def test_legacy_formula_normalization_does_not_swallow_natural_language() -> None:
+    block = DocumentBlock(
+        block_id="b_legacy_boundary",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=100),
+        reading_order=0,
+        source_text=(
+            "The reduced magnetic field B=p, defined as the ratio of the "
+            "magnetic field to pressure, triggers oscillations."
+        ),
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    formulas = normalized.pages[0].blocks[0].formulas
+    assert len(formulas) == 1
+    assert formulas[0].source_text == "B=p"
+    assert "defined as" in normalized.pages[0].blocks[0].text_for_translation
+
+
+def test_legacy_formula_normalization_splits_latex_command_before_sentence() -> None:
+    block = DocumentBlock(
+        block_id="b_partial",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=100),
+        reading_order=0,
+        source_text=(
+            r"\partial ne \partial x into the electron continuity equation "
+            "gives the reduced form."
+        ),
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    formula = normalized.pages[0].blocks[0].formulas[0]
+    assert formula.source_text == r"\partial ne \partial x"
+    assert "into the electron continuity equation" in normalized.pages[0].blocks[0].text_for_translation
 
 
 def test_detector_skips_vector_placeholder_and_header_banner_assets() -> None:
