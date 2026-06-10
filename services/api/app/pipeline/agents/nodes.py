@@ -266,6 +266,15 @@ async def _read_input(
                         "recognized_count",
                         0,
                     ),
+                    "accepted_count": formula_result.diagnostics.get(
+                        "accepted_count",
+                        len(formula_result.formulas),
+                    ),
+                    "rejected_count": formula_result.diagnostics.get("rejected_count", 0),
+                    "rejected_records": formula_result.diagnostics.get(
+                        "rejected_records",
+                        [],
+                    ),
                     "formula_enrichment_ms": formula_enrichment_ms,
                     "recognizer_type": formula_result.diagnostics.get(
                         "recognizer_type",

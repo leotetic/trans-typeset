@@ -502,6 +502,55 @@ def test_missing_formula_ref_does_not_render_raw_placeholder() -> None:
     ]
 
 
+def test_mixed_known_and_unknown_formula_refs_do_not_leak_raw_placeholders() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=190),
+        source_text="Known {{formula:formula_inline}} and missing {{formula:formula_missing}}.",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=(
+                "已知 {{formula:formula_inline}}，缺失 {{formula:formula_missing}}。"
+            ),
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(document, [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "{{formula:" not in html
+    assert 'data-formula-id="formula_inline"' in html
+    assert 'data-unresolved-formula-id="formula_missing"' in html
+    assert diagnostics["formula_rendered_count"] == 1
+    assert diagnostics["quality_flag_counts"]["unresolved_formula_placeholder"] == 1
+
+
 def test_unresolved_legacy_formula_placeholder_does_not_leak_raw_token() -> None:
     placeholder = "@@FORMULA_Fmissing@@"
     block = _block(

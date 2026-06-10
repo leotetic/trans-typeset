@@ -5,10 +5,14 @@ import re
 from dataclasses import dataclass
 
 from pdf_translator_schema import Asset, BlockRole, BoundingBox, DocumentIR
-from pdf_translator_schema.models import DocumentBlock, FormulaDisplayMode, FormulaSourceKind, TextSpanIR
+from pdf_translator_schema.models import (
+    DocumentBlock,
+    FormulaDisplayMode,
+    FormulaSourceKind,
+    TextSpanIR,
+)
 
 from .normalization import contains_natural_language, is_noise_text, normalize_pdf_text
-
 
 _FORMULA_REF_PATTERN = re.compile(r"^\{\{formula:[A-Za-z0-9_.:-]+\}\}$")
 _MATH_SIGNAL_PATTERN = re.compile(
@@ -43,7 +47,9 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
         for block in page.blocks:
             if block.formula_id or _FORMULA_REF_PATTERN.fullmatch(block.source_text.strip()):
                 continue
-            if block.role == BlockRole.FORMULA or _looks_like_formula_text(block.source_text):
+            if block.role == BlockRole.FORMULA and _looks_like_display_formula_text(
+                block.source_text
+            ):
                 key = (block.block_id, None)
                 if key not in seen_keys:
                     seen_keys.add(key)
@@ -132,7 +138,7 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
     return candidates
 
 
-def _looks_like_formula_text(text: str) -> bool:
+def _looks_like_display_formula_text(text: str) -> bool:
     if is_noise_text(text):
         return False
     stripped = normalize_pdf_text(text)
@@ -142,9 +148,8 @@ def _looks_like_formula_text(text: str) -> bool:
         return False
     if not _MATH_SIGNAL_PATTERN.search(stripped):
         return False
-    if contains_natural_language(stripped):
-        if len(stripped) > 40 or re.search(r"[,.;]\s+[A-Za-z]{3,}", stripped):
-            return False
+    if _looks_like_prose(stripped):
+        return False
     alpha_words = re.findall(r"[A-Za-z]{3,}", stripped)
     if any(
         word.lower()
@@ -171,7 +176,21 @@ def _looks_like_formula_text(text: str) -> bool:
     return len(alpha_words) <= 8
 
 
-def _asset_formula_source_kind(asset: Asset, *, page_height: float | None = None) -> FormulaSourceKind | None:
+def _looks_like_prose(text: str) -> bool:
+    stripped = normalize_pdf_text(text)
+    if contains_natural_language(stripped):
+        return True
+    if re.search(r"[,.;]\s+[A-Za-z]{3,}", stripped):
+        return True
+    words = re.findall(r"[A-Za-z]{3,}", stripped)
+    return len(words) >= 6
+
+
+def _asset_formula_source_kind(
+    asset: Asset,
+    *,
+    page_height: float | None = None,
+) -> FormulaSourceKind | None:
     if asset.kind == "formula":
         if asset.path:
             return FormulaSourceKind.IMAGE_CANDIDATE
@@ -247,7 +266,11 @@ def _match_assets_to_formula_blocks(
     asset_candidates = [
         candidate
         for candidate in candidates
-        if candidate.page_id == page_id and candidate.asset_id and candidate.asset_id in assets_by_id
+        if (
+            candidate.page_id == page_id
+            and candidate.asset_id
+            and candidate.asset_id in assets_by_id
+        )
     ]
     for text_candidate in text_candidates:
         best: FormulaCandidate | None = None

@@ -178,6 +178,46 @@ def test_detector_keeps_inline_formula_boundary_before_explanation() -> None:
     assert candidates[0].source_text == "B=p"
 
 
+def test_detector_does_not_promote_prose_paragraphs_to_display_formulas() -> None:
+    bad_samples = [
+        "From the dispersion relation, we can obtain the phase velocity v ph = Re(ω)=kw = Te μe.",
+        (
+            "discharge scale. In conclusion, when pd remains constant and B=p increases, "
+            "the breathing oscillations are intensified."
+        ),
+        (
+            "neutrals, caused by variations in discharge parameters, play a dominant "
+            "role in altering the ion energy loss mechanism."
+        ),
+    ]
+    blocks = [
+        DocumentBlock(
+            block_id=f"b_prose_{index}",
+            page_id="p1",
+            role=BlockRole.PARAGRAPH,
+            bbox=BoundingBox(x0=20, y0=55 + index * 30, x1=280, y1=80 + index * 30),
+            reading_order=index,
+            source_text=text,
+        )
+        for index, text in enumerate(bad_samples)
+    ]
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=blocks,
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert all(candidate.display_mode == "inline" for candidate in candidates)
+    assert all(candidate.source_block_id is None for candidate in candidates)
+
+
 def test_detector_rejects_author_email_as_formula() -> None:
     block = DocumentBlock(
         block_id="b_email",
@@ -361,14 +401,102 @@ def test_formula_service_updates_document_ir_and_diagnostics(tmp_path) -> None:
         )
     )
 
-    assert len(result.formulas) == 2
+    assert len(result.formulas) == 1
     assert result.document.formulas_by_id()[result.formulas[0].formula_id].latex == "E = mc^2"
     assert result.document.pages[0].blocks[0].source_text.startswith("{{formula:")
     assert result.document.pages[0].blocks[0].formula_id == result.formulas[0].formula_id
     assert result.diagnostics["candidate_count"] == 2
-    assert "formula_recognition_mock" in result.diagnostics["quality_flags"]
+    assert result.diagnostics["accepted_count"] == 1
+    assert result.diagnostics["rejected_count"] == 1
+    assert "formula_visual_mock_rejected" in result.diagnostics["quality_flags"]
     assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
     assert result.diagnostics["recognizer_type"] == "deterministic"
+
+
+def test_formula_service_rejects_prose_display_formula_without_rewriting_block(tmp_path) -> None:
+    block = DocumentBlock(
+        block_id="b_formula_like_prose",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=90),
+        reading_order=0,
+        source_text=(
+            "discharge scale. In conclusion, when pd remains constant and B=p increases, "
+            "the breathing oscillations are intensified."
+        ),
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            ocr_service=OCRService(providers=[DeterministicOCRProvider()]),
+        )
+    )
+
+    assert result.formulas == []
+    assert result.document.pages[0].blocks[0].source_text == block.source_text
+    assert result.document.pages[0].blocks[0].formula_id is None
+    assert result.diagnostics["rejected_count"] == 0
+
+
+def test_formula_service_rejects_ocr_prose_display_without_rewriting_block(tmp_path) -> None:
+    block = DocumentBlock(
+        block_id="b_display",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=90),
+        reading_order=0,
+        source_text="E = mc^2",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    class ProseOCRProvider:
+        name = "prose"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            return OCRRecognitionResult(
+                text="In conclusion, this paragraph is not a mathematical formula.",
+                latex="In conclusion, this paragraph is not a mathematical formula.",
+                region_kind="formula",
+                provider="prose",
+                confidence=0.98,
+            )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            ocr_service=OCRService(providers=[ProseOCRProvider()]),
+        )
+    )
+
+    assert result.formulas == []
+    assert result.document.pages[0].blocks[0].source_text == "E = mc^2"
+    assert result.document.pages[0].blocks[0].formula_id is None
+    assert result.diagnostics["rejected_count"] == 1
+    assert result.diagnostics["rejected_records"][0]["reason"] == "formula_not_math_rejected"
 
 
 def test_formula_service_rewrites_inline_formula_refs(tmp_path) -> None:
@@ -470,7 +598,10 @@ def test_legacy_formula_normalization_splits_latex_command_before_sentence() -> 
 
     formula = normalized.pages[0].blocks[0].formulas[0]
     assert formula.source_text == r"\partial ne \partial x"
-    assert "into the electron continuity equation" in normalized.pages[0].blocks[0].text_for_translation
+    assert (
+        "into the electron continuity equation"
+        in normalized.pages[0].blocks[0].text_for_translation
+    )
 
 
 def test_detector_skips_vector_placeholder_and_header_banner_assets() -> None:

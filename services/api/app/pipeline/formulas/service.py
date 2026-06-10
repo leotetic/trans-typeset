@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from pdf_translator_schema import Asset, BoundingBox, DocumentIR, FormulaIR
 from pdf_translator_schema.models import (
@@ -13,9 +15,20 @@ from pdf_translator_schema.models import (
     FormulaSourceKind,
 )
 
+from ..ocr import OCRService
 from .detector import FormulaCandidate, detect_formula_candidates
 from .deterministic import DeterministicFormulaRecognizer
-from ..ocr import OCRService
+from .normalization import contains_natural_language, normalize_pdf_text
+
+_MATH_SIGNAL_PATTERN = re.compile(
+    r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|phi|omega|Delta|Omega|cdot|times)|"
+    r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*[A-Za-z0-9α-ωΑ-Ω])"
+)
+_VISUAL_MOCK_FLAGS = {
+    "formula_recognition_mock",
+    "visual_formula_not_recognized_without_model",
+    "ocr_visual_candidate_limit_reached",
+}
 
 
 class FormulaRecognizer(Protocol):
@@ -77,6 +90,8 @@ async def enrich_document_formulas(
                 "kind": "formula_diagnostics",
                 "candidate_count": 0,
                 "recognized_count": 0,
+                "accepted_count": 0,
+                "rejected_count": 0,
                 "quality_flags": _formula_diagnostic_base_flags(
                     visual_formula_recognition_enabled,
                     recognizer_type,
@@ -103,6 +118,7 @@ async def enrich_document_formulas(
     )
     formulas: list[FormulaIR] = []
     records: list[dict] = []
+    rejected_records: list[dict] = []
     diagnostic_flags: list[str] = []
 
     total_candidates = len(candidates)
@@ -134,37 +150,34 @@ async def enrich_document_formulas(
                 ),
             )
         except Exception as exc:
-            formula = FormulaIR(
-                formula_id=candidate.candidate_id,
-                page_id=candidate.page_id,
-                source_block_id=candidate.source_block_id,
-                anchor_block_id=candidate.anchor_block_id,
-                asset_id=candidate.asset_id,
-                latex=candidate.source_text,
-                source_text=candidate.source_text,
-                source_text_range=candidate.source_text_range,
-                span_ids=list(candidate.span_ids),
-                display_mode=candidate.display_mode,
-                confidence=0.0,
-                ocr_provider="failed",
-                ocr_confidence=0.0,
-                source_kind=candidate.source_kind,
-                quality_flags=_unique(
-                    [
-                        *candidate.quality_flags,
-                        "formula_recognition_failed",
-                    ]
-                ),
-            )
             records.append(
                 {
-                    "formula_id": formula.formula_id,
+                    "formula_id": candidate.candidate_id,
                     "status": "failed",
                     "error": str(exc),
                 }
             )
             diagnostic_flags.append("formula_recognition_failed")
+            continue
         else:
+            rejection_reason = _formula_attachment_rejection_reason(candidate, formula)
+            if rejection_reason is not None:
+                rejection_flags = _unique([*formula.quality_flags, rejection_reason])
+                record = {
+                    "formula_id": formula.formula_id,
+                    "status": "rejected",
+                    "reason": rejection_reason,
+                    "source_kind": formula.source_kind.value,
+                    "display_mode": formula.display_mode,
+                    "ocr_provider": formula.ocr_provider,
+                    "confidence": formula.confidence,
+                    "latex": formula.latex,
+                    "quality_flags": rejection_flags,
+                }
+                records.append(record)
+                rejected_records.append(record)
+                diagnostic_flags.extend(rejection_flags)
+                continue
             records.append(
                 {
                     "formula_id": formula.formula_id,
@@ -173,8 +186,8 @@ async def enrich_document_formulas(
                     "confidence": formula.confidence,
                 }
             )
-        formulas.append(formula)
-        diagnostic_flags.extend(formula.quality_flags)
+            formulas.append(formula)
+            diagnostic_flags.extend(formula.quality_flags)
 
     enriched = _attach_formulas(working_document, formulas)
     ocr_diagnostics = ocr_service.diagnostics()
@@ -182,6 +195,8 @@ async def enrich_document_formulas(
         "kind": "formula_diagnostics",
         "candidate_count": len(candidates),
         "recognized_count": sum(1 for formula in formulas if formula.latex.strip()),
+        "accepted_count": len(formulas),
+        "rejected_count": len(rejected_records),
         "quality_flags": _unique(
             [
                 *_formula_diagnostic_base_flags(
@@ -192,6 +207,7 @@ async def enrich_document_formulas(
             ]
         ),
         "records": records,
+        "rejected_records": rejected_records,
         "source_counts": _source_counts(candidates),
         "recognizer_type": recognizer_type,
         "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
@@ -204,6 +220,59 @@ async def enrich_document_formulas(
         candidates=[_candidate_record(candidate) for candidate in candidates],
         ocr_records=ocr_diagnostics["records"],
     )
+
+
+def _formula_attachment_rejection_reason(
+    candidate: FormulaCandidate,
+    formula: FormulaIR,
+) -> str | None:
+    if formula.display_mode != "display":
+        return None
+    flags = set(formula.quality_flags)
+    if flags.intersection(_VISUAL_MOCK_FLAGS):
+        return "formula_visual_mock_rejected"
+    if not _display_latex_has_math_signal(formula.latex):
+        return "formula_not_math_rejected"
+    if _display_latex_looks_like_prose(formula.latex):
+        return "formula_prose_rejected"
+    if (
+        candidate.source_kind
+        in {FormulaSourceKind.IMAGE_CANDIDATE, FormulaSourceKind.VECTOR_CANDIDATE}
+        and (formula.ocr_provider or "").lower() == "deterministic"
+    ):
+        return "formula_visual_mock_rejected"
+    return None
+
+
+def _display_latex_has_math_signal(text: str) -> bool:
+    normalized = normalize_pdf_text(text)
+    if not normalized:
+        return False
+    if _MATH_SIGNAL_PATTERN.search(normalized):
+        return True
+    return bool(
+        re.search(
+            r"\\(?:begin|end|left|right|overline|underline|hat|bar|vec|mathbf|mathrm|mathcal|operatorname)\b",
+            normalized,
+        )
+    )
+
+
+def _display_latex_looks_like_prose(text: str) -> bool:
+    normalized = normalize_pdf_text(text)
+    if not normalized:
+        return False
+    words = re.findall(r"[A-Za-z]{3,}", normalized)
+    math_signals = len(_MATH_SIGNAL_PATTERN.findall(normalized))
+    if contains_natural_language(normalized) and len(words) >= 2:
+        return True
+    if re.search(r"[,.;]\s+[A-Za-z]{3,}", normalized) and len(words) >= 4:
+        return True
+    if len(normalized) > 80 and len(words) >= 6 and math_signals < 3:
+        return True
+    if len(words) >= 10 and math_signals <= max(1, len(words) // 8):
+        return True
+    return False
 
 
 def _ensure_formula_candidate_assets(

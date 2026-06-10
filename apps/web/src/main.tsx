@@ -228,6 +228,25 @@ function App() {
     ? runtimeConfig.allowed_target_langs
     : languageOptions.map((option) => option.value);
   const maxUploadBytes = runtimeConfig?.max_upload_bytes ?? MAX_UPLOAD_BYTES;
+  const selectedLanguageLabel = languageLabels.get(targetLang) ?? targetLang;
+  const activeModeLabel = inputModes.find((mode) => mode.value === inputMode)?.label ?? inputMode;
+  const activeFilename =
+    job?.filename ??
+    contentPdfFile?.name ??
+    (files.length === 1
+      ? files[0].name
+      : files.length > 1
+        ? `${files.length} 个文件`
+        : null);
+  const progressPercent = Math.round(normalizeProgress(isUploading ? 0.04 : job?.progress ?? 0) * 100);
+  const activeStatusLabel = isUploading ? "提交中" : job ? statusCopy[job.status] : "待提交";
+  const activeStatusDetail = isUploading
+    ? "正在发送输入文件"
+    : job
+      ? statusDetail[job.status]
+      : hasSubmitInput
+        ? "输入已就绪"
+        : "等待输入";
 
   const checkHealth = useCallback(async () => {
     setHealthIssue(null);
@@ -265,6 +284,9 @@ function App() {
       }
       return config;
     } catch (reason) {
+      if (signal?.aborted) {
+        return null;
+      }
       const message = apiMessage(reason, "无法读取运行配置。");
       setConfigIssue(message);
       return null;
@@ -278,6 +300,9 @@ function App() {
       setHistoryIssue(null);
       return history;
     } catch (reason) {
+      if (signal?.aborted) {
+        return [];
+      }
       setHistoryIssue(apiMessage(reason, "无法读取任务历史。"));
       return [];
     }
@@ -807,21 +832,89 @@ function App() {
 
   return (
     <main className="shell">
+      <header className="workspace-header">
+        <div className="brand-lockup">
+          <div className="app-mark" aria-hidden="true">
+            <FileText size={22} strokeWidth={2.1} />
+          </div>
+          <div className="app-title">
+            <h1>Trans Typesetting</h1>
+            <p>本地智能翻译与排版工作台</p>
+          </div>
+        </div>
+        <div className="workspace-metrics" aria-label="Workspace summary">
+          <HealthBadge healthState={healthState} />
+          <span className="metric-pill">
+            <span>输入</span>
+            <strong>{activeModeLabel}</strong>
+          </span>
+          <span className="metric-pill">
+            <span>目标</span>
+            <strong>{selectedLanguageLabel}</strong>
+          </span>
+          <span className="metric-pill">
+            <span>进度</span>
+            <strong>{progressPercent}%</strong>
+          </span>
+        </div>
+      </header>
       <section className="workspace" aria-label="Smart typesetting workspace">
-        <aside className="control-panel" aria-label="Smart typesetting controls">
-          <header className="app-header">
-            <div className="app-mark" aria-hidden="true">
-              <FileText size={22} strokeWidth={2.1} />
-            </div>
-            <div className="app-title">
-              <h1>Trans Typesetting</h1>
-              <p>本地智能翻译与排版工作台</p>
-            </div>
-          </header>
-
+        <aside className="control-panel primary-controls" aria-label="Smart typesetting controls">
           <section className="tool-section" aria-labelledby="config-heading">
-            <SectionTitle id="config-heading" icon={<Settings2 size={16} />} title="文献配置" />
-            {isPdfWorkflow ? (
+            <SectionTitle id="config-heading" icon={<FileText size={16} />} title="文档入口" />
+            <div className="segmented" role="tablist" aria-label="Input mode">
+              {inputModes.map((mode) => (
+                <button
+                  key={mode.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={inputMode === mode.value}
+                  className={inputMode === mode.value ? "active" : ""}
+                  onClick={() => {
+                    setInputMode(mode.value);
+                    setFiles([]);
+                    setContentPdfFile(null);
+                    setLayoutPdfFile(null);
+                    setUploadIssue(null);
+                    resetFileInput();
+                  }}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            <label className="field">
+              <span>
+                <Globe2 size={16} />
+                目标语言
+              </span>
+              <select value={targetLang} onChange={(event) => setTargetLang(event.target.value)}>
+                {configuredLanguages.map((lang) => (
+                  <option key={lang} value={lang}>
+                    {languageLabels.get(lang) ?? lang}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {inputMode === "text" ? (
+              <>
+                <textarea
+                  className="text-input"
+                  value={textInput}
+                  onChange={(event) => {
+                    setTextInput(event.target.value);
+                    setUploadIssue(null);
+                  }}
+                  aria-label="Text input"
+                />
+                <div className="upload-footer" id="upload-feedback">
+                  <InlineNotice
+                    issue={uploadIssue?.target !== "document" ? uploadIssue : null}
+                    fallback={textInput.trim() ? "文本输入已就绪。" : "等待文本输入。"}
+                  />
+                </div>
+              </>
+            ) : isPdfWorkflow ? (
               <>
                 <PdfUploadSlot
                   label="待翻译 PDF"
@@ -854,67 +947,6 @@ function App() {
                   ) : null}
                 </div>
               </>
-            ) : null}
-            <RuntimeConfigCard
-              config={runtimeConfig}
-              draft={configDraft}
-              issue={configIssue}
-              validation={baseUrlValidation}
-              isSaving={isSavingConfig}
-              onDraftChange={setConfigDraft}
-              onSave={saveRuntimeConfig}
-            />
-          </section>
-
-          <section className="tool-section" aria-labelledby="typesetting-heading">
-            <SectionTitle id="typesetting-heading" icon={<SlidersHorizontal size={16} />} title="排版需求" />
-            <div className="segmented" role="tablist" aria-label="Input mode">
-              {inputModes.map((mode) => (
-                <button
-                  key={mode.value}
-                  type="button"
-                  role="tab"
-                  aria-selected={inputMode === mode.value}
-                  className={inputMode === mode.value ? "active" : ""}
-                  onClick={() => {
-                    setInputMode(mode.value);
-                    setFiles([]);
-                    setContentPdfFile(null);
-                    setLayoutPdfFile(null);
-                    setUploadIssue(null);
-                    resetFileInput();
-                  }}
-                >
-                  {mode.label}
-                </button>
-              ))}
-            </div>
-            {inputMode === "text" ? (
-              <textarea
-                className="text-input"
-                value={textInput}
-                onChange={(event) => {
-                  setTextInput(event.target.value);
-                  setUploadIssue(null);
-                }}
-                aria-label="Text input"
-              />
-            ) : isPdfWorkflow ? (
-              <div className="pdf-source-grid">
-                <PdfUploadSlot
-                  label="版式参考 PDF"
-                  meta="可选，作为排版语义输入源"
-                  file={layoutPdfFile}
-                  issueKind={uploadIssue?.kind}
-                  isDragging={draggingPdfSlot === "layout"}
-                  inputRef={layoutPdfInputRef}
-                  onSelect={(files) => handlePdfSlotFiles("layout", files)}
-                  onClear={() => clearPdfSlot("layout")}
-                  onDragOver={(event) => handlePdfDragOver(event, "layout")}
-                  onDragLeave={handlePdfDragLeave}
-                  onDrop={(event) => handlePdfDrop(event, "layout")}
-                />
-              </div>
             ) : (
               <>
                 <button
@@ -945,12 +977,8 @@ function App() {
                       </>
                     ) : (
                       <>
-                        <span className="file-name">
-                          {inputMode === "image" ? "选择或拖入图片" : "选择或拖入英文 PDF"}
-                        </span>
-                        <span className="file-meta">
-                          {inputMode === "image" ? "支持 .png .jpg .webp" : "支持 .pdf 文件"}
-                        </span>
+                        <span className="file-name">选择或拖入图片</span>
+                        <span className="file-meta">支持 .png .jpg .webp</span>
                       </>
                     )}
                   </span>
@@ -966,88 +994,24 @@ function App() {
                   accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
                   onChange={(event) => handleFiles(event.target.files)}
                 />
+                <div className="upload-footer" id="upload-feedback">
+                  <InlineNotice
+                    issue={uploadIssue?.target !== "document" ? uploadIssue : null}
+                    fallback="等待图片输入。"
+                  />
+                  {files.length ? (
+                    <button className="ghost-button" type="button" onClick={clearRequirementsInput}>
+                      <X size={15} />
+                      移除输入
+                    </button>
+                  ) : null}
+                </div>
               </>
             )}
-            <div className="upload-footer" id="upload-feedback">
-              <InlineNotice
-                issue={uploadIssue?.target !== "document" ? uploadIssue : null}
-                fallback={isPdfWorkflow ? "版式参考 PDF 可选。" : "等待输入。"}
-              />
-              {files.length || (isPdfWorkflow && layoutPdfFile) ? (
-                <button className="ghost-button" type="button" onClick={clearRequirementsInput}>
-                  <X size={15} />
-                  移除输入
-                </button>
-              ) : null}
-            </div>
-            <label className="field">
-              <span>
-                <Globe2 size={16} />
-                目标语言
-              </span>
-              <select value={targetLang} onChange={(event) => setTargetLang(event.target.value)}>
-                {configuredLanguages.map((lang) => (
-                  <option key={lang} value={lang}>
-                    {languageLabels.get(lang) ?? lang}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>输出类型</span>
-              <select value={outputKind} onChange={(event) => setOutputKind(event.target.value as OutputKind)}>
-                {outputKindOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>版式风格</span>
-              <select value={styleIntent} onChange={(event) => setStyleIntent(event.target.value as StyleIntent)}>
-                {styleIntentOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>排版说明</span>
-              <textarea
-                className="intent-input"
-                value={instruction}
-                onChange={(event) => setInstruction(event.target.value)}
-                aria-label="Typesetting instruction"
-              />
-            </label>
-            <ConstraintPanel
-              isOpen={isConstraintsOpen}
-              draft={constraintDraft}
-              onToggle={() => setIsConstraintsOpen((current) => !current)}
-              onChange={setConstraintDraft}
-            />
-          </section>
-
-          <section className="tool-section" aria-labelledby="history-heading">
-            <SectionTitle id="history-heading" icon={<History size={16} />} title="历史" />
-            <HistoryList
-              jobs={jobHistory}
-              issue={historyIssue}
-              sessionNotice={sessionNotice}
-              activeJobId={job?.job_id ?? null}
-              onRefresh={() => void refreshHistory()}
-              onRestore={(historyJob) => {
-                restoreJobSnapshot(historyJob);
-                setSessionNotice(null);
-              }}
-              onClearSavedTask={clearSavedTask}
-            />
           </section>
 
           <section className="tool-section task-section" aria-labelledby="task-heading">
-            <SectionTitle id="task-heading" icon={<Clock3 size={16} />} title="任务" />
+            <SectionTitle id="task-heading" icon={<Clock3 size={16} />} title="执行状态" />
             <BackendStatus
               healthState={healthState}
               issue={healthIssue}
@@ -1075,13 +1039,15 @@ function App() {
               </a>
             ) : null}
           </section>
+
         </aside>
 
         <section className="preview-panel" aria-label="Document preview">
           <div className="preview-toolbar">
             <div>
               <span>预览</span>
-              <strong>{isComplete ? "纯译文排版" : "等待完成"}</strong>
+              <strong>{isComplete ? "纯译文排版" : activeFilename ?? "等待任务"}</strong>
+              <small>{activeStatusLabel} · {activeStatusDetail}</small>
             </div>
             {artifactsReady && downloadUrl && previewUrl ? (
               <div className="toolbar-actions">
@@ -1134,6 +1100,109 @@ function App() {
             onSelect={setSelectedArtifact}
           />
         </section>
+
+        <aside className="control-panel secondary-controls" aria-label="Workspace history and runtime">
+          <section className="tool-section" aria-labelledby="typesetting-heading">
+            <SectionTitle id="typesetting-heading" icon={<SlidersHorizontal size={16} />} title="输出设置" />
+            {isPdfWorkflow ? (
+              <div className="pdf-source-grid">
+                <PdfUploadSlot
+                  label="版式参考 PDF"
+                  meta="可选，作为排版语义输入源"
+                  file={layoutPdfFile}
+                  issueKind={uploadIssue?.kind}
+                  isDragging={draggingPdfSlot === "layout"}
+                  inputRef={layoutPdfInputRef}
+                  onSelect={(files) => handlePdfSlotFiles("layout", files)}
+                  onClear={() => clearPdfSlot("layout")}
+                  onDragOver={(event) => handlePdfDragOver(event, "layout")}
+                  onDragLeave={handlePdfDragLeave}
+                  onDrop={(event) => handlePdfDrop(event, "layout")}
+                />
+              </div>
+            ) : null}
+            {isPdfWorkflow ? (
+              <div className="upload-footer" id="upload-feedback">
+                <InlineNotice
+                  issue={uploadIssue?.target !== "document" ? uploadIssue : null}
+                  fallback="版式参考 PDF 可选。"
+                />
+                {layoutPdfFile ? (
+                  <button className="ghost-button" type="button" onClick={clearRequirementsInput}>
+                    <X size={15} />
+                    移除输入
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            <div className="field-grid">
+              <label className="field">
+                <span>输出类型</span>
+                <select value={outputKind} onChange={(event) => setOutputKind(event.target.value as OutputKind)}>
+                  {outputKindOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>版式风格</span>
+                <select value={styleIntent} onChange={(event) => setStyleIntent(event.target.value as StyleIntent)}>
+                  {styleIntentOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <label className="field">
+              <span>排版说明</span>
+              <textarea
+                className="intent-input"
+                value={instruction}
+                onChange={(event) => setInstruction(event.target.value)}
+                aria-label="Typesetting instruction"
+              />
+            </label>
+            <ConstraintPanel
+              isOpen={isConstraintsOpen}
+              draft={constraintDraft}
+              onToggle={() => setIsConstraintsOpen((current) => !current)}
+              onChange={setConstraintDraft}
+            />
+          </section>
+
+          <section className="tool-section" aria-labelledby="history-heading">
+            <SectionTitle id="history-heading" icon={<History size={16} />} title="历史" />
+            <HistoryList
+              jobs={jobHistory}
+              issue={historyIssue}
+              sessionNotice={sessionNotice}
+              activeJobId={job?.job_id ?? null}
+              onRefresh={() => void refreshHistory()}
+              onRestore={(historyJob) => {
+                restoreJobSnapshot(historyJob);
+                setSessionNotice(null);
+              }}
+              onClearSavedTask={clearSavedTask}
+            />
+          </section>
+
+          <section className="tool-section" aria-labelledby="runtime-heading">
+            <SectionTitle id="runtime-heading" icon={<Settings2 size={16} />} title="运行环境" />
+            <RuntimeConfigCard
+              config={runtimeConfig}
+              draft={configDraft}
+              issue={configIssue}
+              validation={baseUrlValidation}
+              isSaving={isSavingConfig}
+              onDraftChange={setConfigDraft}
+              onSave={saveRuntimeConfig}
+            />
+          </section>
+        </aside>
       </section>
     </main>
   );
@@ -1174,6 +1243,35 @@ function BackendStatus({
         </button>
       ) : null}
     </div>
+  );
+}
+
+function HealthBadge({ healthState }: { healthState: HealthState }) {
+  const isOnline = healthState === "online";
+  const isChecking = healthState === "checking";
+
+  return (
+    <span className={`metric-pill health-pill${isOnline ? " online" : ""}${healthState === "offline" ? " offline" : ""}`}>
+      <span>服务</span>
+      <strong>
+        {isChecking ? (
+          <>
+            <Loader2 className="spin" size={13} />
+            检查中
+          </>
+        ) : isOnline ? (
+          <>
+            <CheckCircle2 size={13} />
+            已连接
+          </>
+        ) : (
+          <>
+            <XCircle size={13} />
+            离线
+          </>
+        )}
+      </strong>
+    </span>
   );
 }
 
@@ -2054,7 +2152,21 @@ function artifactLabel(name: string) {
   }
 }
 
-createRoot(document.getElementById("root")!).render(
+declare global {
+  interface Window {
+    __TRANS_TYPESETTING_ROOT__?: ReturnType<typeof createRoot>;
+  }
+}
+
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  throw new Error("Root element #root was not found.");
+}
+
+const root = window.__TRANS_TYPESETTING_ROOT__ ?? createRoot(rootElement);
+window.__TRANS_TYPESETTING_ROOT__ = root;
+
+root.render(
   <React.StrictMode>
     <App />
   </React.StrictMode>
