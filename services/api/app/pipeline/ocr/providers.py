@@ -9,6 +9,7 @@ from pdf_translator_schema.models import OCRRecognitionResult
 from ..formulas.detector import FormulaCandidate
 from ..formulas.normalization import latex_from_pdf_text
 from ..formulas.recognizer import OpenAIFormulaRecognizer
+from ..formulas.validation import validate_formula_latex
 
 
 class OCRProvider(Protocol):
@@ -39,12 +40,12 @@ class Pix2TextOCRProvider:
     ) -> OCRRecognitionResult:
         if image_path is None:
             return OCRRecognitionResult(
-                latex=candidate.source_text,
+                latex="",
                 text=candidate.source_text,
                 region_kind="formula",
                 provider=self.name,
-                confidence=0.7 if candidate.source_text else 0.0,
-                quality_flags=["ocr_text_layer_passthrough"],
+                confidence=0.0,
+                quality_flags=["ocr_visual_image_missing", "ocr_provider_unavailable"],
             )
         try:
             engine = await asyncio.wait_for(
@@ -86,13 +87,16 @@ class Pix2TextOCRProvider:
                 quality_flags=["pix2text_formula_ocr_failed", str(exc)[:120]],
             )
         latex, confidence = _coerce_formula_output(raw)
+        validation = validate_formula_latex(latex, source_text=candidate.source_text)
+        quality_flags = [] if latex else ["pix2text_formula_ocr_empty"]
+        quality_flags.extend(validation.quality_flags)
         return OCRRecognitionResult(
             text=latex,
             latex=latex,
             region_kind="formula",
             provider=self.name,
             confidence=confidence,
-            quality_flags=[] if latex else ["pix2text_formula_ocr_empty"],
+            quality_flags=_unique(quality_flags),
         )
 
     def _get_engine(self) -> object:
@@ -175,18 +179,21 @@ class DeterministicOCRProvider:
                     "formula_recognition_mock",
                 ]
             )
-            confidence = 0.1
+            confidence = 0.0
+            latex = ""
         elif candidate.source_kind.value == "inline_text":
             flags.append("formula_inline_text_layer")
         else:
             flags.append("ocr_text_layer_passthrough")
+        validation = validate_formula_latex(latex, source_text=candidate.source_text)
+        flags.extend(validation.quality_flags)
         return OCRRecognitionResult(
             text=latex,
             latex=latex,
             region_kind="formula",
             provider=self.name,
             confidence=confidence,
-            quality_flags=flags,
+            quality_flags=_unique(flags),
         )
 
 
@@ -220,3 +227,13 @@ def _coerce_confidence(value: object) -> float:
     except (TypeError, ValueError):
         return 0.86
     return max(0.0, min(1.0, confidence))
+
+
+def _unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result

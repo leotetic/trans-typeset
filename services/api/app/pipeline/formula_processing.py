@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from pdf_translator_schema import BlockRole, DocumentIR, Formula
+from pdf_translator_schema import BlockRole, DocumentIR, Formula, FormulaIR
 from pdf_translator_schema.models import DocumentBlock
 from .formulas.normalization import (
     GREEK_TO_LATEX,
@@ -16,8 +16,14 @@ from .formulas.normalization import (
     normalize_pdf_text,
     truncate_raw_at_language_boundary,
 )
+from .formulas.validation import (
+    extract_formula_refs,
+    formula_ref,
+    legacy_formula_placeholder,
+)
 
 FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
+FORMULA_REF_PATTERN = re.compile(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}")
 
 _GREEK_TO_LATEX = GREEK_TO_LATEX
 _SYMBOL_TO_LATEX = SYMBOL_TO_LATEX
@@ -47,22 +53,20 @@ class FormulaMatch:
 
 
 def normalize_document_formulas(document: DocumentIR) -> DocumentIR:
+    formulas: list[FormulaIR] = list(document.formulas)
     pages = []
     for page in document.pages:
         normalized_blocks = []
         for block in page.blocks:
-            normalized_blocks.append(_normalize_block_formulas(block))
+            normalized_block, block_formulas = _normalize_block_formulas(block)
+            normalized_blocks.append(normalized_block)
+            formulas.extend(block_formulas)
         pages.append(page.model_copy(update={"blocks": normalized_blocks}, deep=True))
-    return document.model_copy(update={"pages": pages}, deep=True)
+    return document.model_copy(update={"pages": pages, "formulas": _merge_formulas(formulas)}, deep=True)
 
 
 def build_formula_diagnostics(document: DocumentIR) -> dict:
-    formulas = [
-        formula
-        for page in document.pages
-        for block in page.blocks
-        for formula in block.formulas
-    ]
+    formulas = list(document.formulas)
     fallback_count = sum(
         1
         for formula in formulas
@@ -83,23 +87,23 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
         if formula.confidence is not None and formula.confidence < 0.65
     ]
     unresolved: list[dict[str, str]] = []
+    known_refs = {formula_ref(formula.formula_id) for formula in formulas}
     for page in document.pages:
         for block in page.blocks:
             text = block.text_for_translation or block.source_text
-            known = {formula.placeholder for formula in block.formulas}
-            for placeholder in FORMULA_PLACEHOLDER_PATTERN.findall(text):
-                if placeholder not in known:
+            for ref in extract_formula_refs(text):
+                if ref not in known_refs:
                     unresolved.append(
                         {
                             "block_id": block.block_id,
-                            "placeholder": placeholder,
+                            "placeholder": ref,
                         }
                     )
     return {
         "kind": "formula_diagnostics",
         "formula_count": len(formulas),
-        "inline_count": sum(1 for formula in formulas if formula.kind == "inline"),
-        "display_count": sum(1 for formula in formulas if formula.kind == "display"),
+        "inline_count": sum(1 for formula in formulas if formula.display_mode == "inline"),
+        "display_count": sum(1 for formula in formulas if formula.display_mode == "display"),
         "latex_success_count": sum(1 for formula in formulas if formula.latex.strip()),
         "fallback_count": fallback_count,
         "low_confidence_formula_ids": low_confidence,
@@ -110,39 +114,46 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
 
 
 def formula_placeholders_for_block(block: DocumentBlock) -> list[str]:
-    placeholders = [formula.placeholder for formula in block.formulas]
+    refs: list[str] = []
+    seen: set[str] = set()
+    if block.formula_id:
+        ref = formula_ref(block.formula_id)
+        refs.append(ref)
+        seen.add(ref)
     text = block.text_for_translation or block.source_text
-    for placeholder in FORMULA_PLACEHOLDER_PATTERN.findall(text):
-        if placeholder not in placeholders:
-            placeholders.append(placeholder)
-    return placeholders
+    for ref in extract_formula_refs(text):
+        if ref not in seen:
+            refs.append(ref)
+            seen.add(ref)
+    return refs
 
 
 def is_formula_only_block(block: DocumentBlock) -> bool:
     text = (block.text_for_translation or block.source_text).strip()
     return block.role == BlockRole.FORMULA and (
         (
-            bool(block.formulas)
-            and text in {formula.placeholder for formula in block.formulas}
+            bool(block.formula_id)
+            and text == formula_ref(block.formula_id)
         )
-        or bool(block.formula_id)
-        and re.fullmatch(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}", text) is not None
+        or FORMULA_REF_PATTERN.fullmatch(text) is not None
     )
 
 
-def _normalize_block_formulas(block: DocumentBlock) -> DocumentBlock:
-    if block.formulas or FORMULA_PLACEHOLDER_PATTERN.search(block.source_text):
-        return block
+def _normalize_block_formulas(block: DocumentBlock) -> tuple[DocumentBlock, list[FormulaIR]]:
+    if block.formula_id or FORMULA_REF_PATTERN.search(block.source_text):
+        return block, []
     matches = _detect_formula_matches(block)
     if not matches:
-        return block
+        return block, []
 
     formulas: list[Formula] = []
+    formula_irs: list[FormulaIR] = []
     text_for_translation = block.source_text
     offset = 0
     for index, match in enumerate(matches, start=1):
         formula_id = _formula_id(block.block_id, match.text, index)
-        placeholder = f"@@FORMULA_{formula_id}@@"
+        placeholder = legacy_formula_placeholder(formula_id)
+        ref = formula_ref(formula_id)
         quality_flags = ["formula_text_fallback", "latex_heuristic"]
         latex = _text_to_latex(match.text)
         confidence = 0.72 if latex else 0.45
@@ -162,19 +173,42 @@ def _normalize_block_formulas(block: DocumentBlock) -> DocumentBlock:
                 quality_flags=_unique(quality_flags),
             )
         )
+        formula_irs.append(
+            FormulaIR(
+                formula_id=formula_id,
+                page_id=block.page_id,
+                source_block_id=block.block_id if match.kind == "display" else None,
+                anchor_block_id=block.block_id if match.kind == "inline" else None,
+                latex=latex,
+                source_text=match.text,
+                source_text_range=(match.start, match.end),
+                display_mode="display" if match.kind == "display" else "inline",
+                confidence=confidence,
+                ocr_provider="text_layer_normalizer",
+                ocr_confidence=confidence,
+                source_kind="text_layer" if match.kind == "display" else "inline_text",
+                quality_flags=_unique(quality_flags),
+            )
+        )
         start = match.start + offset
         end = match.end + offset
         text_for_translation = (
-            text_for_translation[:start] + placeholder + text_for_translation[end:]
+            text_for_translation[:start] + ref + text_for_translation[end:]
         )
-        offset += len(placeholder) - (match.end - match.start)
+        offset += len(ref) - (match.end - match.start)
 
-    return block.model_copy(
-        update={
-            "text_for_translation": re.sub(r"\s+", " ", text_for_translation).strip(),
-            "formulas": formulas,
-        },
-        deep=True,
+    block_update = {
+        "text_for_translation": re.sub(r"\s+", " ", text_for_translation).strip(),
+        "formulas": formulas,
+    }
+    if len(formula_irs) == 1 and formula_irs[0].display_mode == "display":
+        block_update["formula_id"] = formula_irs[0].formula_id
+    return (
+        block.model_copy(
+            update=block_update,
+            deep=True,
+        ),
+        formula_irs,
     )
 
 
@@ -257,7 +291,7 @@ def _text_to_latex(text: str) -> str:
     return latex
 
 
-def _formula_flag_counts(formulas: list[Formula]) -> dict[str, int]:
+def _formula_flag_counts(formulas: list[FormulaIR]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for formula in formulas:
         for flag in formula.quality_flags:
@@ -281,3 +315,10 @@ def _unique(values: list[str]) -> list[str]:
             result.append(value)
             seen.add(value)
     return result
+
+
+def _merge_formulas(formulas: list[FormulaIR]) -> list[FormulaIR]:
+    merged: dict[str, FormulaIR] = {}
+    for formula in formulas:
+        merged[formula.formula_id] = formula
+    return list(merged.values())

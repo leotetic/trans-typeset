@@ -80,7 +80,7 @@ def test_deterministic_translator_covers_every_block_and_tokens() -> None:
 
 
 def test_deterministic_translator_preserves_formula_only_blocks_without_prefix() -> None:
-    placeholder = "@@FORMULA_Fdisplay@@"
+    placeholder = "{{formula:Fdisplay}}"
     chunk = TranslationChunk(
         chunk_id="doc_1_chunk_0001",
         target_lang="zh-CN",

@@ -15,10 +15,11 @@ from pdf_translator_schema.models import (
     FormulaSourceKind,
 )
 
-from ..ocr import OCRService
+from ..ocr import DeterministicOCRProvider, OCRService
 from .detector import FormulaCandidate, detect_formula_candidates
 from .deterministic import DeterministicFormulaRecognizer
 from .normalization import contains_natural_language, normalize_pdf_text
+from .validation import validate_formula_latex
 
 _MATH_SIGNAL_PATTERN = re.compile(
     r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|phi|omega|Delta|Omega|cdot|times)|"
@@ -28,6 +29,11 @@ _VISUAL_MOCK_FLAGS = {
     "formula_recognition_mock",
     "visual_formula_not_recognized_without_model",
     "ocr_visual_candidate_limit_reached",
+}
+_TEXT_ESCALATION_FLAGS = {
+    "formula_low_confidence",
+    "formula_text_truncated",
+    "formula_delimiter_repaired",
 }
 
 
@@ -65,6 +71,7 @@ class FormulaEnrichmentResult:
     document: DocumentIR
     formulas: list[FormulaIR]
     diagnostics: dict
+    recognition_records: list[dict]
     candidates: list[dict]
     ocr_records: list[dict]
 
@@ -99,13 +106,15 @@ async def enrich_document_formulas(
                 "recognizer_type": recognizer_type,
                 "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
             },
+            recognition_records=[],
             candidates=[],
             ocr_records=[],
         )
 
     recognizer = recognizer or DeterministicFormulaRecognizer()
+    prefer_text_recognizer = recognizer is not None and ocr_service is None
     ocr_service = ocr_service or OCRService(
-        providers=[_RecognizerOCRAdapter(recognizer, recognizer_type)],
+        providers=[DeterministicOCRProvider()],
         asset_base_path=asset_output_dir,
     )
     working_document = document
@@ -129,14 +138,24 @@ async def enrich_document_formulas(
             except Exception:
                 pass
         try:
-            ocr_result = await ocr_service.recognize_formula(candidate)
+            ocr_result, validator, recognition_record = await _recognize_candidate(
+                candidate,
+                recognizer=recognizer,
+                ocr_service=ocr_service,
+                prefer_text_recognizer=prefer_text_recognizer,
+            )
+            records.append(recognition_record)
+            validator = validate_formula_latex(
+                ocr_result.latex or ocr_result.text,
+                source_text=candidate.source_text,
+            )
             formula = FormulaIR(
                 formula_id=candidate.candidate_id,
                 page_id=candidate.page_id,
                 source_block_id=candidate.source_block_id,
                 anchor_block_id=candidate.anchor_block_id,
                 asset_id=candidate.asset_id,
-                latex=ocr_result.latex or ocr_result.text,
+                latex=(ocr_result.latex or ocr_result.text) if validator.accepted else "",
                 source_text=candidate.source_text,
                 source_text_range=candidate.source_text_range,
                 span_ids=list(candidate.span_ids),
@@ -146,7 +165,7 @@ async def enrich_document_formulas(
                 ocr_confidence=ocr_result.confidence,
                 source_kind=candidate.source_kind,
                 quality_flags=_unique(
-                    [*candidate.quality_flags, *ocr_result.quality_flags]
+                    [*candidate.quality_flags, *ocr_result.quality_flags, *validator.quality_flags]
                 ),
             )
         except Exception as exc:
@@ -163,29 +182,35 @@ async def enrich_document_formulas(
             rejection_reason = _formula_attachment_rejection_reason(candidate, formula)
             if rejection_reason is not None:
                 rejection_flags = _unique([*formula.quality_flags, rejection_reason])
-                record = {
-                    "formula_id": formula.formula_id,
+                rejected_record = {
+                    **recognition_record,
                     "status": "rejected",
                     "reason": rejection_reason,
-                    "source_kind": formula.source_kind.value,
-                    "display_mode": formula.display_mode,
-                    "ocr_provider": formula.ocr_provider,
-                    "confidence": formula.confidence,
-                    "latex": formula.latex,
+                    "formula_id": formula.formula_id,
+                    "latex": formula.latex or (ocr_result.latex or ocr_result.text),
+                    "accepted_provider": formula.ocr_provider if formula.latex else None,
+                    "accepted_confidence": formula.confidence if formula.latex else None,
+                    "validator_status": validator.status,
+                    "fallback_reason": validator.fallback_reason,
                     "quality_flags": rejection_flags,
                 }
-                records.append(record)
-                rejected_records.append(record)
+                records[-1] = rejected_record
+                rejected_records.append(rejected_record)
                 diagnostic_flags.extend(rejection_flags)
                 continue
-            records.append(
+            recognition_record.update(
                 {
                     "formula_id": formula.formula_id,
                     "status": "recognized",
-                    "ocr_provider": formula.ocr_provider,
-                    "confidence": formula.confidence,
+                    "latex": formula.latex,
+                    "accepted_provider": formula.ocr_provider,
+                    "accepted_confidence": formula.confidence,
+                    "validator_status": validator.status,
+                    "fallback_reason": validator.fallback_reason,
+                    "source_kind": formula.source_kind.value,
                 }
             )
+            records[-1] = recognition_record
             formulas.append(formula)
             diagnostic_flags.extend(formula.quality_flags)
 
@@ -217,20 +242,137 @@ async def enrich_document_formulas(
         document=enriched,
         formulas=formulas,
         diagnostics=diagnostics,
+        recognition_records=records,
         candidates=[_candidate_record(candidate) for candidate in candidates],
         ocr_records=ocr_diagnostics["records"],
     )
+
+
+async def _recognize_candidate(
+    candidate: FormulaCandidate,
+    *,
+    recognizer: FormulaRecognizer,
+    ocr_service: OCRService,
+    prefer_text_recognizer: bool,
+) -> tuple[Any, Any, dict[str, Any]]:
+    if prefer_text_recognizer and candidate.source_kind in {
+        FormulaSourceKind.TEXT_LAYER,
+        FormulaSourceKind.INLINE_TEXT,
+    }:
+        text_result = await recognizer.recognize(candidate)
+        text_validator = validate_formula_latex(
+            text_result.latex,
+            source_text=candidate.source_text,
+        )
+        if _should_escalate_text_candidate(candidate, text_result, text_validator):
+            visual_result = await ocr_service.recognize_formula(candidate)
+            visual_validator = validate_formula_latex(
+                visual_result.latex or visual_result.text,
+                source_text=candidate.source_text,
+            )
+            if visual_validator.accepted:
+                return (
+                    visual_result,
+                    visual_validator,
+                    {
+                        "formula_id": candidate.candidate_id,
+                        "status": "upgraded",
+                        "accepted_provider": visual_result.provider,
+                        "accepted_confidence": visual_result.confidence,
+                        "validator_status": visual_validator.status,
+                        "fallback_reason": visual_validator.fallback_reason,
+                        "source_kind": candidate.source_kind.value,
+                        "quality_flags": _unique(
+                            [*text_result.quality_flags, *visual_result.quality_flags]
+                        ),
+                    },
+                )
+        return (
+            _recognition_result_from_formula_result(text_result),
+            text_validator,
+            {
+                "formula_id": candidate.candidate_id,
+                "status": "recognized" if text_validator.accepted else "rejected",
+                "accepted_provider": text_result.accepted_provider,
+                "accepted_confidence": text_result.accepted_confidence,
+                "validator_status": text_result.validator_status,
+                "fallback_reason": text_result.fallback_reason,
+                "source_kind": candidate.source_kind.value,
+                "quality_flags": list(text_result.quality_flags),
+            },
+        )
+    ocr_result = await ocr_service.recognize_formula(candidate)
+    validator = validate_formula_latex(
+        ocr_result.latex or ocr_result.text,
+        source_text=candidate.source_text,
+    )
+    return (
+        ocr_result,
+        validator,
+        {
+            "formula_id": candidate.candidate_id,
+            "status": "recognized" if validator.accepted else "rejected",
+            "accepted_provider": ocr_result.provider if validator.accepted else None,
+            "accepted_confidence": ocr_result.confidence if validator.accepted else None,
+            "validator_status": validator.status,
+            "fallback_reason": validator.fallback_reason,
+            "source_kind": candidate.source_kind.value,
+            "quality_flags": list(ocr_result.quality_flags),
+        },
+    )
+
+
+def _recognition_result_from_formula_result(result: FormulaRecognitionResult) -> Any:
+    from pdf_translator_schema.models import OCRRecognitionResult
+
+    return OCRRecognitionResult(
+        text=result.latex,
+        latex=result.latex,
+        region_kind="formula",
+        provider=result.accepted_provider or "text_layer_normalizer",
+        confidence=result.confidence,
+        quality_flags=list(result.quality_flags),
+    )
+
+
+def _should_escalate_text_candidate(
+    candidate: FormulaCandidate,
+    result: FormulaRecognitionResult,
+    validator: Any,
+) -> bool:
+    if not candidate.image_path:
+        return False
+    if validator.accepted and result.confidence >= 0.65 and not (
+        set(result.quality_flags) & _TEXT_ESCALATION_FLAGS
+    ):
+        return False
+    if validator.status in {"prose_like", "katex_error", "not_math"}:
+        return True
+    if set(result.quality_flags) & _TEXT_ESCALATION_FLAGS:
+        return True
+    return result.confidence < 0.65
 
 
 def _formula_attachment_rejection_reason(
     candidate: FormulaCandidate,
     formula: FormulaIR,
 ) -> str | None:
-    if formula.display_mode != "display":
-        return None
     flags = set(formula.quality_flags)
+    if "formula_prose_like" in flags or "formula_not_math" in flags:
+        return "formula_not_math_rejected"
     if flags.intersection(_VISUAL_MOCK_FLAGS):
         return "formula_visual_mock_rejected"
+    validator = validate_formula_latex(formula.latex, source_text=formula.source_text)
+    if not validator.accepted:
+        return (
+            "formula_not_math_rejected"
+            if validator.status in {"prose_like", "not_math"}
+            else "formula_visual_mock_rejected"
+            if flags.intersection(_VISUAL_MOCK_FLAGS)
+            else "formula_validator_rejected"
+        )
+    if formula.display_mode != "display":
+        return None
     if not _display_latex_has_math_signal(formula.latex):
         return "formula_not_math_rejected"
     if _display_latex_looks_like_prose(formula.latex):

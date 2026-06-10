@@ -200,10 +200,7 @@ async def _read_input(
                 context.storage.write_json(
                     doc_id,
                     "formula-recognition.json",
-                    [
-                        formula.model_dump(mode="json")
-                        for formula in formula_result.formulas
-                    ],
+                    formula_result.recognition_records,
                 )
                 context.storage.write_json(
                     doc_id,

@@ -45,10 +45,11 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
     for page in document.pages:
         assets_by_id = {asset.asset_id: asset for asset in page.assets}
         for block in page.blocks:
-            if block.formula_id or _FORMULA_REF_PATTERN.fullmatch(block.source_text.strip()):
+            block_text = (block.text_for_translation or block.source_text).strip()
+            if block.formula_id or _FORMULA_REF_PATTERN.fullmatch(block_text):
                 continue
             if block.role == BlockRole.FORMULA and _looks_like_display_formula_text(
-                block.source_text
+                block_text
             ):
                 key = (block.block_id, None)
                 if key not in seen_keys:
@@ -65,15 +66,17 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
                             bbox=block.bbox,
                             source_kind=FormulaSourceKind.TEXT_LAYER,
                             source_block_id=block.block_id,
-                            source_text=block.source_text,
-                            source_text_range=(0, len(block.source_text)),
+                            source_text=block_text,
+                            source_text_range=(0, len(block_text)),
                             span_ids=tuple(block.span_refs),
                             display_mode="display",
                         )
                     )
                 continue
 
-            for inline_candidate in _detect_inline_formula_candidates(block):
+            for inline_candidate in _detect_inline_formula_candidates(
+                block.model_copy(update={"source_text": block_text}, deep=True)
+            ):
                 key = (inline_candidate.anchor_block_id, inline_candidate.candidate_id)
                 if key in seen_keys:
                     continue

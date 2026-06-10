@@ -468,6 +468,11 @@ class FormulaRecognitionResult(NoLayoutCoordinatesModel):
     latex: str
     display_mode: FormulaDisplayMode = "display"
     confidence: float = Field(default=0.5, ge=0, le=1)
+    accepted_provider: str | None = None
+    accepted_confidence: float | None = Field(default=None, ge=0, le=1)
+    validator_status: str | None = None
+    fallback_reason: str | None = None
+    source_kind: FormulaSourceKind = FormulaSourceKind.UNKNOWN
     quality_flags: list[str] = Field(default_factory=list)
 
 

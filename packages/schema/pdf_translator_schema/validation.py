@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from .models import DocumentIR, LayoutIntentPlan, TranslationChunk, TranslationLayoutPlan
 
 
@@ -9,6 +11,10 @@ class LayoutPlanValidationError(ValueError):
 
 class LayoutIntentPlanValidationError(ValueError):
     pass
+
+
+_FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
+_LEGACY_FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 
 
 def validate_layout_plan(
@@ -40,6 +46,7 @@ def validate_layout_plan(
         )
 
     if chunk.constraints.preserve_tokens:
+        _reject_legacy_formula_tokens(chunk)
         tokens_by_block = {
             block.block_id: set(block.preserve_tokens)
             for block in chunk.source_blocks
@@ -55,6 +62,7 @@ def validate_layout_plan(
                 for item in block_plan.inline_items
                 if item.kind != "text"
             }
+            _reject_legacy_formula_tokens_from_plan(block_plan.translated_text, planned_tokens)
             missing_tokens = {
                 token
                 for token in required_tokens
@@ -67,6 +75,31 @@ def validate_layout_plan(
                 )
 
     return plan
+
+
+def _reject_legacy_formula_tokens(chunk: TranslationChunk) -> None:
+    for source_block in chunk.source_blocks:
+        for token in source_block.preserve_tokens:
+            if _LEGACY_FORMULA_PLACEHOLDER_PATTERN.fullmatch(token):
+                raise LayoutPlanValidationError(
+                    "legacy formula placeholders are not allowed in preserve_tokens: "
+                    f"{token}"
+                )
+
+
+def _reject_legacy_formula_tokens_from_plan(
+    translated_text: str,
+    planned_tokens: set[str],
+) -> None:
+    if _LEGACY_FORMULA_PLACEHOLDER_PATTERN.search(translated_text):
+        raise LayoutPlanValidationError(
+            "translated_text contains legacy formula placeholder; use {{formula:id}}"
+        )
+    for token in planned_tokens:
+        if token and _LEGACY_FORMULA_PLACEHOLDER_PATTERN.fullmatch(token):
+            raise LayoutPlanValidationError(
+                "inline_items contain legacy formula placeholder; use {{formula:id}}"
+            )
 
 
 def validate_layout_intent_plan(

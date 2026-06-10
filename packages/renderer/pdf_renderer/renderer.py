@@ -18,6 +18,7 @@ _CSS_CLASS_PATTERN = re.compile(r"[^a-z0-9-]+")
 _API_ASSET_SRC_PATTERN = re.compile(
     r'(?P<prefix>\bsrc=)(?P<quote>["\'])(?P<src>/api/documents/[^"\']+/assets/(?P<filename>[^/"\']+))(?P=quote)'
 )
+_KATEX_FONT_URL_PATTERN = re.compile(r"url\((?:'|\")?fonts/(?P<filename>KaTeX_[^'\"\)]+)(?:'|\")?\)")
 
 
 def _css_class(value: object) -> str:
@@ -55,8 +56,23 @@ def _load_katex_asset(filename: str) -> str:
     for root in [Path.cwd(), *Path(__file__).resolve().parents]:
         candidate = root / "node_modules" / "katex" / "dist" / filename
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
+            content = candidate.read_text(encoding="utf-8")
+            if filename == "katex.min.css":
+                return _inline_katex_font_urls(content, candidate.parent)
+            return content
     return ""
+
+
+def _inline_katex_font_urls(css: str, dist_dir: Path) -> str:
+    def replace(match: re.Match[str]) -> str:
+        font_path = dist_dir / "fonts" / match.group("filename")
+        if not font_path.is_file():
+            return match.group(0)
+        mime_type = mimetypes.guess_type(font_path.name)[0] or "font/woff2"
+        payload = base64.b64encode(font_path.read_bytes()).decode("ascii")
+        return f"url(data:{mime_type};base64,{payload})"
+
+    return _KATEX_FONT_URL_PATTERN.sub(replace, css)
 
 
 def render_to_html(document: RenderDocument) -> str:

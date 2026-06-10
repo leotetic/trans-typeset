@@ -273,10 +273,10 @@ def test_formula_normalization_detects_inline_and_display_formulas() -> None:
     para, display = normalized.pages[0].blocks
     diagnostics = build_formula_diagnostics(normalized)
 
-    assert "@@FORMULA_" in para.text_for_translation
+    assert "{{formula:" in para.text_for_translation
     assert para.formulas[0].kind == "inline"
     assert "\\alpha" in para.formulas[0].latex
-    assert display.text_for_translation == display.formulas[0].placeholder
+    assert display.text_for_translation == f"{{{{formula:{display.formula_id}}}}}"
     assert display.formulas[0].kind == "display"
     assert "\\nabla" in display.formulas[0].latex
     assert diagnostics["formula_count"] == 2

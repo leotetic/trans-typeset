@@ -7,7 +7,7 @@ from pdf_translator_schema import (
     FormulaIR,
     PageSize,
 )
-from pdf_translator_schema.models import DocumentBlock, Formula, RenderDefaults
+from pdf_translator_schema.models import DocumentBlock, RenderDefaults
 
 
 def make_block(
@@ -144,7 +144,7 @@ def test_build_chunks_uses_configured_render_defaults_with_target_language() -> 
 
 
 def test_build_chunks_uses_formula_placeholders_not_source_formula_text() -> None:
-    placeholder = "@@FORMULA_Fabc123@@"
+    placeholder = "{{formula:Fabc123}}"
     block = make_block(
         "p1_b1",
         "We solve @fs=@t + ∇·(fs v)=0.",
@@ -152,20 +152,27 @@ def test_build_chunks_uses_formula_placeholders_not_source_formula_text() -> Non
     ).model_copy(
         update={
             "text_for_translation": f"We solve {placeholder}.",
-            "formulas": [
-                Formula(
-                    formula_id="Fabc123",
-                    placeholder=placeholder,
-                    kind="inline",
-                    source_text="@fs=@t + ∇·(fs v)=0",
-                    latex=r"\partial fs = \partial t + \nabla \cdot (fs v)=0",
-                )
-            ],
+            "formulas": [],
+            "formula_id": None,
         },
         deep=True,
     )
+    document = make_document(
+        [block],
+        formulas=[
+            FormulaIR(
+                formula_id="Fabc123",
+                page_id="p1",
+                anchor_block_id="p1_b1",
+                latex=r"\partial fs = \partial t + \nabla \cdot (fs v)=0",
+                source_text="@fs=@t + ∇·(fs v)=0",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
 
-    chunks = build_chunks(make_document([block]), target_lang="zh-CN")
+    chunks = build_chunks(document, target_lang="zh-CN")
     source = chunks[0].source_blocks[0]
 
     assert source.source_text == f"We solve {placeholder}."
@@ -175,7 +182,7 @@ def test_build_chunks_uses_formula_placeholders_not_source_formula_text() -> Non
 
 
 def test_build_chunks_marks_formula_only_blocks_as_not_translatable() -> None:
-    placeholder = "@@FORMULA_Fdisplay@@"
+    placeholder = "{{formula:Fdisplay}}"
     block = make_block(
         "p1_formula",
         "@fs=@t",
@@ -183,20 +190,27 @@ def test_build_chunks_marks_formula_only_blocks_as_not_translatable() -> None:
     ).model_copy(
         update={
             "text_for_translation": placeholder,
-            "formulas": [
-                Formula(
-                    formula_id="Fdisplay",
-                    placeholder=placeholder,
-                    kind="display",
-                    source_text="@fs=@t",
-                    latex=r"\partial fs = \partial t",
-                )
-            ],
+            "formula_id": "Fdisplay",
+            "formulas": [],
         },
         deep=True,
     )
+    document = make_document(
+        [block],
+        formulas=[
+            FormulaIR(
+                formula_id="Fdisplay",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\partial fs = \partial t",
+                source_text="@fs=@t",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
 
-    chunks = build_chunks(make_document([block]), target_lang="zh-CN")
+    chunks = build_chunks(document, target_lang="zh-CN")
 
     assert chunks[0].source_blocks[0].source_text == placeholder
     assert chunks[0].source_blocks[0].requires_translation is False

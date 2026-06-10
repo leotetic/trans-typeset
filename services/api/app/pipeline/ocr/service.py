@@ -8,6 +8,7 @@ from typing import Any, Callable
 from pdf_translator_schema.models import OCRRecognitionResult
 
 from ..formulas.detector import FormulaCandidate
+from ..formulas.validation import validate_formula_latex
 from .preprocess import image_sha256, preprocess_region_image
 from .providers import DeterministicOCRProvider, OCRProvider
 
@@ -19,6 +20,7 @@ class OCRService:
     min_confidence: float = 0.35
     provider_timeout_seconds: float = 12.0
     max_visual_candidates: int = 12
+    min_text_confidence: float = 0.65
     on_record: Callable[[dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
@@ -29,6 +31,7 @@ class OCRService:
     async def recognize_formula(self, candidate: FormulaCandidate) -> OCRRecognitionResult:
         image_path = self._resolve_image_path(candidate.image_path)
         visual_candidate = image_path is not None and image_path.exists()
+        text_candidate = candidate.source_kind.value in {"text_layer", "inline_text"}
         preprocessed_path = image_path
         preprocess_flags: list[str] = []
         cache_key = f"text:{candidate.candidate_id}:{candidate.source_text}"
@@ -92,6 +95,8 @@ class OCRService:
 
         for provider in self.providers:
             provider_name = getattr(provider, "name", provider.__class__.__name__)
+            if text_candidate and provider_name in {"pix2text", "openai_vision"} and not visual_candidate:
+                continue
             self._emit_record(
                 {
                     "candidate_id": candidate.candidate_id,
@@ -161,6 +166,10 @@ class OCRService:
                     "status": "recognized" if result.latex or result.text else "empty",
                     "confidence": result.confidence,
                     "quality_flags": result.quality_flags,
+                    "validator_status": validate_formula_latex(
+                        result.latex or result.text,
+                        source_text=candidate.source_text,
+                    ).status,
                 }
             )
             self._emit_record(
@@ -172,9 +181,20 @@ class OCRService:
                     "quality_flags": result.quality_flags,
                 }
             )
+            validation = validate_formula_latex(
+                result.latex or result.text,
+                source_text=candidate.source_text,
+            )
             if best is None or result.confidence > best.confidence:
                 best = result
-            if (result.latex or result.text) and result.confidence >= self.min_confidence:
+            confidence_threshold = (
+                self.min_text_confidence if text_candidate and not visual_candidate else self.min_confidence
+            )
+            if (
+                (result.latex or result.text)
+                and validation.accepted
+                and result.confidence >= confidence_threshold
+            ):
                 best = result
                 break
 

@@ -167,6 +167,11 @@ export interface FormulaRecognitionResult extends NoLayoutCoordinates {
   latex: string;
   display_mode?: FormulaDisplayMode;
   confidence?: number;
+  accepted_provider?: string | null;
+  accepted_confidence?: number | null;
+  validator_status?: string | null;
+  fallback_reason?: string | null;
+  source_kind?: FormulaSourceKind;
   quality_flags?: string[];
 }
 

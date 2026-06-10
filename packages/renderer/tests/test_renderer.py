@@ -140,6 +140,13 @@ def test_render_to_html_uses_configured_render_defaults() -> None:
     assert "line-height: var(--line-height, 1.55)" in html
 
 
+def test_katex_css_is_fully_self_contained() -> None:
+    html = render_to_html(_render_source_bbox(_document([])))
+
+    assert "fonts/KaTeX_" not in html
+    assert "data:font/" in html or "data:application/font-" in html
+
+
 def test_render_to_pdf_falls_back_when_playwright_driver_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

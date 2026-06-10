@@ -37,6 +37,12 @@ _LAYOUT_EPSILON_PT = 0.01
 _DISPLAY_FORMULA_MIN_LINES = 2.35
 _DISPLAY_FORMULA_VERTICAL_MARGIN_EM = 0.36
 _FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
+_FORMULA_RENDER_MATH_SIGNAL_PATTERN = re.compile(
+    r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|"
+    r"alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|"
+    r"phi|omega|Delta|Omega|cdot|times)|\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*"
+    r"[A-Za-z0-9α-ωΑ-Ω])"
+)
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -111,6 +117,12 @@ _UNRESOLVED_FORMULA_ID_ATTR_PATTERN = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class _FormulaRenderValidation:
+    accepted: bool
+    fallback_reason: str | None = None
+
+
 def _formula_ir_html_for_text(
     text: str,
     document: DocumentIR,
@@ -138,10 +150,18 @@ def _formula_ir_html_for_text(
         else:
             display = formula.display_mode == "display" or role == BlockRole.FORMULA
             rendered = None
-            if formula.latex.strip() and _latex_looks_renderable(formula.latex):
+            validation = _validate_formula_latex(
+                formula.latex,
+                source_text=formula.source_text,
+            )
+            if validation.accepted and formula.latex.strip() and _latex_looks_renderable(formula.latex):
                 rendered = _katex_html(formula.latex, display=display)
             if rendered is None:
-                fallback, fallback_flags = _formula_fallback_html(formula, document)
+                fallback, fallback_flags = _formula_fallback_html(
+                    formula,
+                    document,
+                    fallback_reason=validation.fallback_reason,
+                )
                 parts.append(_formula_ir_span(formula, fallback, display=display))
                 flags.extend(fallback_flags)
             else:
@@ -233,7 +253,12 @@ def _katex_render_to_string(latex: str, *, display: bool) -> str | None:
     return completed.stdout
 
 
-def _formula_fallback_html(formula: Any, document: DocumentIR) -> tuple[str, list[str]]:
+def _formula_fallback_html(
+    formula: Any,
+    document: DocumentIR,
+    *,
+    fallback_reason: str | None = None,
+) -> tuple[str, list[str]]:
     latex = getattr(formula, "latex", "") or ""
     formula_id = getattr(formula, "formula_id", "")
     fallback_text = _formula_plaintext_fallback_text(
@@ -242,7 +267,7 @@ def _formula_fallback_html(formula: Any, document: DocumentIR) -> tuple[str, lis
         formula_id=formula_id,
     )
     asset_id = getattr(formula, "asset_id", None)
-    if asset_id:
+    if asset_id and fallback_reason != "source_text_plaintext":
         for page in document.pages:
             for asset in page.assets:
                 if asset.asset_id == asset_id and asset.path:
@@ -255,6 +280,41 @@ def _formula_fallback_html(formula: Any, document: DocumentIR) -> tuple[str, lis
                         ["formula_image_fallback"],
                     )
     return _formula_plaintext_fallback_html(fallback_text), ["formula_plaintext_fallback"]
+
+
+def _validate_formula_latex(
+    latex: str,
+    *,
+    source_text: str = "",
+) -> _FormulaRenderValidation:
+    normalized = _normalized_text(latex)
+    if not normalized:
+        return _FormulaRenderValidation(False, "source_text_plaintext")
+    if _formula_latex_looks_prose_like(normalized):
+        return _FormulaRenderValidation(False, "source_text_plaintext")
+    signal_count = len(_FORMULA_RENDER_MATH_SIGNAL_PATTERN.findall(normalized))
+    if signal_count < (1 if len(normalized) <= 24 else 2):
+        return _FormulaRenderValidation(False, "source_text_plaintext")
+    if not _latex_looks_renderable(normalized):
+        return _FormulaRenderValidation(
+            False,
+            "formula_asset_image"
+            if source_text.strip() and source_text.strip() != normalized
+            else "source_text_plaintext",
+        )
+    return _FormulaRenderValidation(True, None)
+
+
+def _formula_latex_looks_prose_like(text: str) -> bool:
+    words = re.findall(r"[A-Za-z]{3,}", text)
+    math_signals = len(_FORMULA_RENDER_MATH_SIGNAL_PATTERN.findall(text))
+    if re.search(r"[,.;]\s+[A-Za-z]{3,}", text) and len(words) >= 4:
+        return True
+    if len(text) > 80 and len(words) >= 6 and math_signals < 3:
+        return True
+    if len(words) >= 10 and math_signals <= max(1, len(words) // 8):
+        return True
+    return False
 
 
 def _katex_like_html(latex: str, *, display: bool) -> str:
