@@ -422,6 +422,63 @@ def _estimated_content_height(
     return max(estimated_height, display_height)
 
 
+def _estimated_formula_aware_height(
+    text: str,
+    width_pt: float,
+    font_size_pt: float,
+    line_height: float,
+    *,
+    document: DocumentIR | None = None,
+    block: DocumentBlock | None = None,
+) -> float:
+    estimated_height = _estimated_text_height(
+        text,
+        BoundingBox(x0=0, y0=0, x1=max(width_pt, 1.0), y1=1),
+        font_size_pt,
+        line_height,
+    )
+    if document is None or block is None or not _contains_display_formula(text, document, block):
+        return estimated_height
+
+    estimation_text = _formula_estimation_text(text, document, block)
+    estimated_formula_lines = _estimated_line_count(
+        estimation_text,
+        max(width_pt, 1.0),
+        font_size_pt,
+    )
+    display_lines = max(_DISPLAY_FORMULA_MIN_LINES, float(estimated_formula_lines))
+    display_height = (
+        display_lines * font_size_pt * max(line_height, 1.2)
+        + font_size_pt * _DISPLAY_FORMULA_VERTICAL_MARGIN_EM
+    )
+    return max(estimated_height, display_height)
+
+
+def _estimated_formula_aware_line_count(
+    text: str,
+    width_pt: float,
+    font_size_pt: float,
+    line_height: float,
+    *,
+    document: DocumentIR | None = None,
+    block: DocumentBlock | None = None,
+) -> int:
+    if font_size_pt <= 0 or line_height <= 0:
+        return 1
+    estimated_height = _estimated_formula_aware_height(
+        text,
+        width_pt,
+        font_size_pt,
+        line_height,
+        document=document,
+        block=block,
+    )
+    return max(
+        1,
+        ceil(estimated_height / (font_size_pt * line_height)),
+    )
+
+
 def _content_overflows(
     text: str,
     bbox: BoundingBox,
@@ -1258,7 +1315,13 @@ def _from_ir_and_plans_continuous_reflow(
         if block.role == BlockRole.REFERENCE and current_blocks:
             finish_page()
 
-        estimated_height = _estimated_reflow_height(text, content_width, style)
+        estimated_height = _estimated_reflow_height(
+            text,
+            content_width,
+            style,
+            document=document,
+            source_block=block,
+        )
         keep_with_next = block.role in {BlockRole.TITLE, BlockRole.HEADING}
         if keep_with_next and current_blocks and cursor_y + estimated_height + 36 > content_bottom:
             finish_page()
@@ -1280,11 +1343,19 @@ def _from_ir_and_plans_continuous_reflow(
                 content_bottom - content_y0,
                 style,
                 first_max_height_pt=first_fragment_height if current_blocks else None,
+                document=document,
+                source_block=block,
             )
         )
         fragment_count = len(fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
-            fragment_height = _estimated_reflow_height(fragment, content_width, style)
+            fragment_height = _estimated_reflow_height(
+                fragment,
+                content_width,
+                style,
+                document=document,
+                source_block=block,
+            )
             if current_blocks and cursor_y + style.space_before_pt + fragment_height > content_bottom:
                 finish_page()
 
@@ -1341,10 +1412,13 @@ def _from_ir_and_plans_continuous_reflow(
                     "output_page_id": f"r{page_index:04d}",
                     "role": block.role.value,
                     "translated_chars": len(fragment),
-                    "estimated_lines": _estimated_line_count(
+                    "estimated_lines": _estimated_formula_aware_line_count(
                         fragment,
                         content_width,
                         style.font_size_pt,
+                        style.line_height,
+                        document=document,
+                        block=block,
                     ),
                     "bbox": bbox.model_dump(),
                     "fragment_index": fragment_index,
@@ -1561,10 +1635,22 @@ def _estimated_reflow_height(
     text: str,
     width_pt: float,
     style: RoleStyleDefaults,
+    *,
+    document: DocumentIR | None = None,
+    source_block: DocumentBlock | None = None,
 ) -> float:
     text_width = max(1.0, width_pt - style.first_line_indent_em * style.font_size_pt)
-    lines = _estimated_line_count(text, text_width, style.font_size_pt)
-    return max(style.font_size_pt * style.line_height, lines * style.font_size_pt * style.line_height)
+    return max(
+        style.font_size_pt * style.line_height,
+        _estimated_formula_aware_height(
+            text,
+            text_width,
+            style.font_size_pt,
+            style.line_height,
+            document=document,
+            block=source_block,
+        ),
+    )
 
 
 def _split_reflow_text(
@@ -1574,6 +1660,8 @@ def _split_reflow_text(
     style: RoleStyleDefaults,
     *,
     first_max_height_pt: float | None = None,
+    document: DocumentIR | None = None,
+    source_block: DocumentBlock | None = None,
 ) -> list[str]:
     text = _normalized_text(text)
     if not text:
@@ -1597,7 +1685,14 @@ def _split_reflow_text(
         )
         chars_for_fragment = min(
             chars_for_fragment,
-            _max_reflow_chars_to_fit(remaining, width_pt, style, height_for_fragment),
+            _max_reflow_chars_to_fit(
+                remaining,
+                width_pt,
+                style,
+                height_for_fragment,
+                document=document,
+                source_block=source_block,
+            ),
         )
         if len(remaining) <= chars_for_fragment:
             fragments.append(remaining)
@@ -1630,6 +1725,9 @@ def _max_reflow_chars_to_fit(
     width_pt: float,
     style: RoleStyleDefaults,
     height_pt: float,
+    *,
+    document: DocumentIR | None = None,
+    source_block: DocumentBlock | None = None,
 ) -> int:
     low = 1
     high = max(1, len(text))
@@ -1637,7 +1735,16 @@ def _max_reflow_chars_to_fit(
     while low <= high:
         mid = (low + high) // 2
         candidate = text[:mid].strip()
-        if _estimated_reflow_height(candidate, width_pt, style) <= height_pt:
+        if (
+            _estimated_reflow_height(
+                candidate,
+                width_pt,
+                style,
+                document=document,
+                source_block=source_block,
+            )
+            <= height_pt
+        ):
             best = max(1, mid)
             low = mid + 1
         else:

@@ -1061,6 +1061,52 @@ def test_continuous_reflow_suppresses_formula_assets_but_preserves_figures() -> 
     } in render_document.layout_trace["suppressed_artifacts"]
 
 
+def test_continuous_reflow_allocates_display_formula_height() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=50, y0=90, x1=250, y1=120),
+        source_text="{{formula:formula_1}}",
+        font_size=12,
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\frac{\partial V}{\partial t} = \nabla^2 V + \sum_i x_i",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    render_block = render_document.pages[0].blocks[0]
+    html = render_to_html(render_document)
+
+    assert render_block.role == BlockRole.FORMULA
+    assert render_block.bbox.y1 - render_block.bbox.y0 > 12.0 * 1.35
+    assert render_document.layout_trace["blocks"][0]["estimated_lines"] > 1
+    assert 'class="katex-display"' in html
+    assert '--h-pt: 16.2pt' not in html
+
+
 def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:
     artifact = _block(
         "p1_timestamp",
