@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment, PackageLoader, select_autoescape
+from jinja2 import Environment, PackageLoader
 
 from .models import RenderDocument
 
@@ -39,9 +39,13 @@ def _css_font_stack(font_stack: list[str]) -> str:
 
 
 def _env() -> Environment:
+    # NOTE: select_autoescape(["html", "xml"]) silently disabled escaping for
+    # "*.html.j2" templates (extension is "j2"), letting raw PDF text reach the
+    # HTML output. Autoescape is therefore forced on; CSS-context interpolations
+    # in the template are explicitly marked |safe.
     env = Environment(
         loader=PackageLoader("pdf_renderer", "templates"),
-        autoescape=select_autoescape(["html", "xml"]),
+        autoescape=True,
         trim_blocks=True,
         lstrip_blocks=True,
     )

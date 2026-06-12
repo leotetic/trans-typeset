@@ -166,7 +166,7 @@ function App() {
     translation_concurrency: 2,
     translator_max_attempts: 2,
     translation_chunk_max_chars: 6000,
-    ocr_provider_order: ["deterministic"],
+    ocr_provider_order: ["pix2text", "deterministic"],
     ocr_min_confidence: 0.35,
     ocr_provider_timeout_seconds: 12,
     ocr_max_visual_candidates: 12

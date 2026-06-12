@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from pdf_translator_schema import Asset, BlockRole, BoundingBox, DocumentIR
 from pdf_translator_schema.models import (
@@ -15,10 +16,20 @@ from pdf_translator_schema.models import (
 from .normalization import contains_natural_language, is_noise_text, normalize_pdf_text
 
 _FORMULA_REF_PATTERN = re.compile(r"^\{\{formula:[A-Za-z0-9_.:-]+\}\}$")
+_INLINE_FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
 _MATH_SIGNAL_PATTERN = re.compile(
     r"(?:[=≤≥∑∫√∞≈≠∂∇]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma)|"
     r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*[A-Za-z0-9α-ωΑ-Ω])"
 )
+_EQUATION_NUMBER_SUFFIX = re.compile(r"(?:[,;:]\s*)?(\(\d+\))\s*$")
+_EQUATION_NUMBER_WITH_SHORT_TAIL = re.compile(
+    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$"
+)
+_FORMULA_CLUSTER_CACHE_ATTR = "_formula_fragment_cluster_diagnostics"
+_DISPLAY_CLUSTER_MAX_TEXT_LEN = 240
+_DISPLAY_CLUSTER_MAX_VERTICAL_GAP = 22.0
+_DISPLAY_CLUSTER_MAX_HORIZONTAL_GAP = 96.0
+_DISPLAY_CLUSTER_MIN_CENTER_ALIGNMENT_PT = 32.0
 
 
 @dataclass(frozen=True)
@@ -36,15 +47,47 @@ class FormulaCandidate:
     display_mode: FormulaDisplayMode = "display"
     image_path: str | None = None
     quality_flags: tuple[str, ...] = ()
+    legacy_formula_ids: tuple[str, ...] = ()
+    parser_cluster_id: str | None = None
 
 
 def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
     candidates: list[FormulaCandidate] = []
     seen_keys: set[tuple[str | None, str | None]] = set()
+    promoted_formula_ids: set[str] = set()
+    consumed_block_ids: set[str] = set()
+
+    promoted_candidates, promoted_formula_ids, consumed_block_ids = _promote_existing_formula_candidates(
+        document
+    )
+    for candidate in promoted_candidates:
+        key = (candidate.source_block_id or candidate.anchor_block_id, candidate.candidate_id)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        candidates.append(candidate)
 
     for page in document.pages:
         assets_by_id = {asset.asset_id: asset for asset in page.assets}
+        page_consumed_block_ids = {
+            block_id
+            for block_id in consumed_block_ids
+            if any(page.page_id == block.page_id and block.block_id == block_id for block in page.blocks)
+        }
+        cluster_candidates, clustered_block_ids = _detect_display_cluster_candidates(
+            page,
+            skip_block_ids=page_consumed_block_ids,
+        )
+        for candidate in cluster_candidates:
+            key = (candidate.source_block_id, candidate.candidate_id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            candidates.append(candidate)
+        page_consumed_block_ids.update(clustered_block_ids)
         for block in page.blocks:
+            if block.block_id in page_consumed_block_ids:
+                continue
             block_text = (block.text_for_translation or block.source_text).strip()
             if block.formula_id or _FORMULA_REF_PATTERN.fullmatch(block_text):
                 continue
@@ -138,7 +181,7 @@ def detect_formula_candidates(document: DocumentIR) -> list[FormulaCandidate]:
                 or candidate.asset_id not in matched_asset_ids
             ]
 
-    return candidates
+    return _sort_candidates_by_document_order(candidates, document)
 
 
 def _looks_like_display_formula_text(text: str) -> bool:
@@ -177,6 +220,312 @@ def _looks_like_display_formula_text(text: str) -> bool:
     if len(alpha_words) > 4 and signal_count < 2:
         return False
     return len(alpha_words) <= 8
+
+
+def _sort_candidates_by_document_order(
+    candidates: list[FormulaCandidate],
+    document: DocumentIR,
+) -> list[FormulaCandidate]:
+    page_order = {page.page_id: index for index, page in enumerate(document.pages)}
+    block_order: dict[str, tuple[int, int, float, float]] = {}
+    asset_order: dict[str, tuple[int, float, float, float]] = {}
+    for page in document.pages:
+        page_index = page_order[page.page_id]
+        for block in page.blocks:
+            block_order[block.block_id] = (
+                page_index,
+                block.reading_order,
+                block.bbox.y0,
+                block.bbox.x0,
+            )
+        for asset in page.assets:
+            asset_order[asset.asset_id] = (
+                page_index,
+                asset.bbox.y0,
+                asset.bbox.x0,
+                asset.bbox.y1,
+            )
+
+    def sort_key(
+        indexed_candidate: tuple[int, FormulaCandidate],
+    ) -> tuple[int, float, float, float, int, int]:
+        index, candidate = indexed_candidate
+        block_id = candidate.source_block_id or candidate.anchor_block_id
+        if block_id and block_id in block_order:
+            page_index, reading_order, y0, x0 = block_order[block_id]
+            source_start = candidate.source_text_range[0] if candidate.source_text_range else -1
+            return (page_index, float(reading_order), y0, x0, source_start, index)
+        if candidate.asset_id and candidate.asset_id in asset_order:
+            page_index, y0, x0, y1 = asset_order[candidate.asset_id]
+            return (page_index, y0, x0, y1, -1, index)
+        source_start = candidate.source_text_range[0] if candidate.source_text_range else -1
+        return (
+            page_order.get(candidate.page_id, len(page_order)),
+            candidate.bbox.y0,
+            candidate.bbox.x0,
+            candidate.bbox.y1,
+            source_start,
+            index,
+        )
+
+    return [candidate for _index, candidate in sorted(enumerate(candidates), key=sort_key)]
+
+
+def _promote_existing_formula_candidates(
+    document: DocumentIR,
+) -> tuple[list[FormulaCandidate], set[str], set[str]]:
+    candidates: list[FormulaCandidate] = []
+    promoted_formula_ids: set[str] = set()
+    consumed_block_ids: set[str] = set()
+    blocks_by_id = {
+        block.block_id: block
+        for page in document.pages
+        for block in page.blocks
+    }
+    formulas_by_id = document.formulas_by_id()
+    cluster_diagnostics = getattr(document, _FORMULA_CLUSTER_CACHE_ATTR, {}) or {}
+    formula_ids_in_clusters: set[str] = set()
+
+    for cluster in cluster_diagnostics.get("formula_fragment_clusters", []):
+        primary_block_id = cluster.get("primary_block_id")
+        if not isinstance(primary_block_id, str):
+            continue
+        primary_block = blocks_by_id.get(primary_block_id)
+        if primary_block is None:
+            continue
+        formula_ids = tuple(
+            formula_id
+            for formula_id in cluster.get("formula_ids", [])
+            if isinstance(formula_id, str) and formula_id in formulas_by_id
+        )
+        if not formula_ids:
+            continue
+        formula_ids_in_clusters.update(formula_ids)
+        raw_cluster_text = cluster.get("combined_text")
+        cluster_text = (
+            raw_cluster_text
+            if isinstance(raw_cluster_text, str) and raw_cluster_text.strip()
+            else primary_block.source_text
+        )
+        resolved_cluster_text = _resolve_formula_refs(cluster_text, formulas_by_id).strip()
+        equation_number = _extract_equation_number(cluster_text)
+        cluster_flags = [
+            "formula_display_cluster",
+            "legacy_formula_migrated",
+            *[f"legacy_formula_replaced:{formula_id}" for formula_id in formula_ids],
+        ]
+        if equation_number is not None:
+            cluster_flags.append("formula_equation_number_preserved")
+        candidates.append(
+            FormulaCandidate(
+                candidate_id=_candidate_id(
+                    primary_block.page_id,
+                    "legacy_cluster",
+                    primary_block.block_id,
+                    primary_block.bbox,
+                ),
+                page_id=primary_block.page_id,
+                bbox=primary_block.bbox,
+                source_kind=FormulaSourceKind.TEXT_LAYER,
+                source_block_id=primary_block.block_id,
+                source_text=resolved_cluster_text,
+                source_text_range=(0, len(resolved_cluster_text))
+                if resolved_cluster_text
+                else None,
+                span_ids=tuple(primary_block.span_refs),
+                display_mode="display",
+                quality_flags=tuple(_unique_flags(cluster_flags)),
+                legacy_formula_ids=formula_ids,
+                parser_cluster_id=cluster.get("cluster_id")
+                if isinstance(cluster.get("cluster_id"), str)
+                else None,
+            )
+        )
+        for block_id in cluster.get("merged_block_ids", []):
+            if isinstance(block_id, str):
+                consumed_block_ids.add(block_id)
+        promoted_formula_ids.update(formula_ids)
+
+    for formula in document.formulas:
+        if formula.formula_id in promoted_formula_ids:
+            continue
+        block_id = formula.source_block_id or formula.anchor_block_id
+        block = blocks_by_id.get(block_id or "")
+        if block is None:
+            continue
+        source_text = formula.source_text.strip()
+        if not source_text or is_noise_text(source_text):
+            continue
+        flags = [
+            "legacy_formula_migrated",
+            f"legacy_formula_replaced:{formula.formula_id}",
+        ]
+        if formula.display_mode == "display":
+            flags.append("formula_display_cluster")
+        candidate = FormulaCandidate(
+            candidate_id=_candidate_id(
+                formula.page_id,
+                "legacy_formula",
+                formula.formula_id,
+                block.bbox,
+            ),
+            page_id=formula.page_id,
+            bbox=block.bbox,
+            source_kind=formula.source_kind,
+            source_block_id=formula.source_block_id,
+            anchor_block_id=formula.anchor_block_id,
+            asset_id=formula.asset_id,
+            source_text=source_text,
+            source_text_range=formula.source_text_range,
+            span_ids=tuple(formula.span_ids),
+            display_mode=formula.display_mode,
+            quality_flags=tuple(_unique_flags([*flags, *formula.quality_flags])),
+            legacy_formula_ids=(formula.formula_id,),
+        )
+        candidates.append(candidate)
+        consumed_block_ids.add(block.block_id)
+        promoted_formula_ids.add(formula.formula_id)
+
+    return candidates, promoted_formula_ids, consumed_block_ids
+
+
+def _detect_display_cluster_candidates(
+    page: Any,
+    *,
+    skip_block_ids: set[str],
+) -> tuple[list[FormulaCandidate], set[str]]:
+    ordered_blocks = sorted(page.blocks, key=lambda item: item.reading_order)
+    consumed: set[str] = set()
+    candidates: list[FormulaCandidate] = []
+    index = 0
+    while index < len(ordered_blocks):
+        block = ordered_blocks[index]
+        if block.block_id in skip_block_ids or block.block_id in consumed:
+            index += 1
+            continue
+        if not _looks_like_display_cluster_fragment(block):
+            index += 1
+            continue
+        cluster = [block]
+        next_index = index + 1
+        while next_index < len(ordered_blocks):
+            candidate_block = ordered_blocks[next_index]
+            if (
+                candidate_block.block_id in skip_block_ids
+                or candidate_block.block_id in consumed
+                or not _looks_like_display_cluster_fragment(candidate_block)
+                or not _display_cluster_members_align(cluster[-1], candidate_block)
+            ):
+                break
+            cluster.append(candidate_block)
+            next_index += 1
+        if len(cluster) == 1 and cluster[0].role != BlockRole.FORMULA:
+            index += 1
+            continue
+        combined_text = " ".join(
+            block.source_text.strip()
+            for block in cluster
+            if block.source_text.strip()
+        )
+        if len(cluster) == 1 and not _looks_like_display_formula_text(combined_text):
+            index += 1
+            continue
+        bbox = _bbox_union([member.bbox for member in cluster])
+        source_block = cluster[0]
+        flags = ["formula_display_cluster"]
+        if _extract_equation_number(combined_text) is not None:
+            flags.append("formula_equation_number_preserved")
+        candidates.append(
+            FormulaCandidate(
+                candidate_id=_candidate_id(
+                    source_block.page_id,
+                    "display_cluster",
+                    source_block.block_id,
+                    bbox,
+                ),
+                page_id=source_block.page_id,
+                bbox=bbox,
+                source_kind=FormulaSourceKind.TEXT_LAYER,
+                source_block_id=source_block.block_id,
+                source_text=combined_text,
+                source_text_range=(0, len(combined_text)) if combined_text else None,
+                span_ids=tuple(
+                    span_ref
+                    for member in cluster
+                    for span_ref in member.span_refs
+                ),
+                display_mode="display",
+                quality_flags=tuple(flags),
+            )
+        )
+        consumed.update(member.block_id for member in cluster)
+        index = next_index
+    return candidates, consumed
+
+
+def _looks_like_display_cluster_fragment(block: DocumentBlock) -> bool:
+    text = (block.text_for_translation or block.source_text).strip()
+    if not text or len(text) > _DISPLAY_CLUSTER_MAX_TEXT_LEN:
+        return False
+    if block.role == BlockRole.FORMULA:
+        return True
+    if is_noise_text(text):
+        return False
+    normalized = normalize_pdf_text(text)
+    if len(normalized) < 2:
+        return False
+    if contains_natural_language(normalized):
+        return False
+    if re.search(r"@\S+\.\S+|\b(?:doi|https?|figure|table)\b", normalized, re.IGNORECASE):
+        return False
+    math_signals = len(_MATH_SIGNAL_PATTERN.findall(normalized))
+    if math_signals >= 2:
+        return True
+    return any(marker in normalized for marker in ("=", "∂", "∇", "∫", "∑"))
+
+
+def _display_cluster_members_align(left: DocumentBlock, right: DocumentBlock) -> bool:
+    if right.reading_order != left.reading_order + 1:
+        return False
+    vertical_gap = right.bbox.y0 - left.bbox.y1
+    if vertical_gap > _DISPLAY_CLUSTER_MAX_VERTICAL_GAP:
+        return False
+    horizontal_gap = max(0.0, max(left.bbox.x0, right.bbox.x0) - min(left.bbox.x1, right.bbox.x1))
+    if horizontal_gap > _DISPLAY_CLUSTER_MAX_HORIZONTAL_GAP:
+        return False
+    left_center = (left.bbox.x0 + left.bbox.x1) / 2
+    right_center = (right.bbox.x0 + right.bbox.x1) / 2
+    return abs(left_center - right_center) <= _DISPLAY_CLUSTER_MIN_CENTER_ALIGNMENT_PT
+
+
+def _extract_equation_number(text: str) -> str | None:
+    normalized = normalize_pdf_text(text)
+    match = _EQUATION_NUMBER_SUFFIX.search(normalized)
+    if match is not None:
+        return match.group(1)
+    match = _EQUATION_NUMBER_WITH_SHORT_TAIL.search(normalized)
+    if match is None:
+        return None
+    tail = match.group("tail").strip()
+    if re.search(r"\b(?:and|as|for|from|is|represents?|the|where|with)\b", tail, re.IGNORECASE):
+        return None
+    if len(re.findall(r"[A-Za-z]{3,}", tail)) > 1:
+        return None
+    return match.group(1)
+
+
+def _resolve_formula_refs(
+    text: str,
+    formulas_by_id: dict[str, Any],
+) -> str:
+    def replace_formula_ref(match: re.Match[str]) -> str:
+        formula_id = match.group(1)
+        formula = formulas_by_id.get(formula_id)
+        if formula is None:
+            return match.group(0)
+        return str(formula.source_text or formula.latex or match.group(0))
+
+    return _INLINE_FORMULA_REF_PATTERN.sub(replace_formula_ref, text)
 
 
 def _looks_like_prose(text: str) -> bool:
@@ -320,6 +669,8 @@ def _detect_inline_formula_candidates(block: DocumentBlock) -> list[FormulaCandi
         for span in line_spans:
             if _span_looks_math(span):
                 current.append(span)
+            elif _span_continues_dangling_script(current, span):
+                current.append(span)
             else:
                 if _span_run_looks_formula(current):
                     runs.append(current)
@@ -417,6 +768,25 @@ def _span_run_looks_formula(spans: list[TextSpanIR]) -> bool:
     return _looks_like_inline_formula_text(text)
 
 
+def _span_continues_dangling_script(
+    current: list[TextSpanIR],
+    span: TextSpanIR,
+) -> bool:
+    if not current:
+        return False
+    current_text = "".join(item.text for item in current).rstrip()
+    if not current_text or current_text[-1] not in {"_", "^"}:
+        return False
+    text = span.text.strip()
+    if not text:
+        return False
+    if re.fullmatch(r"\{?[A-Za-z0-9α-ωΑ-Ω+\-–−]{1,12}\}?[)\]]*", text):
+        return True
+    if text.startswith("{") and "}" in text[:16]:
+        return True
+    return False
+
+
 def _looks_like_inline_formula_text(text: str) -> bool:
     if is_noise_text(text):
         return False
@@ -478,3 +848,13 @@ def _candidate_id(
         f"{page_id}|{source}|{source_id}|{normalized_bbox}".encode()
     ).hexdigest()
     return f"{page_id}_formula_{digest[:12]}"
+
+
+def _unique_flags(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique

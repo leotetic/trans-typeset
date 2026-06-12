@@ -26,6 +26,10 @@ from .formulas.normalization import (
 HEADER_FOOTER_BAND_RATIO = 0.08
 MIN_TEXT_BLOCKS_FOR_DIGITAL_PDF = 1
 TEXT_DICT_FLAGS = 0
+_AIP_PARTIAL_SLASH_FONT_MARKERS = ("4C4E51",)
+_AIP_SYMBOL_FONT_MARKERS = ("4C4E74",)
+_SCRIPTABLE_PREVIOUS_CHAR = re.compile(r"[A-Za-z0-9α-ωΑ-Ω)\]\}']")
+_MATH_GEOMETRY_MARKER = re.compile(r"(?:[∂@∇∫∑¼þ=/_^]|\b[fgqmn][sn]\b)")
 
 
 class UnsupportedPdfError(ValueError):
@@ -115,12 +119,7 @@ def _reading_sort_key(block: dict) -> tuple[int, float, float, float]:
 
 
 def _block_text(block: dict) -> str:
-    parts: list[str] = []
-    for line in block.get("lines", []):
-        line_text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
-        if line_text.strip():
-            parts.append(line_text.strip())
-    return normalize_pdf_text(" ".join(parts))
+    return normalize_pdf_text(" ".join(_block_text_parts(block)))
 
 
 def _header_footer_keys(page_dicts: list[dict]) -> set[str]:
@@ -171,12 +170,28 @@ def _assign_column(block: dict, page_width: float) -> int:
     return 0 if center < page_width / 2 else 1
 
 
+def _is_column_body_candidate(block: dict, page_width: float) -> bool:
+    x0, y0, x1, y1 = block["bbox"]
+    width = float(x1) - float(x0)
+    height = float(y1) - float(y0)
+    if width <= 0 or height <= 0:
+        return False
+    if width > page_width * 0.58:
+        return False
+    if width < 14 and height > 40:
+        return False
+    return True
+
+
 def _order_text_blocks(text_blocks: list[dict], page_width: float) -> list[dict]:
     if len(text_blocks) < 3:
         return sorted(text_blocks, key=_reading_sort_key)
 
-    left = [block for block in text_blocks if _assign_column(block, page_width) == 0]
-    right = [block for block in text_blocks if _assign_column(block, page_width) == 1]
+    column_blocks = [
+        block for block in text_blocks if _is_column_body_candidate(block, page_width)
+    ]
+    left = [block for block in column_blocks if _assign_column(block, page_width) == 0]
+    right = [block for block in column_blocks if _assign_column(block, page_width) == 1]
     if not left or not right:
         return sorted(text_blocks, key=_reading_sort_key)
 
@@ -186,15 +201,207 @@ def _order_text_blocks(text_blocks: list[dict], page_width: float) -> list[dict]
     if not has_plausible_columns:
         return sorted(text_blocks, key=_reading_sort_key)
 
-    return sorted(
-        text_blocks,
-        key=lambda block: (
-            _assign_column(block, page_width),
-            round(block["bbox"][1] / 8),
-            round(block["bbox"][1], 1),
-            round(block["bbox"][0], 1),
-        ),
+    min_body_y = min(block["bbox"][1] for block in column_blocks)
+    max_body_y = max(block["bbox"][3] for block in column_blocks)
+
+    def column_order_key(block: dict) -> tuple[float, float, float, float]:
+        x0, y0, _x1, y1 = block["bbox"]
+        if not _is_column_body_candidate(block, page_width):
+            if y1 < min_body_y:
+                group = -1.0
+            else:
+                group = 2.0 if y0 > max_body_y else 1.5
+            return (group, round(y0 / 8), round(y0, 1), round(x0, 1))
+        return (
+            float(_assign_column(block, page_width)),
+            round(y0 / 8),
+            round(y0, 1),
+            round(x0, 1),
+        )
+
+    return sorted(text_blocks, key=column_order_key)
+
+
+def _font_has_marker(font_name: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in font_name for marker in markers)
+
+
+def _normalize_span_text(span: dict) -> str:
+    text = str(span.get("text", ""))
+    font_name = str(span.get("font", ""))
+    if _font_has_marker(font_name, _AIP_PARTIAL_SLASH_FONT_MARKERS):
+        text = text.replace("@", "∂").replace("=", "/")
+    return normalize_pdf_text_fragment(text)
+
+
+def _line_base_font_size(line: dict) -> float:
+    sizes = [
+        float(span.get("size"))
+        for span in line.get("spans", [])
+        if isinstance(span.get("size"), (int, float))
+        and str(span.get("text", "")).strip()
+    ]
+    return max(sizes) if sizes else 10.0
+
+
+def _line_main_center_y(line: dict, base_font_size: float) -> float | None:
+    centers: list[float] = []
+    for span in line.get("spans", []):
+        size = span.get("size")
+        bbox = _coerce_bbox_tuple(span.get("bbox"))
+        if not isinstance(size, (int, float)) or bbox is None:
+            continue
+        if float(size) >= base_font_size * 0.9 and str(span.get("text", "")).strip():
+            centers.append((bbox[1] + bbox[3]) / 2)
+    if not centers:
+        line_bbox = _coerce_bbox_tuple(line.get("bbox"))
+        if line_bbox is None:
+            return None
+        return (line_bbox[1] + line_bbox[3]) / 2
+    centers.sort()
+    return centers[len(centers) // 2]
+
+
+def _last_non_space(text: str) -> str:
+    match = re.search(r"\S(?=\s*$)", text)
+    return match.group(0) if match else ""
+
+
+def _can_attach_script(text: str) -> bool:
+    previous = _last_non_space(text)
+    return bool(previous and _SCRIPTABLE_PREVIOUS_CHAR.fullmatch(previous))
+
+
+def _is_prime_glyph(text: str, fonts: list[str]) -> bool:
+    return text == "0" and any(
+        _font_has_marker(font_name, _AIP_SYMBOL_FONT_MARKERS)
+        for font_name in fonts
     )
+
+
+def _script_suffix(kind: str, text: str) -> str:
+    if text == "'":
+        return "'"
+    return f"_{text}" if kind == "sub" and text.startswith("{") else (
+        f"^{text}" if kind == "super" and text.startswith("{") else f"{'^' if kind == 'super' else '_'}{{{text}}}"
+    )
+
+
+def _format_line_text(line: dict) -> str:
+    base_size = _line_base_font_size(line)
+    main_center_y = _line_main_center_y(line, base_size)
+    tokens: list[dict[str, object]] = []
+    for span in line.get("spans", []):
+        text = _normalize_span_text(span)
+        if not text:
+            continue
+        bbox = _coerce_bbox_tuple(span.get("bbox"))
+        size = span.get("size")
+        kind: str | None = None
+        if (
+            main_center_y is not None
+            and bbox is not None
+            and isinstance(size, (int, float))
+            and float(size) <= base_size * 0.82
+        ):
+            center_y = (bbox[1] + bbox[3]) / 2
+            threshold = max(0.9, base_size * 0.16)
+            if center_y < main_center_y - threshold:
+                kind = "super"
+            elif center_y > main_center_y + threshold:
+                kind = "sub"
+        tokens.append(
+            {
+                "text": text,
+                "kind": kind,
+                "font": str(span.get("font", "")),
+            }
+        )
+
+    output = ""
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        kind = token["kind"]
+        text = str(token["text"])
+        if kind not in {"sub", "super"} or not text.strip() or not _can_attach_script(output):
+            output += text
+            index += 1
+            continue
+
+        group_texts = [text]
+        group_fonts = [str(token["font"])]
+        next_index = index + 1
+        while next_index < len(tokens) and tokens[next_index]["kind"] == kind:
+            group_texts.append(str(tokens[next_index]["text"]))
+            group_fonts.append(str(tokens[next_index]["font"]))
+            next_index += 1
+        script_text = "".join(group_texts).strip()
+        if not script_text:
+            output += "".join(group_texts)
+        else:
+            if _is_prime_glyph(script_text, group_fonts):
+                script_text = "'"
+            output += _script_suffix(str(kind), script_text)
+        index = next_index
+    return output
+
+
+def _block_has_stacked_math_geometry(block: dict) -> bool:
+    lines = [
+        line
+        for line in block.get("lines", [])
+        if "".join(_normalize_span_text(span) for span in line.get("spans", [])).strip()
+    ]
+    if len(lines) < 2:
+        return False
+    line_text = " ".join(
+        _format_line_text(line)
+        for line in lines
+    )
+    if not _MATH_GEOMETRY_MARKER.search(line_text):
+        return False
+    narrow_lines = 0
+    for line in lines:
+        bbox = _coerce_bbox_tuple(line.get("bbox"))
+        if bbox is None:
+            continue
+        width = bbox[2] - bbox[0]
+        text = _format_line_text(line).strip()
+        if width <= 42 or len(text) <= 8:
+            narrow_lines += 1
+    return narrow_lines >= 1
+
+
+def _repair_stacked_formula_text(text: str, block: dict) -> str:
+    if not _block_has_stacked_math_geometry(block):
+        return text
+    repaired = text
+    repaired = re.sub(
+        r"(?:∂|@)\s*f(?:_?\{?s\}?)\s*(?:∂|@)\s*t\b",
+        r"\\frac{∂f_s}{∂t}",
+        repaired,
+    )
+    repaired = re.sub(
+        r"\bq(?:_?\{?s\}?)\s+m(?:_?\{?s\}?)\b",
+        r"\\frac{q_s}{m_s}",
+        repaired,
+    )
+    repaired = re.sub(
+        r"\bf'\s+s\s+k\^?\{?2\}?\b",
+        r"\\frac{f'_s}{k^2}",
+        repaired,
+    )
+    return repaired
+
+
+def _block_text_parts(block: dict) -> list[str]:
+    parts: list[str] = []
+    for line in block.get("lines", []):
+        line_text = _format_line_text(line)
+        if line_text.strip():
+            parts.append(line_text.strip())
+    return parts
 
 
 def _stable_asset_id(
@@ -445,17 +652,14 @@ def parse_pdf(
         )
 
         for block_index, block in enumerate(text_blocks):
-            text_parts: list[str] = []
+            text_parts = _block_text_parts(block)
             font_sizes: list[float] = []
             font_names: list[str] = []
             is_bold = False
             is_italic = False
 
             for line_index, line in enumerate(block.get("lines", [])):
-                line_text = ""
                 for span_index, span in enumerate(line.get("spans", [])):
-                    text = normalize_pdf_text_fragment(str(span.get("text", "")))
-                    line_text += text
                     size = span.get("size")
                     if isinstance(size, (int, float)):
                         font_sizes.append(float(size))
@@ -468,10 +672,9 @@ def parse_pdf(
                             or "italic" in font.lower()
                             or "oblique" in font.lower()
                         )
-                if line_text.strip():
-                    text_parts.append(line_text.strip())
 
             source_text = normalize_pdf_text(" ".join(text_parts))
+            source_text = normalize_pdf_text(_repair_stacked_formula_text(source_text, block))
             if not source_text or is_noise_text(source_text):
                 continue
 
@@ -486,7 +689,7 @@ def parse_pdf(
                 line_span_ids: list[str] = []
                 line_bboxes: list[tuple[float, float, float, float]] = []
                 for span_index, span in enumerate(line.get("spans", [])):
-                    text = normalize_pdf_text_fragment(str(span.get("text", "")))
+                    text = _normalize_span_text(span)
                     if not text:
                         continue
                     span_bbox_tuple = _coerce_bbox_tuple(span.get("bbox"))
@@ -524,6 +727,7 @@ def parse_pdf(
                     line_bboxes.append(span_bbox_tuple)
                     line_text += text
                 line_bbox_tuple = _coerce_bbox_tuple(line.get("bbox")) or _bbox_union(line_bboxes)
+                line_text = _format_line_text(line)
                 if line_text.strip() and _valid_bbox_tuple(line_bbox_tuple):
                     lines.append(
                         TextLineIR(
@@ -594,6 +798,7 @@ def parse_pdf(
 
 
 def build_parser_diagnostics(document: DocumentIR) -> dict:
+    formula_diagnostics = build_formula_diagnostics(document)
     role_counts: dict[str, int] = {}
     for page in document.pages:
         for block in page.blocks:
@@ -607,7 +812,6 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
     if role_counts.get(BlockRole.TABLE.value, 0):
         fallback_flags.append("table_text_fallback")
     if role_counts.get(BlockRole.FORMULA.value, 0):
-        formula_diagnostics = build_formula_diagnostics(document)
         if formula_diagnostics["formula_count"]:
             fallback_flags.append("formula_placeholder_normalized")
         else:
@@ -625,7 +829,19 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
         "asset_count": sum(len(page.assets) for page in document.pages),
         "role_counts": role_counts,
         "asset_counts": asset_counts,
-        "formula_diagnostics": build_formula_diagnostics(document),
+        "formula_diagnostics": formula_diagnostics,
+        "formula_fragment_cluster_count": formula_diagnostics.get(
+            "formula_fragment_cluster_count",
+            0,
+        ),
+        "formula_fragment_suppressed_block_count": formula_diagnostics.get(
+            "formula_fragment_suppressed_block_count",
+            0,
+        ),
+        "formula_fragment_clusters": formula_diagnostics.get(
+            "formula_fragment_clusters",
+            [],
+        ),
         "fallback_flags": fallback_flags,
         "unsupported_features": [
             {

@@ -676,6 +676,7 @@ class RoleStyleDefaults(StrictBaseModel):
     first_line_indent_em: float = Field(default=0.0, ge=0)
     space_before_pt: float = Field(default=0.0, ge=0)
     space_after_pt: float = Field(default=0.0, ge=0)
+    font_stack: list[str] | None = Field(default=None, min_length=1)
 
 
 def _role_style(role: str) -> RoleStyleDefaults:
@@ -707,6 +708,9 @@ class RenderDefaults(StrictBaseModel):
         default=DEFAULT_RENDER_DEFAULTS["paragraph_spacing_em"], ge=0
     )
     layout_mode: LayoutMode = LayoutMode(DEFAULT_RENDER_DEFAULTS["layout_mode"])
+    formula_numbering: Literal["none", "parenthesized"] = DEFAULT_RENDER_DEFAULTS[
+        "formula_numbering"
+    ]
     page_layout: PageLayoutDefaults = Field(default_factory=PageLayoutDefaults)
     role_styles: RoleStyles = Field(default_factory=RoleStyles)
     alignment: AlignmentDefaults = Field(default_factory=AlignmentDefaults)

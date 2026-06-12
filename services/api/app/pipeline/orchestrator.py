@@ -320,24 +320,23 @@ async def _enrich_document_formulas(
     target_lang: str = "",
 ) -> Any:
     runtime_config = effective_runtime_config(storage)
-    recognizer: Any
-    visual_enabled = bool(
+    provider_order = [str(provider) for provider in runtime_config.get("ocr_provider_order", [])]
+    formula_openai_enabled = bool(
         runtime_config["openai_api_key"]
-        and runtime_config["agent_enable_vision_analysis"]
+        and "openai_vision" in provider_order
     )
     openai_ocr_provider: Any | None = None
-    if visual_enabled:
-        recognizer = OpenAIFormulaRecognizer(
-            base_url=runtime_config["openai_base_url"],
-            api_key=runtime_config["openai_api_key"],
-            model=runtime_config["vision_analyzer_model"],
-            asset_base_path=storage.asset_dir(doc_id),
+    recognizer = DeterministicFormulaRecognizer()
+    recognizer_type = "deterministic"
+    if formula_openai_enabled:
+        openai_ocr_provider = OpenAIVisionOCRProvider(
+            OpenAIFormulaRecognizer(
+                base_url=runtime_config["openai_base_url"],
+                api_key=runtime_config["openai_api_key"],
+                model=runtime_config["vision_analyzer_model"],
+                asset_base_path=storage.asset_dir(doc_id),
+            )
         )
-        openai_ocr_provider = OpenAIVisionOCRProvider(recognizer)
-        recognizer_type = "openai_vision"
-    else:
-        recognizer = DeterministicFormulaRecognizer()
-        recognizer_type = "deterministic"
     provider_factories: dict[str, Any] = {
         "pix2text": lambda: Pix2TextOCRProvider(
             timeout_seconds=runtime_config.get("ocr_provider_timeout_seconds", 12.0)
@@ -345,7 +344,7 @@ async def _enrich_document_formulas(
         "deterministic": DeterministicOCRProvider,
     }
     ocr_providers: list[Any] = []
-    for provider_name in runtime_config.get("ocr_provider_order", []):
+    for provider_name in provider_order:
         if provider_name == "openai_vision":
             if openai_ocr_provider is not None:
                 ocr_providers.append(openai_ocr_provider)
@@ -390,7 +389,10 @@ async def _enrich_document_formulas(
         recognizer=recognizer,
         ocr_service=ocr_service,
         recognizer_type=recognizer_type,
-        visual_formula_recognition_enabled=visual_enabled,
+        visual_formula_recognition_enabled=any(
+            getattr(provider, "name", "") in {"pix2text", "openai_vision"}
+            for provider in ocr_providers
+        ),
         on_progress=update_formula_progress,
     )
 

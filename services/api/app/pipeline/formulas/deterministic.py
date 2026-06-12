@@ -6,7 +6,7 @@ from pdf_translator_schema import FormulaRecognitionResult
 from pdf_translator_schema.models import FormulaSourceKind
 
 from .detector import FormulaCandidate
-from .normalization import latex_from_pdf_text
+from .normalization import formula_corruption_flags, latex_from_pdf_text
 from .validation import validate_formula_latex
 
 
@@ -25,17 +25,35 @@ class DeterministicFormulaRecognizer:
                 "formula_delimiter_repaired",
                 "formula_low_confidence",
                 "formula_text_truncated",
+                "formula_text_layer_corrupt",
+                "formula_slash_glyph_suspect",
+                "formula_prime_glyph_suspect",
             }
         ):
             confidence = min(confidence, 0.58)
             quality_flags.append("formula_low_confidence")
         quality_flags.extend(normalization_flags)
-        if candidate.source_kind != FormulaSourceKind.TEXT_LAYER:
+        if candidate.source_kind in {
+            FormulaSourceKind.IMAGE_CANDIDATE,
+            FormulaSourceKind.VECTOR_CANDIDATE,
+        }:
             quality_flags.append("visual_formula_not_recognized_without_model")
             if "formula_recognition_mock" not in quality_flags:
                 quality_flags.append("formula_recognition_mock")
-        validation = validate_formula_latex(latex, source_text=candidate.source_text)
+        validation = validate_formula_latex(
+            latex,
+            source_text=candidate.source_text,
+            display_mode=candidate.display_mode,
+        )
         quality_flags.extend(validation.quality_flags)
+        corruption_flags = formula_corruption_flags(
+            candidate.source_text,
+            normalized_latex=latex,
+        )
+        if corruption_flags:
+            confidence = min(confidence, 0.58)
+            quality_flags.extend(corruption_flags)
+            quality_flags.append("formula_low_confidence")
 
         return FormulaRecognitionResult(
             latex=latex,

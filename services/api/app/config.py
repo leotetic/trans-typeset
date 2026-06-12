@@ -31,7 +31,7 @@ class Settings:
     agent_enable_vision_analysis: bool = False
     layout_planner_model: str = ""
     vision_analyzer_model: str = ""
-    ocr_provider_order: tuple[str, ...] = ("deterministic",)
+    ocr_provider_order: tuple[str, ...] = ("pix2text", "deterministic")
     ocr_min_confidence: float = 0.35
     ocr_provider_timeout_seconds: float = 12.0
     ocr_max_visual_candidates: int = 12
@@ -150,7 +150,7 @@ def load_settings() -> Settings:
         ocr_provider_order=parse_csv(
             os.getenv(
                 "OCR_PROVIDER_ORDER",
-                "deterministic",
+                "pix2text,deterministic",
             )
         ),
         ocr_min_confidence=parse_float(os.getenv("OCR_MIN_CONFIDENCE", ""), 0.35),

@@ -238,3 +238,20 @@ def test_build_chunks_marks_document_ir_formula_refs_as_not_translatable() -> No
     assert source.source_text == token
     assert source.preserve_tokens == [token]
     assert source.requires_translation is False
+
+
+def test_build_chunks_marks_formula_like_paragraph_cluster_as_not_translatable() -> None:
+    token_a = "{{formula:F1}}"
+    token_b = "{{formula:F2}}"
+    block = make_block(
+        "p1_formula_cluster",
+        f"{token_a} = {token_b}",
+        role=BlockRole.PARAGRAPH,
+        reading_order=0,
+    )
+
+    chunks = build_chunks(make_document([block]), target_lang="zh-CN")
+
+    source = chunks[0].source_blocks[0]
+    assert source.source_text == f"{token_a} = {token_b}"
+    assert source.requires_translation is False

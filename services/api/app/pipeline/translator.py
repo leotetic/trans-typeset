@@ -19,6 +19,7 @@ from pdf_translator_schema.validation import LayoutPlanValidationError
 from pydantic import ValidationError
 
 from ..provider_config import ProviderConfigError, normalize_openai_base_url
+from .formula_processing import is_formula_like_text
 from .formulas.validation import FORMULA_REF_PATTERN
 
 
@@ -343,6 +344,15 @@ class OpenAICompatibleTranslator(Translator):
                         if FORMULA_REF_PATTERN.fullmatch(token)
                         else "preserve_token_repaired"
                     )
+
+            if (
+                role == BlockRole.PARAGRAPH.value
+                and is_formula_like_text(translated_text)
+                and any(FORMULA_REF_PATTERN.fullmatch(token) for token in source.preserve_tokens)
+            ):
+                repaired_flags.append("formula_like_repaired")
+            if not source.requires_translation:
+                repaired_flags.append("formula_cluster_preserved")
 
             if not raw_block:
                 repaired_flags.append("missing_block_repaired")

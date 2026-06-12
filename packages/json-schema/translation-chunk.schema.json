@@ -317,6 +317,15 @@
           "$ref": "#/$defs/LayoutMode",
           "default": "continuous_reflow"
         },
+        "formula_numbering": {
+          "default": "none",
+          "enum": [
+            "none",
+            "parenthesized"
+          ],
+          "title": "Formula Numbering",
+          "type": "string"
+        },
         "page_layout": {
           "$ref": "#/$defs/PageLayoutDefaults"
         },
@@ -388,6 +397,22 @@
           "minimum": 0,
           "title": "Space After Pt",
           "type": "number"
+        },
+        "font_stack": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Stack"
         }
       },
       "required": [

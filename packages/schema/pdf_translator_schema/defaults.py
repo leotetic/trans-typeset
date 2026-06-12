@@ -1,5 +1,16 @@
 DEFAULT_TARGET_LANG = "zh-CN"
 
+# GB/T 7713.1 convention: headings use a heiti (sans) CJK face while body text
+# stays in a songti (serif) face with Times New Roman for Latin glyphs.
+GBT_HEADING_FONT_STACK = [
+    "Times New Roman",
+    "SimHei",
+    "Heiti SC",
+    "Noto Sans CJK SC",
+    "Source Han Sans SC",
+    "sans-serif",
+]
+
 DEFAULT_RENDER_DEFAULTS = {
     "target_lang": DEFAULT_TARGET_LANG,
     "font_stack": [
@@ -13,6 +24,7 @@ DEFAULT_RENDER_DEFAULTS = {
     "line_height": 1.35,
     "paragraph_spacing_em": 0.45,
     "layout_mode": "continuous_reflow",
+    "formula_numbering": "none",
     "page_layout": {
         "width_pt": 595.28,
         "height_pt": 841.89,
@@ -31,6 +43,7 @@ DEFAULT_RENDER_DEFAULTS = {
             "first_line_indent_em": 0.0,
             "space_before_pt": 0.0,
             "space_after_pt": 18.0,
+            "font_stack": GBT_HEADING_FONT_STACK,
         },
         "abstract": {
             "font_size_pt": 12.0,
@@ -51,6 +64,7 @@ DEFAULT_RENDER_DEFAULTS = {
             "first_line_indent_em": 0.0,
             "space_before_pt": 12.0,
             "space_after_pt": 6.0,
+            "font_stack": GBT_HEADING_FONT_STACK,
         },
         "paragraph": {
             "font_size_pt": 12.0,

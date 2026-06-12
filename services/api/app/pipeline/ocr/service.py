@@ -28,7 +28,12 @@ class OCRService:
         self._cache: dict[str, OCRRecognitionResult] = {}
         self._visual_attempts = 0
 
-    async def recognize_formula(self, candidate: FormulaCandidate) -> OCRRecognitionResult:
+    async def recognize_formula(
+        self,
+        candidate: FormulaCandidate,
+        *,
+        prefer_visual: bool = False,
+    ) -> OCRRecognitionResult:
         image_path = self._resolve_image_path(candidate.image_path)
         visual_candidate = image_path is not None and image_path.exists()
         text_candidate = candidate.source_kind.value in {"text_layer", "inline_text"}
@@ -93,7 +98,7 @@ class OCRService:
                 self._emit_record(self.records[-1])
                 return best
 
-        for provider in self.providers:
+        for provider in _ordered_providers(self.providers, prefer_visual=prefer_visual):
             provider_name = getattr(provider, "name", provider.__class__.__name__)
             if text_candidate and provider_name in {"pix2text", "openai_vision"} and not visual_candidate:
                 continue
@@ -169,6 +174,7 @@ class OCRService:
                     "validator_status": validate_formula_latex(
                         result.latex or result.text,
                         source_text=candidate.source_text,
+                        display_mode=candidate.display_mode,
                     ).status,
                 }
             )
@@ -184,6 +190,7 @@ class OCRService:
             validation = validate_formula_latex(
                 result.latex or result.text,
                 source_text=candidate.source_text,
+                display_mode=candidate.display_mode,
             )
             if best is None or result.confidence > best.confidence:
                 best = result
@@ -260,3 +267,24 @@ def _unique(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _ordered_providers(
+    providers: list[OCRProvider],
+    *,
+    prefer_visual: bool,
+) -> list[OCRProvider]:
+    if not prefer_visual:
+        return providers
+    visual_names = {"pix2text", "openai_vision"}
+    preferred = [
+        provider
+        for provider in providers
+        if getattr(provider, "name", provider.__class__.__name__) in visual_names
+    ]
+    fallback = [
+        provider
+        for provider in providers
+        if getattr(provider, "name", provider.__class__.__name__) not in visual_names
+    ]
+    return [*preferred, *fallback]

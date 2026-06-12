@@ -12,7 +12,12 @@ from pdf_translator_schema import (
     TranslationConstraints,
 )
 
-from .formula_processing import formula_placeholders_for_block, is_formula_only_block
+from .formula_processing import (
+    formula_placeholders_for_block,
+    is_formula_like_block,
+    is_formula_like_text,
+    is_formula_only_block,
+)
 from .formulas.validation import FORMULA_REF_PATTERN
 
 TOKEN_PATTERN = re.compile(
@@ -45,6 +50,14 @@ def _preserve_tokens_for_block(block: DocumentBlock, source_text: str) -> list[s
         tokens,
         key=lambda token: source_text.find(token) if token in source_text else 10**9,
     )
+
+
+def _requires_translation_for_block(block: DocumentBlock, chunk_text: str) -> bool:
+    if is_formula_only_block(block):
+        return False
+    if is_formula_like_block(block) and is_formula_like_text(chunk_text):
+        return False
+    return True
 
 
 def find_nearby_titles(block: DocumentBlock, all_blocks: list[DocumentBlock]) -> list[str]:
@@ -185,7 +198,7 @@ def build_chunks(
                 source_text=chunk_text,
                 nearby_titles=find_nearby_titles(block, ordered_document_blocks),
                 preserve_tokens=_preserve_tokens_for_block(block, chunk_text),
-                requires_translation=not is_formula_only_block(block),
+                requires_translation=_requires_translation_for_block(block, chunk_text),
             )
             block_chars = len(source_block.source_text)
             next_chars = current_chars + block_chars + (1 if current_blocks else 0)

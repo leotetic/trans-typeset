@@ -65,6 +65,26 @@ def test_render_defaults_are_available_on_chunk() -> None:
     assert chunk.render_defaults.overflow_policy.min_font_scale == 0.86
     assert chunk.render_defaults.overflow_policy.allow_continuation_page is True
     assert chunk.render_defaults.preserve_policy.whitespace == "allow_reflow"
+    assert chunk.render_defaults.formula_numbering == "none"
+    assert chunk.render_defaults.role_styles.paragraph.font_stack is None
+    assert chunk.render_defaults.role_styles.heading.font_stack is not None
+    assert "SimHei" in chunk.render_defaults.role_styles.heading.font_stack
+    assert "SimHei" in chunk.render_defaults.role_styles.title.font_stack
+
+
+def test_render_defaults_accept_gbt_formula_numbering_and_role_fonts() -> None:
+    from pdf_translator_schema.models import RenderDefaults, RoleStyleDefaults
+
+    defaults = RenderDefaults(formula_numbering="parenthesized")
+    assert defaults.formula_numbering == "parenthesized"
+
+    style = RoleStyleDefaults(font_size_pt=14.0, font_stack=["SimHei", "sans-serif"])
+    assert style.font_stack == ["SimHei", "sans-serif"]
+
+    with pytest.raises(ValidationError):
+        RenderDefaults(formula_numbering="roman")
+    with pytest.raises(ValidationError):
+        RoleStyleDefaults(font_size_pt=14.0, font_stack=[])
 
 
 def test_v2_workflow_contract_defaults_are_available() -> None:

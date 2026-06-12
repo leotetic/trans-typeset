@@ -7,7 +7,7 @@ from typing import Protocol
 from pdf_translator_schema.models import OCRRecognitionResult
 
 from ..formulas.detector import FormulaCandidate
-from ..formulas.normalization import latex_from_pdf_text
+from ..formulas.normalization import formula_corruption_flags, latex_from_pdf_text
 from ..formulas.recognizer import OpenAIFormulaRecognizer
 from ..formulas.validation import validate_formula_latex
 
@@ -87,7 +87,11 @@ class Pix2TextOCRProvider:
                 quality_flags=["pix2text_formula_ocr_failed", str(exc)[:120]],
             )
         latex, confidence = _coerce_formula_output(raw)
-        validation = validate_formula_latex(latex, source_text=candidate.source_text)
+        validation = validate_formula_latex(
+            latex,
+            source_text=candidate.source_text,
+            display_mode=candidate.display_mode,
+        )
         quality_flags = [] if latex else ["pix2text_formula_ocr_empty"]
         quality_flags.extend(validation.quality_flags)
         return OCRRecognitionResult(
@@ -162,16 +166,24 @@ class DeterministicOCRProvider:
         latex, normalization_flags = latex_from_pdf_text(candidate.source_text)
         flags.extend(normalization_flags)
         confidence = 0.96 if latex else 0.0
+        corruption_flags = formula_corruption_flags(
+            candidate.source_text,
+            normalized_latex=latex,
+        )
         if any(
             flag in normalization_flags
             for flag in {
                 "formula_delimiter_repaired",
                 "formula_low_confidence",
                 "formula_text_truncated",
+                "formula_text_layer_corrupt",
+                "formula_slash_glyph_suspect",
+                "formula_prime_glyph_suspect",
             }
-        ):
+        ) or corruption_flags:
             confidence = min(confidence, 0.58)
             flags.append("formula_low_confidence")
+            flags.extend(corruption_flags)
         if candidate.source_kind.value in {"image_candidate", "vector_candidate"}:
             flags.extend(
                 [
@@ -185,7 +197,11 @@ class DeterministicOCRProvider:
             flags.append("formula_inline_text_layer")
         else:
             flags.append("ocr_text_layer_passthrough")
-        validation = validate_formula_latex(latex, source_text=candidate.source_text)
+        validation = validate_formula_latex(
+            latex,
+            source_text=candidate.source_text,
+            display_mode=candidate.display_mode,
+        )
         flags.extend(validation.quality_flags)
         return OCRRecognitionResult(
             text=latex,

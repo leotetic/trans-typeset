@@ -71,6 +71,9 @@ def _assert_no_preview_formula_failures(html: str) -> None:
         "@@FORMULA_",
         "{{formula:",
         "\ufffd",
+        "¼",
+        "þ",
+        "ð",
         "quality-formula-render-failed",
         "quality-formula-missing-latex",
         "quality-unresolved-formula-placeholder",
@@ -83,6 +86,14 @@ def _assert_no_preview_formula_failures(html: str) -> None:
         assert fragment not in html
     assert 'class="formula-render-failed' not in html
     assert " formula-render-failed" not in html
+    forbidden_patterns = [
+        r"(?<![A-Za-z])=k2(?![A-Za-z])",
+        r"\bf\s*0\s*s\b",
+        r"\bf\s*0\s*n\b",
+        r"\\partial\s+fs\s*=\s*k2",
+    ]
+    for pattern in forbidden_patterns:
+        assert re.search(pattern, html) is None, pattern
     assert re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", html) is None
 
 

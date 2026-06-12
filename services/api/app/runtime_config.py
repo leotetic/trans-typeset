@@ -206,7 +206,11 @@ def render_defaults_for_intent(
 ) -> RenderDefaults:
     configured = render_defaults_for_target(storage, target_lang)
     if intent.typesetting_standard == TypesettingStandard.GB_T_7713_1_2025:
-        updates: dict[str, object] = {"layout_mode": LayoutMode.CONTINUOUS_REFLOW}
+        updates: dict[str, object] = {
+            "layout_mode": LayoutMode.CONTINUOUS_REFLOW,
+            # GB/T 7713.1: display formulas carry sequential right-aligned "(n)".
+            "formula_numbering": "parenthesized",
+        }
         if configured.font_stack == _LEGACY_SANS_FONT_STACK:
             updates["font_stack"] = _GBT_FONT_STACK
         return configured.model_copy(update=updates, deep=True)

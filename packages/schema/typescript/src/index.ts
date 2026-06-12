@@ -392,7 +392,12 @@ export interface RoleStyleDefaults {
   first_line_indent_em?: number;
   space_before_pt?: number;
   space_after_pt?: number;
+  /** Per-role font family override; null/absent inherits the document font_stack. */
+  font_stack?: string[] | null;
 }
+
+/** GB/T 7713.1 display formula numbering: sequential right-aligned "(n)". */
+export type FormulaNumbering = "none" | "parenthesized";
 
 export interface RoleStyles {
   title?: RoleStyleDefaults;
@@ -414,6 +419,7 @@ export interface RenderDefaults {
   line_height?: number;
   paragraph_spacing_em?: number;
   layout_mode?: LayoutMode;
+  formula_numbering?: FormulaNumbering;
   page_layout?: PageLayoutDefaults;
   role_styles?: RoleStyles;
   alignment?: AlignmentDefaults;

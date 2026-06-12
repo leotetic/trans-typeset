@@ -11,6 +11,7 @@ from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
 from pdf_renderer import RenderDocument
 from pdf_translator_schema import (
+    Asset,
     BlockRole,
     BoundingBox,
     DocumentIR,
@@ -21,7 +22,12 @@ from pdf_translator_schema import (
     TranslationChunk,
     TranslationLayoutPlan,
 )
-from pdf_translator_schema.models import DocumentBlock, OCRRecognitionResult, RenderDefaults
+from pdf_translator_schema.models import (
+    DocumentBlock,
+    FormulaRecognitionResult,
+    OCRRecognitionResult,
+    RenderDefaults,
+)
 
 
 def test_process_document_job_persists_frontend_visible_error(
@@ -230,7 +236,7 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert formula_recognition == []
     assert formula_diagnostics["kind"] == "formula_diagnostics"
     assert formula_diagnostics["recognizer_type"] == "deterministic"
-    assert formula_diagnostics["visual_formula_recognition_enabled"] is False
+    assert formula_diagnostics["visual_formula_recognition_enabled"] is True
     parser_diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
     assert "pdf_parse_ms" in parser_diagnostics
     assert parser_diagnostics["formula_recognizer_type"] == "deterministic"
@@ -580,7 +586,7 @@ def test_process_document_job_persists_pdf_export_diagnostics(
     assert "pdf-export-diagnostics" in complete_steps[-1]["output_artifacts"]
 
 
-def test_formula_enrichment_honors_disabled_vision_analysis(
+def test_formula_enrichment_does_not_build_openai_formula_provider_unless_requested(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -593,6 +599,7 @@ def test_formula_enrichment_honors_disabled_vision_analysis(
             "openai_model": "paper-model",
             "vision_analyzer_model": "vision-model",
             "agent_enable_vision_analysis": False,
+            "ocr_provider_order": ["deterministic"],
         }
     )
     document = DocumentIR(
@@ -626,6 +633,64 @@ def test_formula_enrichment_honors_disabled_vision_analysis(
     assert result.diagnostics["recognizer_type"] == "deterministic"
     assert result.diagnostics["visual_formula_recognition_enabled"] is False
     assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
+
+
+def test_formula_enrichment_openai_formula_ocr_is_decoupled_from_agent_vision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    storage.write_runtime_config(
+        {
+            "openai_base_url": "https://models.example.test/v1",
+            "openai_api_key": "secret-key",
+            "openai_model": "paper-model",
+            "vision_analyzer_model": "vision-model",
+            "agent_enable_vision_analysis": False,
+            "ocr_provider_order": ["openai_vision", "deterministic"],
+        }
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="formula_1",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="E = mc^2",
+                    )
+                ],
+            )
+        ],
+    )
+    constructed: list[dict] = []
+
+    class FakeRecognizer:
+        def __init__(self, **kwargs) -> None:
+            constructed.append(kwargs)
+
+        async def recognize(self, candidate):
+            return FormulaRecognitionResult(
+                latex="E = mc^2",
+                display_mode="display",
+                confidence=0.91,
+                quality_flags=[],
+            )
+
+    monkeypatch.setattr(orchestrator, "OpenAIFormulaRecognizer", FakeRecognizer)
+
+    result = asyncio.run(orchestrator._enrich_document_formulas(document, doc_id="doc_1"))
+
+    assert constructed
+    assert result.diagnostics["recognizer_type"] == "deterministic"
+    assert result.diagnostics["visual_formula_recognition_enabled"] is True
 
 
 def test_formula_enrichment_reports_progress_and_falls_back_from_pix2text(
@@ -664,12 +729,23 @@ def test_formula_enrichment_reports_progress_and_falls_back_from_pix2text(
                         role=BlockRole.FORMULA,
                         bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
                         reading_order=0,
-                        source_text="E = mc^2",
+                        source_text=r"\partial f_s / \partial t = \sum_n (4)",
+                    )
+                ],
+                assets=[
+                    Asset(
+                        asset_id="formula_asset",
+                        page_id="p1",
+                        kind="formula",
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        path="/api/documents/doc_1/assets/formula_asset.png",
                     )
                 ],
             )
         ],
     )
+    storage.asset_dir("doc_1").mkdir(parents=True, exist_ok=True)
+    (storage.asset_dir("doc_1") / "formula_asset.png").write_bytes(b"fake-image")
 
     class EmptyPix2TextProvider:
         name = "pix2text"

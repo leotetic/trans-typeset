@@ -562,6 +562,10 @@ function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
       typeof payload.layout_mode === "string"
         ? (payload.layout_mode as RenderDefaults["layout_mode"])
         : undefined,
+    formula_numbering:
+      payload.formula_numbering === "parenthesized" || payload.formula_numbering === "none"
+        ? payload.formula_numbering
+        : undefined,
     page_layout: isRecord(payload.page_layout)
       ? (payload.page_layout as RenderDefaults["page_layout"])
       : undefined,

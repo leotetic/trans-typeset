@@ -147,6 +147,14 @@ def test_katex_css_is_fully_self_contained() -> None:
     assert "data:font/" in html or "data:application/font-" in html
 
 
+def test_katex_display_margin_is_zeroed_to_prevent_formula_clipping() -> None:
+    html = render_to_html(_render_source_bbox(_document([])))
+
+    assert ".katex-display {\n        display: block;" in html
+    assert "margin: 0;" in html
+    assert "margin: 1em 0" not in html
+
+
 def test_render_to_pdf_falls_back_when_playwright_driver_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -470,6 +478,182 @@ def test_invalid_formula_latex_falls_back_with_quality_flag() -> None:
     assert "formula-render-failed" not in html
     assert "katex-error" not in block_html
     assert "{{formula:formula_bad}}" not in html
+
+
+def test_corrupt_display_formula_prefers_image_fallback_even_if_latex_compiles() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_corrupt}}",
+    )
+    formula_asset = Asset(
+        asset_id="formula_asset",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        path="/api/documents/doc_1/assets/formula_asset.png",
+        formula_id="formula_corrupt",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[formula_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_corrupt",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex=r"f_s = k^2",
+                source_text="f 0 s=k2",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=["formula_text_layer_corrupt"],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_corrupt}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "formula-image-fallback" in html
+    assert "formula_asset.png" in html
+    assert diagnostics["quality_flag_counts"]["formula_image_fallback"] == 1
+
+
+def test_corrupt_display_formula_uses_image_fallback_without_upstream_flags() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_corrupt}}",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[
+                    Asset(
+                        asset_id="formula_asset",
+                        page_id="p1",
+                        kind="formula",
+                        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+                        path="/api/documents/doc_1/assets/formula_asset.png",
+                        formula_id="formula_corrupt",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_corrupt",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex=r"\partial fs=k2 @(kt)",
+                source_text=r"\partial fs=k2 @(kt)",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_corrupt}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-image-fallback" in html
+    assert "formula_asset.png" in html
+    assert r"\partial fs=k2" not in block_html
+    assert diagnostics["quality_flag_counts"]["formula_image_fallback"] == 1
+
+
+def test_clean_visual_formula_renders_latex_despite_corrupt_source_text() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_visual}}",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[
+                    Asset(
+                        asset_id="formula_asset",
+                        page_id="p1",
+                        kind="formula",
+                        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+                        path="/api/documents/doc_1/assets/formula_asset.png",
+                        formula_id="formula_visual",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_visual",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex=r"\frac{\partial f_s}{\partial t}",
+                source_text="@fs=@t þ f 0 s=k2",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=[
+                    "formula_text_layer_corrupt",
+                    "formula_slash_glyph_suspect",
+                ],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_visual}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-image-fallback" not in block_html
+    assert "formula_asset.png" not in block_html
+    assert "katex" in html
+    assert "formula_image_fallback" not in diagnostics["quality_flag_counts"]
 
 
 def test_missing_formula_ref_does_not_render_raw_placeholder() -> None:
@@ -1108,10 +1292,460 @@ def test_continuous_reflow_allocates_display_formula_height() -> None:
     html = render_to_html(render_document)
 
     assert render_block.role == BlockRole.FORMULA
-    assert render_block.bbox.y1 - render_block.bbox.y0 > 12.0 * 1.35
+    assert render_block.bbox.y1 - render_block.bbox.y0 > 34.0
     assert render_document.layout_trace["blocks"][0]["estimated_lines"] > 1
+    assert "formula_height_adjusted" in render_block.quality_flags
+    assert "formula_height_risk" in render_block.quality_flags
     assert 'class="katex-display"' in html
     assert '--h-pt: 16.2pt' not in html
+
+
+def test_continuous_reflow_tracks_multi_display_formula_height_diagnostics() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=50, y0=90, x1=250, y1=120),
+        source_text=(
+            "{{formula:formula_1}} {{formula:formula_2}} {{formula:formula_3}}"
+        ),
+        font_size=12,
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\partial f_s / \partial t",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+            FormulaIR(
+                formula_id="formula_2",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"= \sum_n",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+            FormulaIR(
+                formula_id="formula_3",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\int g_{sn}\,d\Omega",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    render_block = render_document.pages[0].blocks[0]
+    diagnostics = render_document.diagnostics()
+    html = render_to_html(render_document)
+
+    assert render_block.bbox.y1 - render_block.bbox.y0 > 60
+    assert "formula_height_adjusted" in render_block.quality_flags
+    assert "formula_multi_display_block" in render_block.quality_flags
+    assert "formula_height_risk" in render_block.quality_flags
+    assert diagnostics["formula_height_adjusted_count"] == 1
+    assert diagnostics["formula_multi_display_block_count"] == 1
+    assert diagnostics["formula_block_overflow_count"] == 1
+    assert diagnostics["formula_dom_estimation_strategy"] == (
+        "display_node_count_and_formula_aware_height"
+    )
+    assert html.count('class="formula formula-display formula-ir"') == 3
+
+
+def test_continuous_reflow_compacts_formula_like_fragments_into_single_block() -> None:
+    block_a = _block(
+        "p1_formula_a",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=150, y1=110),
+        source_text="{{formula:formula_a}}",
+        reading_order=0,
+    )
+    block_b = _block(
+        "p1_formula_b",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=158, y0=92, x1=270, y1=110),
+        source_text="{{formula:formula_b}}",
+        reading_order=1,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[block_a, block_b],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_a",
+                page_id="p1",
+                anchor_block_id="p1_formula_a",
+                latex="x = y",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+            FormulaIR(
+                formula_id="formula_b",
+                page_id="p1",
+                anchor_block_id="p1_formula_b",
+                latex="= 0",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula_a",
+            translated_text="{{formula:formula_a}}",
+            role=BlockRole.PARAGRAPH,
+            quality_flags=["formula_like_repaired"],
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_formula_b",
+            translated_text="{{formula:formula_b}}",
+            role=BlockRole.PARAGRAPH,
+            quality_flags=["formula_like_repaired"],
+        ),
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [plan],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert len(render_document.pages[0].blocks) == 1
+    assert diagnostics["formula_reflow_cluster_count"] >= 1
+    assert diagnostics["formula_like_block_count"] >= 1
+    assert 'data-formula-id="formula_a"' in html
+    assert 'data-formula-id="formula_b"' in html
+
+
+def test_continuous_reflow_keeps_inline_formula_paragraph_as_regular_text_block() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=280, y1=140),
+        source_text="Body {{formula:formula_inline}} text.",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex="E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    diagnostics = render_document.diagnostics()
+
+    assert len(render_document.pages[0].blocks) == 1
+    assert diagnostics["formula_reflow_cluster_count"] == 0
+
+
+def _display_formula_document(
+    formulas: list[tuple[str, str, str]],
+) -> DocumentIR:
+    """Build a doc with one display-formula block per (block_id, formula_id, latex)."""
+    blocks = [
+        DocumentBlock(
+            block_id=block_id,
+            page_id="p1",
+            role=BlockRole.FORMULA,
+            bbox=BoundingBox(x0=50, y0=90 + index * 80, x1=280, y1=120 + index * 80),
+            reading_order=index,
+            source_text=f"{{{{formula:{formula_id}}}}}",
+            style_seed=StyleSeed(font_size=10),
+            formula_id=formula_id,
+        )
+        for index, (block_id, formula_id, _latex) in enumerate(formulas)
+    ]
+    return DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=blocks,
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id=formula_id,
+                page_id="p1",
+                source_block_id=block_id,
+                latex=latex,
+                display_mode="display",
+                source_kind="text_layer",
+            )
+            for block_id, formula_id, latex in formulas
+        ],
+    )
+
+
+def test_continuous_reflow_numbers_display_formulas_per_gbt() -> None:
+    document = _display_formula_document(
+        [
+            ("p1_f1", "formula_1", "E = mc^2"),
+            ("p1_f2", "formula_2", "a^2 + b^2 = c^2"),
+        ]
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    numbered = [block for page in render_document.pages for block in page.blocks]
+    assert [block.formula_number for block in numbered] == ["(1)", "(2)"]
+    assert all("gbt_formula_numbered" in block.quality_flags for block in numbered)
+    assert html.count('class="formula-equation-number"') == 2
+    assert 'data-formula-number="(1)"' in html
+    assert 'data-formula-number="(2)"' in html
+    assert diagnostics["formula_numbered_count"] == 2
+    assert diagnostics["formula_number_source_preserved_count"] == 0
+
+
+def test_continuous_reflow_preserves_existing_source_equation_numbers() -> None:
+    document = _display_formula_document([("p1_f1", "formula_1", "E = mc^2")])
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_f1",
+            translated_text="{{formula:formula_1}} (12)",
+            role=BlockRole.FORMULA,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    diagnostics = render_document.diagnostics()
+    html = render_to_html(render_document)
+
+    block = render_document.pages[0].blocks[0]
+    assert block.text == "{{formula:formula_1}}"
+    assert block.formula_number == "(12)"
+    assert "formula_number_source_preserved" in block.quality_flags
+    assert html.count('class="formula-equation-number"') == 1
+    assert 'data-formula-number="(12)"' in html
+    assert diagnostics["formula_numbered_count"] == 0
+    assert diagnostics["formula_number_source_preserved_count"] == 1
+
+
+def test_continuous_reflow_strips_latex_tag_and_uses_single_renderer_number() -> None:
+    document = _display_formula_document(
+        [("p1_f1", "formula_1", r"E = mc^2 \tag{7}")]
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    block = render_document.pages[0].blocks[0]
+
+    assert block.formula_number == "(7)"
+    assert "formula_number_source_preserved" in block.quality_flags
+    assert "gbt_formula_numbered" not in block.quality_flags
+    assert html.count('class="formula-equation-number"') == 1
+    assert 'data-formula-number="(7)"' in html
+    assert 'data-latex="E = mc^2"' in html
+    assert 'data-latex="E = mc^2 \\tag{7}"' not in html
+
+
+def test_continuous_reflow_uses_formula_source_number_as_renderer_span() -> None:
+    document = _display_formula_document(
+        [("p1_f1", "formula_1", r"\int f_s\,d\Omega")]
+    )
+    document = document.model_copy(
+        update={
+            "formulas": [
+                document.formulas[0].model_copy(
+                    update={"source_text": r"\int f_s\,d\Omega , (3) v_{n}"}
+                )
+            ]
+        },
+        deep=True,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    block = render_document.pages[0].blocks[0]
+
+    assert block.formula_number == "(3)"
+    assert "formula_number_source_preserved" in block.quality_flags
+    assert "gbt_formula_numbered" not in block.quality_flags
+    assert html.count('class="formula-equation-number"') == 1
+    assert 'data-formula-number="(3)"' in html
+
+
+def test_renderer_converts_leftover_text_subscript_and_superscript_markers() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=330, y1=140),
+        source_text="Densities n_{e}, x_{1}, and citations 50^{–54} remain readable.",
+        reading_order=0,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([paragraph]),
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    html = render_to_html(render_document)
+    block = render_document.pages[0].blocks[0]
+
+    assert "text_script_marker_rendered" in block.quality_flags
+    assert "n<sub>e</sub>" in html
+    assert "x<sub>1</sub>" in html
+    assert "50<sup>–54</sup>" in html
+    assert "n_{" not in html
+    assert "50^{" not in html
+
+
+def test_continuous_reflow_formula_numbering_defaults_to_none() -> None:
+    document = _display_formula_document([("p1_f1", "formula_1", "E = mc^2")])
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    assert render_document.pages[0].blocks[0].formula_number is None
+    assert 'class="formula-equation-number"' not in html
+    assert 'data-formula-number=' not in html
+
+
+def test_continuous_reflow_headings_use_gbt_heiti_font_stack() -> None:
+    heading = _block(
+        "p1_heading",
+        BlockRole.HEADING,
+        BoundingBox(x0=50, y0=90, x1=280, y1=120),
+        source_text="1 Introduction",
+        reading_order=0,
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=130, x1=280, y1=180),
+        source_text="Body text.",
+        reading_order=1,
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([heading, paragraph]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    heading_block = render_document.pages[0].blocks[0]
+    body_block = render_document.pages[0].blocks[1]
+    assert heading_block.font_stack is not None
+    assert "SimHei" in heading_block.font_stack
+    assert body_block.font_stack is None
+    assert "--block-font-family:" in html
+    assert "SimHei" in html
+
+
+def test_render_to_html_escapes_raw_block_text() -> None:
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text='<script>alert("x")</script> & <b>bold</b>',
+    )
+
+    html = render_to_html(_render_source_bbox(_document([block])))
+
+    assert '<script>alert("x")</script>' not in html
+    assert "&lt;script&gt;" in html
+    assert "&amp;" in html
 
 
 def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:

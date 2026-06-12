@@ -102,6 +102,28 @@ def test_deterministic_translator_preserves_formula_only_blocks_without_prefix()
     assert "formula_preserved_without_translation" in plan.blocks[0].quality_flags
 
 
+def test_deterministic_translator_preserves_formula_like_cluster_without_prefix() -> None:
+    text = "{{formula:F1}} = {{formula:F2}}"
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="formula_cluster",
+                role=BlockRole.PARAGRAPH,
+                source_text=text,
+                preserve_tokens=["{{formula:F1}}", "{{formula:F2}}"],
+                requires_translation=False,
+            )
+        ],
+    )
+
+    plan = asyncio.run(DeterministicTranslator().translate(chunk))
+
+    assert plan.blocks[0].translated_text == text
+    assert "formula_preserved_without_translation" in plan.blocks[0].quality_flags
+
+
 def test_build_translator_without_api_key_uses_deterministic() -> None:
     assert isinstance(
         build_translator("https://example.test/v1", "", "model"),
@@ -196,6 +218,38 @@ def test_openai_translator_trims_api_key_for_authorization_header(
             },
         }
     ]
+
+
+def test_repair_marks_formula_like_paragraph_blocks() -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="{{formula:F1}}",
+                preserve_tokens=["{{formula:F1}}"],
+                requires_translation=False,
+            )
+        ],
+    )
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+
+    repaired = translator._repair_payload(
+        chunk,
+        {
+            "schema_version": "0.1",
+            "chunk_id": chunk.chunk_id,
+            "target_lang": chunk.target_lang,
+            "blocks": [{"source_block_id": "b1", "translated_text": "{{formula:F1}}", "role": "paragraph"}],
+        },
+        attempt=1,
+    )
+
+    block = repaired["blocks"][0]
+    assert "formula_like_repaired" in block["quality_flags"]
+    assert "formula_cluster_preserved" in block["quality_flags"]
 
 
 def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(

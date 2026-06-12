@@ -1,11 +1,13 @@
 from app.pipeline.parser import (
     UnsupportedPdfError,
     build_parser_diagnostics,
+    _block_text,
     _extract_assets,
     _extract_assets_from_page,
     _filter_header_footer_blocks,
     _header_footer_keys,
     _order_text_blocks,
+    _repair_stacked_formula_text,
     _reading_sort_key,
     _stable_asset_id,
     _stable_block_id,
@@ -141,6 +143,16 @@ def _text_block(text: str, bbox: tuple[float, float, float, float]) -> dict:
     }
 
 
+def _span(
+    text: str,
+    bbox: tuple[float, float, float, float],
+    *,
+    font: str = "AdvOT7d6df7ab.I",
+    size: float = 9,
+) -> dict:
+    return {"text": text, "bbox": bbox, "font": font, "size": size}
+
+
 def test_order_text_blocks_is_column_aware_for_two_column_papers() -> None:
     blocks = [
         _text_block("left top", (40, 80, 250, 110)),
@@ -157,6 +169,73 @@ def test_order_text_blocks_is_column_aware_for_two_column_papers() -> None:
         "right top",
         "right bottom",
     ]
+
+
+def test_order_text_blocks_ignores_wide_page_artifacts_when_detecting_columns() -> None:
+    blocks = [
+        _text_block("Journal banner", (40, 20, 560, 45)),
+        _text_block("left top", (50, 100, 295, 150)),
+        _text_block("right top", (315, 105, 560, 155)),
+        _text_block("left equation", (80, 180, 295, 205)),
+        _text_block("right equation", (330, 170, 560, 195)),
+        _text_block("left bottom", (50, 220, 295, 260)),
+        _text_block("right bottom", (315, 215, 560, 260)),
+        _text_block("footer", (35, 740, 575, 750)),
+    ]
+
+    ordered = _order_text_blocks(blocks, page_width=612)
+
+    assert [block["lines"][0]["spans"][0]["text"] for block in ordered] == [
+        "Journal banner",
+        "left top",
+        "left equation",
+        "left bottom",
+        "right top",
+        "right equation",
+        "right bottom",
+        "footer",
+    ]
+
+
+def test_rawdict_geometry_recovers_aip_scripts_and_stacked_fractions() -> None:
+    block = {
+        "type": 0,
+        "bbox": (80, 450, 245, 475),
+        "lines": [
+            {
+                "bbox": (84, 451, 245, 460),
+                "spans": [
+                    _span("f", (90, 451, 93, 460)),
+                    _span("s", (93, 455, 96, 461), size=6.3),
+                    _span("2", (96, 448, 99, 454), font="AdvOT1ef757c0", size=6.3),
+                    _span(" = ", (100, 451, 112, 460), font="AdvP4C4E51"),
+                    _span("@", (114, 451, 119, 460), font="AdvP4C4E51"),
+                    _span("f", (120, 451, 123, 460)),
+                    _span("s", (123, 455, 126, 461), size=6.3),
+                    _span("@", (130, 451, 135, 460), font="AdvP4C4E51"),
+                    _span("t", (136, 451, 140, 460)),
+                    _span(" + q", (145, 451, 164, 460)),
+                    _span("s", (164, 455, 167, 461), size=6.3),
+                ],
+            },
+            {
+                "bbox": (151, 462, 158, 471),
+                "spans": [
+                    _span("m", (151, 462, 156, 471)),
+                    _span("s", (156, 466, 159, 472), size=6.3),
+                ],
+            },
+        ],
+    }
+
+    text = _block_text(block)
+    repaired = _repair_stacked_formula_text(text, block)
+
+    assert "f_{s}^{2}" in text
+    assert " / " in text
+    assert "∂f_{s}" in text
+    assert r"\frac{∂f_s}{∂t}" in repaired
+    assert r"\frac{q_s}{m_s}" in repaired
 
 
 def test_repeated_header_footer_blocks_are_filtered() -> None:
@@ -284,8 +363,156 @@ def test_formula_normalization_detects_inline_and_display_formulas() -> None:
     assert diagnostics["display_count"] == 1
 
 
+def test_formula_normalization_merges_adjacent_formula_fragments_into_cluster() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="formula_a",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=40, y0=90, x1=120, y1=108),
+                        reading_order=0,
+                        source_text="@fs=@t",
+                    ),
+                    DocumentBlock(
+                        block_id="formula_b",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=128, y0=92, x1=260, y1=110),
+                        reading_order=1,
+                        source_text="f = 0",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+    diagnostics = build_formula_diagnostics(normalized)
+
+    assert len(normalized.pages[0].blocks) == 1
+    assert diagnostics["formula_fragment_cluster_count"] == 1
+    assert diagnostics["formula_fragment_suppressed_block_count"] == 1
+    assert diagnostics["formula_fragment_clusters"][0]["merged_block_ids"] == [
+        "formula_a",
+        "formula_b",
+    ]
+    assert len(normalized.formulas) == 2
+    assert normalized.formulas[0].source_block_id == "formula_a"
+    assert normalized.formulas[0].source_text_range == (0, len("@fs=@t"))
+    assert normalized.formulas[1].source_block_id == "formula_a"
+    assert normalized.formulas[1].source_text_range == (
+        len("@fs=@t") + 1,
+        len("@fs=@t") + 1 + len("f = 0"),
+    )
+    assert normalized.pages[0].blocks[0].source_text == "@fs=@t f = 0"
+
+
+def test_formula_normalization_consumes_nonadjacent_fragments_in_equation_band() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[
+                    DocumentBlock(
+                        block_id="eq_main",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=330, y0=405, x1=560, y1=430),
+                        column=1,
+                        reading_order=0,
+                        source_text="@fs=k2 + qs ms (E=k)",
+                    ),
+                    DocumentBlock(
+                        block_id="frac_a",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=394, y0=429, x1=401, y1=452),
+                        column=1,
+                        reading_order=1,
+                        source_text="f 0 s k2",
+                    ),
+                    DocumentBlock(
+                        block_id="tiny_ref",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=430, y0=446, x1=436, y1=453),
+                        column=1,
+                        reading_order=2,
+                        source_text="v_{n}",
+                        text_for_translation="{{formula:Fvn}}",
+                    ),
+                    DocumentBlock(
+                        block_id="prose_gap",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=315, y0=464, x1=559, y1=500),
+                        column=1,
+                        reading_order=3,
+                        source_text="The velocity is a similarity invariant.",
+                    ),
+                    DocumentBlock(
+                        block_id="frac_b",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=404, y0=429, x1=429, y1=452),
+                        column=1,
+                        reading_order=4,
+                        source_text="f 0 n k - fs k2",
+                    ),
+                    DocumentBlock(
+                        block_id="eq_tail",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=387, y0=423, x1=559, y1=447),
+                        column=1,
+                        reading_order=5,
+                        source_text="× - d3vn gsn σsn(gsn, Ω) dΩ: (4)",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+    diagnostics = build_formula_diagnostics(normalized)
+    blocks = normalized.pages[0].blocks
+
+    assert [block.block_id for block in blocks] == ["eq_main", "prose_gap"]
+    assert diagnostics["formula_fragment_cluster_count"] == 1
+    assert set(diagnostics["formula_fragment_clusters"][0]["merged_block_ids"]) == {
+        "eq_main",
+        "frac_a",
+        "tiny_ref",
+        "frac_b",
+        "eq_tail",
+    }
+    assert "f 0 s k2" not in [block.source_text for block in blocks]
+
+
 def test_pdf_text_normalization_removes_control_glyphs() -> None:
     assert normalize_pdf_text("E \x01 B and cm\x032 with a ¼ b þ c") == "E × B and cm-2 with a = b + c"
+
+
+def test_pdf_formula_normalization_repairs_corrupt_slash_glyphs_only_with_markers() -> None:
+    from app.pipeline.formulas.normalization import latex_from_pdf_text
+
+    corrupt_latex, corrupt_flags = latex_from_pdf_text("@fs=@t þ f 0 s=k2")
+    clean_latex, clean_flags = latex_from_pdf_text("x = y + 1")
+
+    assert r"\partial f_s / \partial t" in corrupt_latex
+    assert "f'_s / k^2" in corrupt_latex
+    assert "formula_slash_glyph_repaired" in corrupt_flags
+    assert "formula_text_layer_corrupt" in corrupt_flags
+    assert clean_latex == "x = y + 1"
+    assert "formula_slash_glyph_repaired" not in clean_flags
 
 
 def test_noise_text_blocks_are_not_normalized_as_translatable_formulas() -> None:

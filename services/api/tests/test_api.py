@@ -221,7 +221,7 @@ def test_config_migrates_legacy_default_ocr_order(tmp_path: Path, monkeypatch) -
 
     migrated = runtime_config.runtime_config_response(storage)
 
-    assert migrated.ocr_provider_order == ["deterministic"]
+    assert migrated.ocr_provider_order == ["pix2text", "deterministic"]
 
 
 def test_config_preserves_explicit_pix2text_ocr_order(tmp_path: Path, monkeypatch) -> None:
@@ -306,6 +306,21 @@ def test_gbt_intent_upgrades_legacy_sans_font_stack(tmp_path: Path, monkeypatch)
         "Source Han Serif SC",
         "serif",
     ]
+    assert defaults.formula_numbering == "parenthesized"
+
+
+def test_non_gbt_intent_keeps_formula_numbering_disabled(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    defaults = runtime_config.render_defaults_for_intent(
+        storage,
+        "zh-CN",
+        coerce_user_intent("zh-CN", output_kind="translation", instruction=""),
+    )
+
+    assert defaults.formula_numbering == "none"
 
 
 def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: Path, monkeypatch) -> None:

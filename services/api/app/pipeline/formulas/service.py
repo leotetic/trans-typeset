@@ -34,7 +34,18 @@ _TEXT_ESCALATION_FLAGS = {
     "formula_low_confidence",
     "formula_text_truncated",
     "formula_delimiter_repaired",
+    "formula_text_layer_corrupt",
+    "formula_slash_glyph_suspect",
+    "formula_prime_glyph_suspect",
 }
+_DISPLAY_COMPLEXITY_FLAGS = {
+    "formula_display_cluster",
+    "formula_cluster_incomplete",
+    "formula_delimiter_repaired",
+}
+_DISPLAY_COMPLEXITY_PATTERN = re.compile(
+    r"(?:\\(?:frac|sum|int|partial|nabla|sqrt|left|right)|[∂∇∫∑]|[(){}\[\]])"
+)
 
 
 class FormulaRecognizer(Protocol):
@@ -112,11 +123,13 @@ async def enrich_document_formulas(
         )
 
     recognizer = recognizer or DeterministicFormulaRecognizer()
-    prefer_text_recognizer = recognizer is not None and ocr_service is None
+    prefer_text_recognizer = recognizer is not None
     ocr_service = ocr_service or OCRService(
         providers=[DeterministicOCRProvider()],
         asset_base_path=asset_output_dir,
     )
+    if getattr(ocr_service, "asset_base_path", None) is None:
+        ocr_service.asset_base_path = asset_output_dir
     working_document = document
     candidates = _ensure_formula_candidate_assets(
         working_document,
@@ -129,6 +142,8 @@ async def enrich_document_formulas(
     records: list[dict] = []
     rejected_records: list[dict] = []
     diagnostic_flags: list[str] = []
+    display_cluster_promoted_count = 0
+    legacy_formula_migrated_count = 0
 
     total_candidates = len(candidates)
     for index, candidate in enumerate(candidates, start=1):
@@ -148,6 +163,7 @@ async def enrich_document_formulas(
             validator = validate_formula_latex(
                 ocr_result.latex or ocr_result.text,
                 source_text=candidate.source_text,
+                display_mode=candidate.display_mode,
             )
             formula = FormulaIR(
                 formula_id=candidate.candidate_id,
@@ -155,7 +171,9 @@ async def enrich_document_formulas(
                 source_block_id=candidate.source_block_id,
                 anchor_block_id=candidate.anchor_block_id,
                 asset_id=candidate.asset_id,
-                latex=(ocr_result.latex or ocr_result.text) if validator.accepted else "",
+                latex=(ocr_result.latex or ocr_result.text)
+                if validator.accepted or _should_attach_image_fallback_formula(candidate, validator)
+                else "",
                 source_text=candidate.source_text,
                 source_text_range=candidate.source_text_range,
                 span_ids=list(candidate.span_ids),
@@ -168,6 +186,10 @@ async def enrich_document_formulas(
                     [*candidate.quality_flags, *ocr_result.quality_flags, *validator.quality_flags]
                 ),
             )
+            if candidate.parser_cluster_id:
+                display_cluster_promoted_count += 1
+            if candidate.legacy_formula_ids:
+                legacy_formula_migrated_count += len(candidate.legacy_formula_ids)
         except Exception as exc:
             records.append(
                 {
@@ -218,6 +240,10 @@ async def enrich_document_formulas(
     ocr_diagnostics = ocr_service.diagnostics()
     diagnostics = {
         "kind": "formula_diagnostics",
+        "parser_cluster_count": _parser_cluster_count(document),
+        "enrichment_candidate_count": len(candidates),
+        "display_cluster_promoted_count": display_cluster_promoted_count,
+        "legacy_formula_migrated_count": legacy_formula_migrated_count,
         "candidate_count": len(candidates),
         "recognized_count": sum(1 for formula in formulas if formula.latex.strip()),
         "accepted_count": len(formulas),
@@ -263,14 +289,21 @@ async def _recognize_candidate(
         text_validator = validate_formula_latex(
             text_result.latex,
             source_text=candidate.source_text,
+            display_mode=candidate.display_mode,
         )
         if _should_escalate_text_candidate(candidate, text_result, text_validator):
-            visual_result = await ocr_service.recognize_formula(candidate)
+            visual_result = await ocr_service.recognize_formula(
+                candidate,
+                prefer_visual=_prefer_visual_formula_provider(candidate),
+            )
             visual_validator = validate_formula_latex(
                 visual_result.latex or visual_result.text,
                 source_text=candidate.source_text,
+                display_mode=candidate.display_mode,
             )
-            if visual_validator.accepted:
+            if visual_validator.accepted and not (
+                set(visual_result.quality_flags) & _VISUAL_MOCK_FLAGS
+            ):
                 return (
                     visual_result,
                     visual_validator,
@@ -283,7 +316,11 @@ async def _recognize_candidate(
                         "fallback_reason": visual_validator.fallback_reason,
                         "source_kind": candidate.source_kind.value,
                         "quality_flags": _unique(
-                            [*text_result.quality_flags, *visual_result.quality_flags]
+                            [
+                                *text_result.quality_flags,
+                                *visual_result.quality_flags,
+                                "formula_visual_escalated",
+                            ]
                         ),
                     },
                 )
@@ -301,10 +338,14 @@ async def _recognize_candidate(
                 "quality_flags": list(text_result.quality_flags),
             },
         )
-    ocr_result = await ocr_service.recognize_formula(candidate)
+    ocr_result = await ocr_service.recognize_formula(
+        candidate,
+        prefer_visual=_prefer_visual_formula_provider(candidate),
+    )
     validator = validate_formula_latex(
         ocr_result.latex or ocr_result.text,
         source_text=candidate.source_text,
+        display_mode=candidate.display_mode,
     )
     return (
         ocr_result,
@@ -342,6 +383,10 @@ def _should_escalate_text_candidate(
 ) -> bool:
     if not candidate.image_path:
         return False
+    if _prefer_visual_formula_provider(candidate):
+        return True
+    if candidate.display_mode == "display" and set(result.quality_flags) & _TEXT_ESCALATION_FLAGS:
+        return True
     if validator.accepted and result.confidence >= 0.65 and not (
         set(result.quality_flags) & _TEXT_ESCALATION_FLAGS
     ):
@@ -353,6 +398,28 @@ def _should_escalate_text_candidate(
     return result.confidence < 0.65
 
 
+def _prefer_visual_formula_provider(candidate: FormulaCandidate) -> bool:
+    if candidate.display_mode != "display":
+        return False
+    candidate_flags = set(candidate.quality_flags)
+    if candidate.image_path and candidate_flags & _TEXT_ESCALATION_FLAGS:
+        return True
+    if candidate.source_kind in {
+        FormulaSourceKind.IMAGE_CANDIDATE,
+        FormulaSourceKind.VECTOR_CANDIDATE,
+    }:
+        return True
+    flags = set(candidate.quality_flags)
+    if flags.intersection(_DISPLAY_COMPLEXITY_FLAGS):
+        return True
+    normalized = normalize_pdf_text(candidate.source_text)
+    if len(re.findall(r"[A-Za-z]{3,}", normalized)) <= 2 and _DISPLAY_COMPLEXITY_PATTERN.search(
+        normalized
+    ):
+        return True
+    return normalized.count("=") >= 2
+
+
 def _formula_attachment_rejection_reason(
     candidate: FormulaCandidate,
     formula: FormulaIR,
@@ -362,8 +429,14 @@ def _formula_attachment_rejection_reason(
         return "formula_not_math_rejected"
     if flags.intersection(_VISUAL_MOCK_FLAGS):
         return "formula_visual_mock_rejected"
-    validator = validate_formula_latex(formula.latex, source_text=formula.source_text)
+    validator = validate_formula_latex(
+        formula.latex,
+        source_text=formula.source_text,
+        display_mode=formula.display_mode,
+    )
     if not validator.accepted:
+        if _formula_uses_image_fallback(formula, validator):
+            return None
         return (
             "formula_not_math_rejected"
             if validator.status in {"prose_like", "not_math"}
@@ -384,6 +457,25 @@ def _formula_attachment_rejection_reason(
     ):
         return "formula_visual_mock_rejected"
     return None
+
+
+def _should_attach_image_fallback_formula(
+    candidate: FormulaCandidate,
+    validator: Any,
+) -> bool:
+    return (
+        candidate.display_mode == "display"
+        and bool(candidate.asset_id or candidate.image_path)
+        and validator.fallback_reason == "formula_asset_image"
+    )
+
+
+def _formula_uses_image_fallback(formula: FormulaIR, validator: Any) -> bool:
+    return (
+        formula.display_mode == "display"
+        and bool(formula.asset_id)
+        and validator.fallback_reason == "formula_asset_image"
+    )
 
 
 def _display_latex_has_math_signal(text: str) -> bool:
@@ -455,11 +547,11 @@ def _ensure_formula_candidate_assets(
             output_path = asset_output_dir / f"{candidate.candidate_id}.png"
             try:
                 page = pdf[page_index]
-                clip = fitz.Rect(
-                    candidate.bbox.x0,
-                    candidate.bbox.y0,
-                    candidate.bbox.x1,
-                    candidate.bbox.y1,
+                clip = _padded_formula_crop_rect(
+                    fitz,
+                    candidate,
+                    page_width=page.rect.width,
+                    page_height=page.rect.height,
                 )
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
                 pixmap.save(output_path)
@@ -467,6 +559,11 @@ def _ensure_formula_candidate_assets(
                 updated.append(candidate)
                 continue
             asset_path = f"/api/documents/{doc_id}/assets/{output_path.name}"
+            quality_flags = list(candidate.quality_flags)
+            if clip.y0 < candidate.bbox.y0 or clip.y1 > candidate.bbox.y1:
+                quality_flags.append("formula_crop_padded")
+            if _equation_number_present(candidate.source_text):
+                quality_flags.append("formula_equation_number_preserved")
             updated.append(
                 FormulaCandidate(
                     candidate_id=candidate.candidate_id,
@@ -481,7 +578,9 @@ def _ensure_formula_candidate_assets(
                     span_ids=candidate.span_ids,
                     display_mode=candidate.display_mode,
                     image_path=asset_path,
-                    quality_flags=candidate.quality_flags,
+                    quality_flags=tuple(_unique(quality_flags)),
+                    legacy_formula_ids=candidate.legacy_formula_ids,
+                    parser_cluster_id=candidate.parser_cluster_id,
                 )
             )
         return updated
@@ -491,6 +590,12 @@ def _ensure_formula_candidate_assets(
 
 def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> DocumentIR:
     formulas_by_id = {formula.formula_id: formula for formula in formulas}
+    legacy_formula_ids = {
+        flag.split(":", 1)[1]
+        for formula in formulas
+        for flag in formula.quality_flags
+        if flag.startswith("legacy_formula_replaced:")
+    }
     existing_assets = {
         asset.asset_id
         for page in document.pages
@@ -529,7 +634,9 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
                         update={
                             "role": BlockRole.FORMULA,
                             "source_text": f"{{{{formula:{formula.formula_id}}}}}",
+                            "text_for_translation": f"{{{{formula:{formula.formula_id}}}}}",
                             "formula_id": formula.formula_id,
+                            "formulas": [],
                         },
                         deep=True,
                     )
@@ -537,7 +644,13 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
                 continue
             rewritten = _rewrite_inline_formula_refs(block.source_text, inline_formulas)
             blocks.append(
-                block.model_copy(update={"source_text": rewritten}, deep=True)
+                block.model_copy(
+                    update={
+                        "source_text": rewritten,
+                        "text_for_translation": rewritten,
+                    },
+                    deep=True,
+                )
             )
 
         assets: list[Asset] = []
@@ -579,6 +692,7 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
 
     merged_formulas = {
         formula.formula_id: formula for formula in document.formulas
+        if formula.formula_id not in legacy_formula_ids
     }
     merged_formulas.update(formulas_by_id)
     updated = document.model_copy(
@@ -669,3 +783,49 @@ def _formula_diagnostic_base_flags(
     if recognizer_type == "deterministic":
         flags.append("formula_recognition_deterministic")
     return flags
+
+
+def _parser_cluster_count(document: DocumentIR) -> int:
+    diagnostics = getattr(document, "_formula_fragment_cluster_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return 0
+    count = diagnostics.get("formula_fragment_cluster_count", 0)
+    return int(count) if isinstance(count, int) else 0
+
+
+def _padded_formula_crop_rect(
+    fitz_module: Any,
+    candidate: FormulaCandidate,
+    *,
+    page_width: float,
+    page_height: float,
+) -> Any:
+    width = max(1.0, candidate.bbox.x1 - candidate.bbox.x0)
+    height = max(1.0, candidate.bbox.y1 - candidate.bbox.y0)
+    pad_x = min(max(width * 0.06, 8.0), 28.0)
+    pad_y = min(max(height * 0.22, 10.0), 36.0)
+    right_pad = pad_x
+    if _equation_number_present(candidate.source_text):
+        right_pad = max(right_pad, width * 0.18, 22.0)
+    return fitz_module.Rect(
+        max(0.0, candidate.bbox.x0 - pad_x),
+        max(0.0, candidate.bbox.y0 - pad_y),
+        min(page_width, candidate.bbox.x1 + right_pad),
+        min(page_height, candidate.bbox.y1 + pad_y),
+    )
+
+
+def _equation_number_present(text: str) -> bool:
+    normalized = normalize_pdf_text(text)
+    if re.search(r"\(\d+\)\s*$", normalized):
+        return True
+    match = re.search(
+        r"\(\d+\)(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$",
+        normalized,
+    )
+    if match is None:
+        return False
+    tail = match.group("tail").strip()
+    if re.search(r"\b(?:and|as|for|from|is|represents?|the|where|with)\b", tail, re.IGNORECASE):
+        return False
+    return len(re.findall(r"[A-Za-z]{3,}", tail)) <= 1
