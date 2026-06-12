@@ -1,0 +1,25 @@
+{
+  "job_id": "job_plan_v3_regression",
+  "doc_id": "doc_plan_v3_regression",
+  "filename": "plan-v3-regression.pdf",
+  "target_lang": "zh-CN",
+  "status": "completed",
+  "progress": 1.0,
+  "message": "Completed",
+  "error": null,
+  "chunks": [
+    {
+      "chunk_id": "doc_plan_v3_regression_chunk_0001",
+      "index": 1,
+      "total": 1,
+      "status": "completed",
+      "progress": 1.0,
+      "message": "Completed",
+      "quality_flags": [
+        "mock_translation",
+        "formula_preserved_without_translation"
+      ],
+      "error": null
+    }
+  ]
+}

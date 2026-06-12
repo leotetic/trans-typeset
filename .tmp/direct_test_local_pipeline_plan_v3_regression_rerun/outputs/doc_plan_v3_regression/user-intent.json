@@ -1,0 +1,22 @@
+{
+  "target_lang": "zh-CN",
+  "output_kind": "typeset_document",
+  "style_intent": "academic",
+  "typesetting_standard": "gb_t_7713_1_2025",
+  "instruction": "按 GB/T 7713.1 标准排版",
+  "preserve_policy": [
+    "citations",
+    "formulas",
+    "tables",
+    "figures",
+    "reference_markers"
+  ],
+  "reference_assets": [],
+  "constraints": {
+    "page_width_pt": 612.0,
+    "page_height_pt": 792.0,
+    "target_font_size_pt": 11.0,
+    "allow_continuation": true,
+    "preserve_images": true
+  }
+}

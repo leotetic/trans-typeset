@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.1",
+  "analysis_id": "doc_1_semantic_analysis_01",
+  "doc_id": "doc_1",
+  "target_lang": "zh-CN",
+  "block_signals": [
+    {
+      "source_block_id": "b1",
+      "role_candidates": [
+        "paragraph"
+      ],
+      "section_hint": null,
+      "confidence": 0.85,
+      "quality_flags": []
+    }
+  ],
+  "asset_signals": [],
+  "section_hints": [],
+  "confidence": 0.85,
+  "quality_flags": [
+    "deterministic_semantic_analysis",
+    "layout_source_fallback_to_content",
+    "semantic_model_fallback"
+  ]
+}

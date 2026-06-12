@@ -1,0 +1,62 @@
+{
+  "schema_version": "0.1",
+  "analysis_id": "doc_formula_pdf_after_fix_semantic_analysis_01",
+  "doc_id": "doc_formula_pdf_after_fix",
+  "target_lang": "zh-CN",
+  "block_signals": [
+    {
+      "source_block_id": "p0001_be75039fbc0a3",
+      "role_candidates": [
+        "title"
+      ],
+      "section_hint": "title: Formula Smoke Fixture",
+      "confidence": 0.85,
+      "quality_flags": []
+    },
+    {
+      "source_block_id": "p0001_b261f5f911ae4",
+      "role_candidates": [
+        "paragraph"
+      ],
+      "section_hint": null,
+      "confidence": 0.85,
+      "quality_flags": []
+    },
+    {
+      "source_block_id": "p0001_bf15a4f4f0b15",
+      "role_candidates": [
+        "paragraph"
+      ],
+      "section_hint": null,
+      "confidence": 0.85,
+      "quality_flags": []
+    },
+    {
+      "source_block_id": "p0001_b6e69943ca460",
+      "role_candidates": [
+        "formula"
+      ],
+      "section_hint": null,
+      "confidence": 0.85,
+      "quality_flags": []
+    }
+  ],
+  "asset_signals": [
+    {
+      "asset_id": "p0001_formula_82a286fb1eca",
+      "usage_hint": "preserve",
+      "text_hint": "\\int f_s d\\Omega",
+      "confidence": 0.75,
+      "quality_flags": []
+    }
+  ],
+  "section_hints": [
+    "Formula Smoke Fixture"
+  ],
+  "confidence": 0.83,
+  "quality_flags": [
+    "deterministic_semantic_analysis",
+    "layout_source_fallback_to_content",
+    "semantic_model_fallback"
+  ]
+}

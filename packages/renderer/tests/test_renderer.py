@@ -4,7 +4,9 @@ import builtins
 import json
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
+import pdf_renderer.models as renderer_models
 import pdf_renderer.renderer as renderer_module
 import pytest
 from pdf_renderer import RenderDocument, render_to_html, render_to_pdf
@@ -153,6 +155,18 @@ def test_katex_display_margin_is_zeroed_to_prevent_formula_clipping() -> None:
     assert ".katex-display {\n        display: block;" in html
     assert "margin: 0;" in html
     assert "margin: 1em 0" not in html
+
+
+def test_katex_render_to_string_handles_empty_stdout_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_models.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=None, stderr="boom"),
+    )
+
+    assert renderer_models._katex_render_to_string(r"\int f_s\,d\Omega", display=True) is None
 
 
 def test_render_to_pdf_falls_back_when_playwright_driver_fails(

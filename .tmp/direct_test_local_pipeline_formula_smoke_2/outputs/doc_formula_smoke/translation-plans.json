@@ -1,0 +1,70 @@
+[
+  {
+    "schema_version": "0.1",
+    "chunk_id": "doc_formula_smoke_chunk_0001",
+    "target_lang": "zh-CN",
+    "blocks": [
+      {
+        "source_block_id": "p0001_be75039fbc0a3",
+        "translated_text": "【译】Formula Smoke Fixture",
+        "inline_items": [],
+        "role": "title",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b261f5f911ae4",
+        "translated_text": "【译】The density {{formula:p0001_formula_47737119abc6}} and citation 50^{-4} remain readable.",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_47737119abc6}}",
+            "source_token": "{{formula:p0001_formula_47737119abc6}}",
+            "asset_id": "p0001_formula_47737119abc6"
+          }
+        ],
+        "role": "paragraph",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_bf15a4f4f0b15",
+        "translated_text": "【译】We solve {{formula:p0001_formula_4248d50a04e1}} in the text and preserve it.",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_4248d50a04e1}}",
+            "source_token": "{{formula:p0001_formula_4248d50a04e1}}",
+            "asset_id": "p0001_formula_4248d50a04e1"
+          }
+        ],
+        "role": "paragraph",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b6e69943ca460",
+        "translated_text": "{{formula:p0001_formula_82a286fb1eca}}",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_82a286fb1eca}}",
+            "source_token": "{{formula:p0001_formula_82a286fb1eca}}",
+            "asset_id": "p0001_formula_82a286fb1eca"
+          }
+        ],
+        "role": "formula",
+        "render_intent": "normal",
+        "quality_flags": [
+          "formula_preserved_without_translation"
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,24 @@
+{
+  "job_id": "job_1",
+  "doc_id": "doc_1",
+  "filename": "text-input.txt",
+  "target_lang": "zh-CN",
+  "status": "completed",
+  "progress": 1.0,
+  "message": "Completed",
+  "error": null,
+  "chunks": [
+    {
+      "chunk_id": "doc_1_chunk_0001",
+      "index": 1,
+      "total": 1,
+      "status": "completed",
+      "progress": 1.0,
+      "message": "Completed",
+      "quality_flags": [
+        "mock_translation"
+      ],
+      "error": null
+    }
+  ]
+}

@@ -10,6 +10,7 @@ from pdf_translator_schema.models import DocumentBlock
 from .formulas.normalization import (
     GREEK_TO_LATEX,
     SYMBOL_TO_LATEX,
+    alpha_word_tokens,
     contains_natural_language,
     is_noise_text,
     latex_from_pdf_text,
@@ -219,14 +220,14 @@ def is_formula_like_text(text: str) -> bool:
     if not stripped or len(stripped) > _FORMULA_CLUSTER_MAX_TEXT_LEN:
         return False
     if contains_natural_language(stripped):
-        words = re.findall(r"[A-Za-z]{3,}", stripped)
+        words = alpha_word_tokens(stripped)
         if len(words) > _FORMULA_CLUSTER_MAX_NATURAL_WORDS:
             return False
     refs_removed = FORMULA_REF_PATTERN.sub(" ", stripped)
     refs_removed = re.sub(r"\s+", " ", refs_removed).strip()
     if not refs_removed:
         return True
-    alpha_words = re.findall(r"[A-Za-z]{3,}", refs_removed)
+    alpha_words = alpha_word_tokens(refs_removed)
     if len(alpha_words) > _FORMULA_CLUSTER_MAX_NATURAL_WORDS:
         return False
     if _looks_like_formula(refs_removed):
@@ -689,7 +690,7 @@ def _looks_like_explicit_sentence_boundary(text: str) -> bool:
     if re.search(r"[。！？!?]$", stripped):
         return True
     if re.search(r"\.\s*$", stripped):
-        words = re.findall(r"[A-Za-z]{3,}", stripped)
+        words = alpha_word_tokens(stripped)
         return len(words) >= 4
     return False
 
@@ -709,7 +710,9 @@ def _detect_formula_matches(block: DocumentBlock) -> list[FormulaMatch]:
     text = normalize_pdf_text(block.source_text)
     if not text or is_noise_text(text):
         return []
-    if block.role == BlockRole.FORMULA or _looks_like_display_formula(text):
+    if block.role == BlockRole.FORMULA and not contains_natural_language(text):
+        return [FormulaMatch(0, len(block.source_text), text, "display")]
+    if _looks_like_display_formula(text):
         return [FormulaMatch(0, len(block.source_text), text, "display")]
 
     matches: list[FormulaMatch] = []
@@ -752,7 +755,7 @@ def _looks_like_formula(text: str) -> bool:
         return False
     if re.fullmatch(r"\([A-Z][A-Za-z'’\-]+,?\s+\d{4}[a-z]?\)", stripped):
         return False
-    if len(re.findall(r"\b[A-Za-z]{4,}\b", stripped)) >= 3:
+    if len(alpha_word_tokens(stripped, min_len=4)) >= 3:
         return False
     if contains_natural_language(stripped) and _math_signal_count(stripped) < 2:
         return False

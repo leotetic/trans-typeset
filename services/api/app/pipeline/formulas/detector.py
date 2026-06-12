@@ -13,7 +13,12 @@ from pdf_translator_schema.models import (
     TextSpanIR,
 )
 
-from .normalization import contains_natural_language, is_noise_text, normalize_pdf_text
+from .normalization import (
+    alpha_word_tokens,
+    contains_natural_language,
+    is_noise_text,
+    normalize_pdf_text,
+)
 
 _FORMULA_REF_PATTERN = re.compile(r"^\{\{formula:[A-Za-z0-9_.:-]+\}\}$")
 _INLINE_FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
@@ -196,7 +201,7 @@ def _looks_like_display_formula_text(text: str) -> bool:
         return False
     if _looks_like_prose(stripped):
         return False
-    alpha_words = re.findall(r"[A-Za-z]{3,}", stripped)
+    alpha_words = alpha_word_tokens(stripped)
     if any(
         word.lower()
         in {
@@ -509,7 +514,7 @@ def _extract_equation_number(text: str) -> str | None:
     tail = match.group("tail").strip()
     if re.search(r"\b(?:and|as|for|from|is|represents?|the|where|with)\b", tail, re.IGNORECASE):
         return None
-    if len(re.findall(r"[A-Za-z]{3,}", tail)) > 1:
+    if len(alpha_word_tokens(tail)) > 1:
         return None
     return match.group(1)
 
@@ -534,7 +539,7 @@ def _looks_like_prose(text: str) -> bool:
         return True
     if re.search(r"[,.;]\s+[A-Za-z]{3,}", stripped):
         return True
-    words = re.findall(r"[A-Za-z]{3,}", stripped)
+    words = alpha_word_tokens(stripped)
     return len(words) >= 6
 
 

@@ -1,0 +1,146 @@
+[
+  {
+    "candidate_id": "p0001_formula_341db929c96e",
+    "page_id": "p0001",
+    "source_kind": "inline_text",
+    "source_block_id": null,
+    "anchor_block_id": "p0001_b56859f584269",
+    "asset_id": null,
+    "source_text": "n_{e}",
+    "source_text_range": [
+      12,
+      17
+    ],
+    "span_ids": [],
+    "display_mode": "inline",
+    "image_path": null,
+    "quality_flags": [
+      "formula_inline_text_only"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_3f21b28bdefa",
+    "page_id": "p0001",
+    "source_kind": "inline_text",
+    "source_block_id": null,
+    "anchor_block_id": "p0001_b032ca8c3e8d9",
+    "asset_id": null,
+    "source_text": "E = mc^2",
+    "source_text_range": [
+      9,
+      17
+    ],
+    "span_ids": [],
+    "display_mode": "inline",
+    "image_path": null,
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F083718e50fd6",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_b3ce83d28123",
+    "page_id": "p0001",
+    "source_kind": "text_layer",
+    "source_block_id": "p0001_b46acda834ae1",
+    "anchor_block_id": null,
+    "asset_id": "p0001_formula_b3ce83d28123",
+    "source_text": "\\frac{q_s n_s}{m_s} = \\int f_s d\\Omega",
+    "source_text_range": [
+      0,
+      38
+    ],
+    "span_ids": [],
+    "display_mode": "display",
+    "image_path": "/api/documents/doc_plan_v3_regression/assets/p0001_formula_b3ce83d28123.png",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F7eced87a23a8",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "formula_crop_padded"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_8a853edb7dbb",
+    "page_id": "p0001",
+    "source_kind": "text_layer",
+    "source_block_id": "p0001_b4e1743c929e9",
+    "anchor_block_id": null,
+    "asset_id": "p0001_formula_8a853edb7dbb",
+    "source_text": "\\sum_n q_s n_s = 0",
+    "source_text_range": [
+      0,
+      18
+    ],
+    "span_ids": [],
+    "display_mode": "display",
+    "image_path": "/api/documents/doc_plan_v3_regression/assets/p0001_formula_8a853edb7dbb.png",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F30231c0caa35",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "formula_crop_padded"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_8a7eaad7ccff",
+    "page_id": "p0001",
+    "source_kind": "text_layer",
+    "source_block_id": "p0001_b616b7c3facae",
+    "anchor_block_id": null,
+    "asset_id": "p0001_formula_8a7eaad7ccff",
+    "source_text": "\\int f_s d\\Omega , (3) v_{n}",
+    "source_text_range": [
+      0,
+      28
+    ],
+    "span_ids": [],
+    "display_mode": "display",
+    "image_path": "/api/documents/doc_plan_v3_regression/assets/p0001_formula_8a7eaad7ccff.png",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F6e2b2ed65ef5",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_equation_number_preserved",
+      "formula_ocr_unavailable",
+      "formula_crop_padded"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_3a92d223fd96",
+    "page_id": "p0001",
+    "source_kind": "text_layer",
+    "source_block_id": "p0001_b515628fcce35",
+    "anchor_block_id": null,
+    "asset_id": "p0001_formula_3a92d223fd96",
+    "source_text": "\\frac{\\alpha}{\\beta + 1} = q_s , (4)",
+    "source_text_range": [
+      0,
+      36
+    ],
+    "span_ids": [],
+    "display_mode": "display",
+    "image_path": "/api/documents/doc_plan_v3_regression/assets/p0001_formula_3a92d223fd96.png",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:Feeff97b6fc8a",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_equation_number_preserved",
+      "formula_ocr_unavailable",
+      "formula_crop_padded"
+    ]
+  }
+]

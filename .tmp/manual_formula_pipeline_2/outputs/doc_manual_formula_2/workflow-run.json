@@ -1,0 +1,73 @@
+{
+  "workflow_id": "workflow_job_manual_formula_2",
+  "job_id": "job_manual_formula_2",
+  "doc_id": "doc_manual_formula_2",
+  "status": "failed",
+  "current_step": "fail",
+  "progress": 1.0,
+  "input_sources": [
+    {
+      "source_id": "content_source",
+      "input_type": "pdf",
+      "source_role": "content",
+      "filename": "doc_formula.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "9357666c78c6214a16aaba798486e56ddd02657f3df244882ae9ec4526a397fc",
+      "artifact_path": "D:\\macos\\trans-typeset\\.tmp\\manual_formula_pipeline_2\\uploads\\doc_formula.pdf",
+      "quality_flags": []
+    },
+    {
+      "source_id": "layout_source",
+      "input_type": "pdf",
+      "source_role": "layout_reference",
+      "filename": "doc_formula.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "9357666c78c6214a16aaba798486e56ddd02657f3df244882ae9ec4526a397fc",
+      "artifact_path": "D:\\macos\\trans-typeset\\.tmp\\manual_formula_pipeline_2\\uploads\\doc_formula.pdf",
+      "quality_flags": [
+        "layout_source_fallback_to_content"
+      ]
+    }
+  ],
+  "user_intent": {
+    "target_lang": "zh-CN",
+    "output_kind": "translation",
+    "style_intent": "academic",
+    "typesetting_standard": "none",
+    "instruction": "",
+    "preserve_policy": [
+      "citations",
+      "formulas",
+      "tables",
+      "figures",
+      "reference_markers"
+    ],
+    "reference_assets": [],
+    "constraints": {
+      "page_width_pt": 612.0,
+      "page_height_pt": 792.0,
+      "target_font_size_pt": 11.0,
+      "allow_continuation": true,
+      "preserve_images": true
+    }
+  },
+  "steps": [
+    {
+      "step_id": "4_fail_1",
+      "name": "fail",
+      "status": "failed",
+      "progress": 1.0,
+      "attempt": 1,
+      "message": "Failed",
+      "input_artifacts": [],
+      "output_artifacts": [],
+      "diagnostics": {},
+      "error": "disk I/O error"
+    }
+  ],
+  "artifacts": {},
+  "diagnostics": {},
+  "error": null
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "formula_id": "p0001_formula_47737119abc6",
+    "status": "recognized",
+    "accepted_provider": "text_layer_normalizer",
+    "accepted_confidence": 0.92,
+    "validator_status": "accepted",
+    "fallback_reason": null,
+    "source_kind": "inline_text",
+    "quality_flags": [
+      "formula_inline_text_only",
+      "formula_low_confidence"
+    ],
+    "latex": "n_{e}"
+  },
+  {
+    "formula_id": "p0001_formula_4248d50a04e1",
+    "status": "recognized",
+    "accepted_provider": "text_layer_normalizer",
+    "accepted_confidence": 0.92,
+    "validator_status": "accepted",
+    "fallback_reason": null,
+    "source_kind": "inline_text",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F4e0e5a78d018",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "formula_low_confidence"
+    ],
+    "latex": "E = mc^2"
+  },
+  {
+    "formula_id": "p0001_formula_82a286fb1eca",
+    "status": "recognized",
+    "accepted_provider": "deterministic",
+    "accepted_confidence": 0.96,
+    "validator_status": "accepted",
+    "fallback_reason": null,
+    "source_kind": "text_layer",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F9a2fcf194842",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "formula_crop_padded",
+      "ocr_image_upscaled",
+      "ocr_text_layer_passthrough",
+      "formula_visual_escalated"
+    ],
+    "latex": "\\int f_s d\\Omega"
+  }
+]

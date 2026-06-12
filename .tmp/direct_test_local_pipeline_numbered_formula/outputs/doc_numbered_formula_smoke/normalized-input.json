@@ -1,0 +1,36 @@
+{
+  "kind": "normalized_input",
+  "input_sources": [
+    {
+      "source_id": "content_source",
+      "input_type": "pdf",
+      "source_role": "content",
+      "filename": "numbered-formula-smoke.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1256,
+      "sha256": "a81726b59fa365c8aad4c1de2813c0768451da4032d8b4ea93eebcfab7ff0b28",
+      "artifact_path": ".tmp\\direct_test_local_pipeline_numbered_formula\\uploads\\numbered-formula-smoke.pdf",
+      "quality_flags": []
+    },
+    {
+      "source_id": "layout_source",
+      "input_type": "pdf",
+      "source_role": "layout_reference",
+      "filename": "numbered-formula-smoke.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1256,
+      "sha256": "a81726b59fa365c8aad4c1de2813c0768451da4032d8b4ea93eebcfab7ff0b28",
+      "artifact_path": ".tmp\\direct_test_local_pipeline_numbered_formula\\uploads\\numbered-formula-smoke.pdf",
+      "quality_flags": [
+        "layout_source_fallback_to_content"
+      ]
+    }
+  ],
+  "document_ir_ref": "document-ir",
+  "asset_count": 0,
+  "block_count": 3,
+  "text_excerpt": "Numbered Formula Fixture We keep a single GB/T equation number renderer. {{formula:p0001_formula_3dd24ace77cb}}",
+  "quality_flags": [
+    "layout_source_fallback_to_content"
+  ]
+}

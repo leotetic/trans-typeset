@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1",
+  "plan_id": "doc_1_layout_intent_01",
+  "doc_id": "doc_1",
+  "target_lang": "zh-CN",
+  "output_kind": "translation",
+  "style_intent": "academic",
+  "blocks": [
+    {
+      "source_block_id": "doc_1_text_0001",
+      "role": "title",
+      "priority": 5,
+      "render_intent": "normal",
+      "asset_refs": [],
+      "quality_flags": []
+    },
+    {
+      "source_block_id": "doc_1_text_0002",
+      "role": "abstract",
+      "priority": 4,
+      "render_intent": "normal",
+      "asset_refs": [],
+      "quality_flags": []
+    }
+  ],
+  "assets": [],
+  "quality_flags": [
+    "semantic_analysis_considered",
+    "planner_fallback"
+  ]
+}

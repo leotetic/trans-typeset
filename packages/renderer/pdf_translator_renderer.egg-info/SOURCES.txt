@@ -9,3 +9,4 @@ pdf_translator_renderer.egg-info/dependency_links.txt
 pdf_translator_renderer.egg-info/requires.txt
 pdf_translator_renderer.egg-info/top_level.txt
 tests/test_renderer.py
+tests/test_visual_regression.py

@@ -56,6 +56,24 @@ def test_classify_role_is_testable_for_common_pdf_blocks() -> None:
         == BlockRole.FORMULA
     )
     assert (
+        classify_role(
+            r"\frac{\alpha}{\beta + 1} = q_s , (4)",
+            page_index=1,
+            block_index=3,
+            font_size=12,
+        )
+        == BlockRole.FORMULA
+    )
+    assert (
+        classify_role(
+            "We solve E = mc^2 in the text and preserve it.",
+            page_index=1,
+            block_index=2,
+            font_size=10,
+        )
+        == BlockRole.PARAGRAPH
+    )
+    assert (
         classify_role("Method  Score  Time  Notes", page_index=1, block_index=3, font_size=9)
         == BlockRole.TABLE
     )

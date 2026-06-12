@@ -1,0 +1,69 @@
+[
+  {
+    "candidate_id": "p0001_formula_47737119abc6",
+    "page_id": "p0001",
+    "source_kind": "inline_text",
+    "source_block_id": null,
+    "anchor_block_id": "p0001_b261f5f911ae4",
+    "asset_id": null,
+    "source_text": "n_{e}",
+    "source_text_range": [
+      12,
+      17
+    ],
+    "span_ids": [],
+    "display_mode": "inline",
+    "image_path": null,
+    "quality_flags": [
+      "formula_inline_text_only"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_4248d50a04e1",
+    "page_id": "p0001",
+    "source_kind": "inline_text",
+    "source_block_id": null,
+    "anchor_block_id": "p0001_bf15a4f4f0b15",
+    "asset_id": null,
+    "source_text": "E = mc^2",
+    "source_text_range": [
+      9,
+      17
+    ],
+    "span_ids": [],
+    "display_mode": "inline",
+    "image_path": null,
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F4e0e5a78d018",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable"
+    ]
+  },
+  {
+    "candidate_id": "p0001_formula_82a286fb1eca",
+    "page_id": "p0001",
+    "source_kind": "text_layer",
+    "source_block_id": "p0001_b6e69943ca460",
+    "anchor_block_id": null,
+    "asset_id": "p0001_formula_82a286fb1eca",
+    "source_text": "\\int f_s d\\Omega",
+    "source_text_range": [
+      0,
+      16
+    ],
+    "span_ids": [],
+    "display_mode": "display",
+    "image_path": "/api/documents/doc_formula_smoke/assets/p0001_formula_82a286fb1eca.png",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F9a2fcf194842",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "formula_crop_padded"
+    ]
+  }
+]

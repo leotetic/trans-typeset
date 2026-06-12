@@ -1,0 +1,11 @@
+{
+  "job_id": "job_manual_formula",
+  "doc_id": "doc_manual_formula",
+  "filename": "doc_formula.pdf",
+  "target_lang": "zh-CN",
+  "status": "failed",
+  "progress": 1.0,
+  "message": "Failed",
+  "error": "disk I/O error",
+  "chunks": []
+}

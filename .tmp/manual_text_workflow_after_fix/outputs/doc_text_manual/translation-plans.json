@@ -1,0 +1,36 @@
+[
+  {
+    "schema_version": "0.1",
+    "chunk_id": "doc_text_manual_chunk_0001",
+    "target_lang": "zh-CN",
+    "blocks": [
+      {
+        "source_block_id": "doc_text_manual_text_0001",
+        "translated_text": "【译】Paper Title",
+        "inline_items": [],
+        "role": "title",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "doc_text_manual_text_0002",
+        "translated_text": "Abstract This is text [1].",
+        "inline_items": [
+          {
+            "kind": "reference_marker",
+            "text": "[1]",
+            "source_token": "[1]",
+            "asset_id": null
+          }
+        ],
+        "role": "abstract",
+        "render_intent": "normal",
+        "quality_flags": [
+          "formula_preserved_without_translation"
+        ]
+      }
+    ]
+  }
+]

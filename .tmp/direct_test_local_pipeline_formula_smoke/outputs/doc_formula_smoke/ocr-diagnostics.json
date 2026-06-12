@@ -1,0 +1,30 @@
+{
+  "kind": "ocr_diagnostics",
+  "record_count": 1,
+  "records": [
+    {
+      "candidate_id": "p0001_formula_82a286fb1eca",
+      "source_kind": "text_layer",
+      "display_mode": "display",
+      "status": "recognized",
+      "provider": "deterministic",
+      "confidence": 0.96,
+      "attempts": [
+        {
+          "provider": "deterministic",
+          "status": "recognized",
+          "confidence": 0.96,
+          "quality_flags": [
+            "ocr_image_upscaled",
+            "ocr_text_layer_passthrough"
+          ],
+          "validator_status": "accepted"
+        }
+      ]
+    }
+  ],
+  "quality_flags": [
+    "ocr_image_upscaled",
+    "ocr_text_layer_passthrough"
+  ]
+}

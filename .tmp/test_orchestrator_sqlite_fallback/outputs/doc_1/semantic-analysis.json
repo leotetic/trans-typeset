@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "analysis_id": "doc_1_semantic_analysis_01",
+  "doc_id": "doc_1",
+  "target_lang": "zh-CN",
+  "block_signals": [
+    {
+      "source_block_id": "doc_1_text_0001",
+      "role_candidates": [
+        "title"
+      ],
+      "section_hint": "title: Paper Title",
+      "confidence": 0.85,
+      "quality_flags": []
+    },
+    {
+      "source_block_id": "doc_1_text_0002",
+      "role_candidates": [
+        "abstract"
+      ],
+      "section_hint": "abstract",
+      "confidence": 0.85,
+      "quality_flags": []
+    }
+  ],
+  "asset_signals": [],
+  "section_hints": [
+    "Paper Title",
+    "Abstract This is a text workflow [1]."
+  ],
+  "confidence": 0.85,
+  "quality_flags": [
+    "deterministic_semantic_analysis",
+    "semantic_model_fallback"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "kind": "render_evaluation",
+  "accepted": true,
+  "quality_flag_counts": {
+    "mock_translation": 1,
+    "formula_height_adjusted": 1,
+    "formula_preserved_without_translation": 1,
+    "formula_like_block": 1
+  },
+  "layout_issue_count": 0,
+  "blocking_flags": {},
+  "repair_recommended": false
+}

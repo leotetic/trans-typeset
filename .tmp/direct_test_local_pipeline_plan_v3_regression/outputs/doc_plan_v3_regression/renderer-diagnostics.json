@@ -1,0 +1,160 @@
+{
+  "doc_id": "doc_plan_v3_regression",
+  "target_lang": "zh-CN",
+  "layout_mode": "continuous_reflow",
+  "page_count": 1,
+  "block_count": 7,
+  "quality_flag_counts": {
+    "mock_translation": 4,
+    "formula_height_adjusted": 7,
+    "text_script_marker_rendered": 1,
+    "formula_height_risk": 5,
+    "formula_preserved_without_translation": 3,
+    "formula_like_block": 3,
+    "gbt_formula_numbered": 2,
+    "formula_number_source_preserved": 1
+  },
+  "layout_issues": [],
+  "formula_rendered_count": 5,
+  "formula_block_overflow_count": 5,
+  "formula_height_adjusted_count": 7,
+  "formula_multi_display_block_count": 0,
+  "formula_dom_estimation_strategy": "display_node_count_and_formula_aware_height",
+  "formula_numbered_count": 2,
+  "formula_number_source_preserved_count": 1,
+  "formula_like_block_count": 3,
+  "formula_reflow_cluster_count": 0,
+  "formula_reflow_compacted_count": 0,
+  "unresolved_formula_placeholders": [],
+  "page_utilization": [
+    {
+      "page_id": "r0001",
+      "text_area_ratio": 0.2255,
+      "block_count": 7,
+      "asset_count": 0
+    }
+  ],
+  "low_utilization_pages": [],
+  "single_fragment_pages": [],
+  "suppressed_artifacts": [
+    {
+      "kind": "asset_ignored",
+      "asset_id": "p0001_formula_b3ce83d28123",
+      "source_page_id": "p0001",
+      "reason": "formula_rendered_from_text",
+      "quality_flags": [
+        "formula_asset_suppressed"
+      ]
+    },
+    {
+      "kind": "asset_ignored",
+      "asset_id": "p0001_formula_8a853edb7dbb",
+      "source_page_id": "p0001",
+      "reason": "formula_rendered_from_text",
+      "quality_flags": [
+        "formula_asset_suppressed"
+      ]
+    },
+    {
+      "kind": "asset_ignored",
+      "asset_id": "p0001_formula_8a7eaad7ccff",
+      "source_page_id": "p0001",
+      "reason": "formula_rendered_from_text",
+      "quality_flags": [
+        "formula_asset_suppressed"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "page_id": "r0001",
+      "block_count": 7,
+      "asset_count": 0,
+      "flagged_blocks": [
+        {
+          "block_id": "p0001_b98db7d995894",
+          "role": "title",
+          "render_intent": "emphasis",
+          "font_scale": 1.125,
+          "quality_flags": [
+            "mock_translation",
+            "formula_height_adjusted"
+          ]
+        },
+        {
+          "block_id": "p0001_b56859f584269",
+          "role": "paragraph",
+          "render_intent": "normal",
+          "font_scale": 1.2,
+          "quality_flags": [
+            "mock_translation",
+            "text_script_marker_rendered",
+            "formula_height_adjusted",
+            "formula_height_risk"
+          ]
+        },
+        {
+          "block_id": "p0001_b032ca8c3e8d9",
+          "role": "paragraph",
+          "render_intent": "normal",
+          "font_scale": 1.2,
+          "quality_flags": [
+            "mock_translation",
+            "formula_height_adjusted",
+            "formula_height_risk"
+          ]
+        },
+        {
+          "block_id": "p0001_b46acda834ae1",
+          "role": "formula",
+          "render_intent": "normal",
+          "font_scale": 1.0,
+          "quality_flags": [
+            "formula_preserved_without_translation",
+            "formula_like_block",
+            "gbt_formula_numbered",
+            "formula_height_adjusted",
+            "formula_height_risk"
+          ]
+        },
+        {
+          "block_id": "p0001_b4e1743c929e9",
+          "role": "formula",
+          "render_intent": "normal",
+          "font_scale": 1.0,
+          "quality_flags": [
+            "formula_preserved_without_translation",
+            "formula_like_block",
+            "gbt_formula_numbered",
+            "formula_height_adjusted",
+            "formula_height_risk"
+          ]
+        },
+        {
+          "block_id": "p0001_b616b7c3facae",
+          "role": "formula",
+          "render_intent": "normal",
+          "font_scale": 1.0,
+          "quality_flags": [
+            "formula_preserved_without_translation",
+            "formula_like_block",
+            "formula_number_source_preserved",
+            "formula_height_adjusted",
+            "formula_height_risk"
+          ]
+        },
+        {
+          "block_id": "p0001_b8ef75422f239",
+          "role": "heading",
+          "render_intent": "emphasis",
+          "font_scale": 1.1666666666666667,
+          "quality_flags": [
+            "mock_translation",
+            "formula_height_adjusted"
+          ]
+        }
+      ],
+      "flagged_assets": []
+    }
+  ]
+}

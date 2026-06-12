@@ -1,0 +1,25 @@
+[
+  {
+    "formula_id": "p0001_formula_3dd24ace77cb",
+    "status": "recognized",
+    "accepted_provider": "deterministic",
+    "accepted_confidence": 0.96,
+    "validator_status": "accepted",
+    "fallback_reason": null,
+    "source_kind": "text_layer",
+    "quality_flags": [
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:Fc8b2d8c531b1",
+      "formula_display_cluster",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_equation_number_preserved",
+      "formula_ocr_unavailable",
+      "formula_crop_padded",
+      "ocr_image_upscaled",
+      "ocr_text_layer_passthrough",
+      "formula_visual_escalated"
+    ],
+    "latex": "\\int f_s d\\Omega v_{n} \\tag{3}"
+  }
+]

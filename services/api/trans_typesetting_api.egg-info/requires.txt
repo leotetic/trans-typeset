@@ -1,6 +1,11 @@
+aiosqlite>=0.20
 fastapi>=0.111
 httpx>=0.27
 jinja2>=3.1
+langchain>=0.3
+langchain-openai>=0.2
+langgraph>=0.2
+langgraph-checkpoint-sqlite>=2.0
 pdf-translator-renderer
 pdf-translator-schema
 pymupdf>=1.24

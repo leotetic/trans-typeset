@@ -1,5 +1,8 @@
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
+import sqlite3
+import shutil
 
 import pytest
 from app import runtime_config
@@ -965,6 +968,56 @@ def test_text_workflow_runs_to_artifacts(
     assert "planner_fallback" in layout_plan["quality_flags"]
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
     assert (tmp_path / "checkpoints" / "langgraph.sqlite").exists()
+
+
+def test_text_workflow_falls_back_to_memory_checkpointer_when_sqlite_setup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_root = Path.cwd() / ".tmp" / "test_orchestrator_sqlite_fallback"
+    shutil.rmtree(tmp_root, ignore_errors=True)
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    storage = Storage(tmp_root)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+
+    async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
+        assert "<html" in html
+        output_path.write_bytes(b"%PDF-1.7\n%%EOF")
+        return output_path
+
+    class FailingSqliteSaver:
+        async def setup(self) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+    @asynccontextmanager
+    async def fake_from_conn_string(_path: str):
+        yield FailingSqliteSaver()
+
+    from langgraph.checkpoint.sqlite import aio as sqlite_aio
+
+    monkeypatch.setattr(sqlite_aio.AsyncSqliteSaver, "from_conn_string", fake_from_conn_string)
+    monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
+
+    asyncio.run(
+        orchestrator.process_text_document_job(
+            "job_1",
+            "doc_1",
+            "text-input.txt",
+            "Paper Title\n\nAbstract This is a text workflow [1].",
+            "zh-CN",
+        )
+    )
+
+    status = storage.load_status("job_1")
+    workflow = storage.read_output_json("doc_1", "workflow-run.json")
+
+    assert status.status == JobState.COMPLETED
+    assert workflow["status"] == "completed"
+    assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
 
 
 def test_pdf_workflow_records_content_and_layout_sources(

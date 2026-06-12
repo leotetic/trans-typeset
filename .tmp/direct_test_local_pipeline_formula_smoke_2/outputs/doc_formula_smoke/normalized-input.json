@@ -1,0 +1,36 @@
+{
+  "kind": "normalized_input",
+  "input_sources": [
+    {
+      "source_id": "content_source",
+      "input_type": "pdf",
+      "source_role": "content",
+      "filename": "formula-smoke.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "b48c52345f45209a844aab86db6c9cf5facb2e954fb994e46212cf14c8a5d7dc",
+      "artifact_path": ".tmp\\direct_test_local_pipeline_formula_smoke_2\\uploads\\formula-smoke.pdf",
+      "quality_flags": []
+    },
+    {
+      "source_id": "layout_source",
+      "input_type": "pdf",
+      "source_role": "layout_reference",
+      "filename": "formula-smoke.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "b48c52345f45209a844aab86db6c9cf5facb2e954fb994e46212cf14c8a5d7dc",
+      "artifact_path": ".tmp\\direct_test_local_pipeline_formula_smoke_2\\uploads\\formula-smoke.pdf",
+      "quality_flags": [
+        "layout_source_fallback_to_content"
+      ]
+    }
+  ],
+  "document_ir_ref": "document-ir",
+  "asset_count": 0,
+  "block_count": 4,
+  "text_excerpt": "Formula Smoke Fixture The density {{formula:p0001_formula_47737119abc6}} and citation 50^{-4} remain readable. We solve {{formula:p0001_formula_4248d50a04e1}} in the text and preserve it. {{formula:p0001_formula_82a286fb1eca}}",
+  "quality_flags": [
+    "layout_source_fallback_to_content"
+  ]
+}

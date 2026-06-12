@@ -1,0 +1,264 @@
+{
+  "doc_id": "doc_numbered_formula_smoke",
+  "pages": [
+    {
+      "page_id": "p0001",
+      "size": {
+        "width": 420.0,
+        "height": 520.0
+      },
+      "blocks": [
+        {
+          "block_id": "p0001_b7c1cd8a5c3fd",
+          "page_id": "p0001",
+          "role": "title",
+          "bbox": {
+            "x0": 36.0,
+            "y0": 36.0000114440918,
+            "x1": 227.15200805664062,
+            "y1": 57.984012603759766
+          },
+          "column": 0,
+          "reading_order": 0,
+          "source_text": "Numbered Formula Fixture",
+          "text_for_translation": "",
+          "formulas": [],
+          "span_refs": [
+            "p0001:p0001_b7c1cd8a5c3fd:l0:s0"
+          ],
+          "lines": [
+            {
+              "line_id": "p0001:p0001_b7c1cd8a5c3fd:l0",
+              "page_id": "p0001",
+              "block_id": "p0001_b7c1cd8a5c3fd",
+              "text": "Numbered Formula Fixture",
+              "bbox": {
+                "x0": 36.0,
+                "y0": 36.0000114440918,
+                "x1": 227.15200805664062,
+                "y1": 57.984012603759766
+              },
+              "span_ids": [
+                "p0001:p0001_b7c1cd8a5c3fd:l0:s0"
+              ]
+            }
+          ],
+          "spans": [
+            {
+              "span_id": "p0001:p0001_b7c1cd8a5c3fd:l0:s0",
+              "page_id": "p0001",
+              "block_id": "p0001_b7c1cd8a5c3fd",
+              "line_id": "p0001:p0001_b7c1cd8a5c3fd:l0",
+              "text": "Numbered Formula Fixture",
+              "bbox": {
+                "x0": 36.0,
+                "y0": 36.0000114440918,
+                "x1": 227.15200805664062,
+                "y1": 57.984012603759766
+              },
+              "font_name": "Helvetica",
+              "font_size": 16.0,
+              "flags": 0,
+              "color": "#000000",
+              "origin": [
+                36.0,
+                53.20001220703125
+              ]
+            }
+          ],
+          "style_seed": {
+            "font_size": 16.0,
+            "font_name": "Helvetica",
+            "bold": false,
+            "italic": false,
+            "color": "#111111"
+          },
+          "formula_id": null
+        },
+        {
+          "block_id": "p0001_b7a4b13c8f5a3",
+          "page_id": "p0001",
+          "role": "paragraph",
+          "bbox": {
+            "x0": 36.0,
+            "y0": 96.0,
+            "x1": 259.9899597167969,
+            "y1": 109.73999786376953
+          },
+          "column": 0,
+          "reading_order": 1,
+          "source_text": "We keep a single GB/T equation number renderer.",
+          "text_for_translation": "",
+          "formulas": [],
+          "span_refs": [
+            "p0001:p0001_b7a4b13c8f5a3:l0:s0"
+          ],
+          "lines": [
+            {
+              "line_id": "p0001:p0001_b7a4b13c8f5a3:l0",
+              "page_id": "p0001",
+              "block_id": "p0001_b7a4b13c8f5a3",
+              "text": "We keep a single GB/T equation number renderer.",
+              "bbox": {
+                "x0": 36.0,
+                "y0": 96.0,
+                "x1": 259.9899597167969,
+                "y1": 109.73999786376953
+              },
+              "span_ids": [
+                "p0001:p0001_b7a4b13c8f5a3:l0:s0"
+              ]
+            }
+          ],
+          "spans": [
+            {
+              "span_id": "p0001:p0001_b7a4b13c8f5a3:l0:s0",
+              "page_id": "p0001",
+              "block_id": "p0001_b7a4b13c8f5a3",
+              "line_id": "p0001:p0001_b7a4b13c8f5a3:l0",
+              "text": "We keep a single GB/T equation number renderer.",
+              "bbox": {
+                "x0": 36.0,
+                "y0": 96.0,
+                "x1": 259.9899597167969,
+                "y1": 109.73999786376953
+              },
+              "font_name": "Helvetica",
+              "font_size": 10.0,
+              "flags": 0,
+              "color": "#000000",
+              "origin": [
+                36.0,
+                106.75
+              ]
+            }
+          ],
+          "style_seed": {
+            "font_size": 10.0,
+            "font_name": "Helvetica",
+            "bold": false,
+            "italic": false,
+            "color": "#111111"
+          },
+          "formula_id": null
+        },
+        {
+          "block_id": "p0001_b5398f39a0912",
+          "page_id": "p0001",
+          "role": "formula",
+          "bbox": {
+            "x0": 72.0,
+            "y0": 160.0,
+            "x1": 215.41195678710938,
+            "y1": 176.4879913330078
+          },
+          "column": 0,
+          "reading_order": 2,
+          "source_text": "{{formula:p0001_formula_3dd24ace77cb}}",
+          "text_for_translation": "{{formula:p0001_formula_3dd24ace77cb}}",
+          "formulas": [],
+          "span_refs": [
+            "p0001:p0001_b5398f39a0912:l0:s0"
+          ],
+          "lines": [
+            {
+              "line_id": "p0001:p0001_b5398f39a0912:l0",
+              "page_id": "p0001",
+              "block_id": "p0001_b5398f39a0912",
+              "text": "\\int f_s d\\Omega , (3) v_{n}",
+              "bbox": {
+                "x0": 72.0,
+                "y0": 160.0,
+                "x1": 215.41195678710938,
+                "y1": 176.4879913330078
+              },
+              "span_ids": [
+                "p0001:p0001_b5398f39a0912:l0:s0"
+              ]
+            }
+          ],
+          "spans": [
+            {
+              "span_id": "p0001:p0001_b5398f39a0912:l0:s0",
+              "page_id": "p0001",
+              "block_id": "p0001_b5398f39a0912",
+              "line_id": "p0001:p0001_b5398f39a0912:l0",
+              "text": "\\int f_s d\\Omega , (3) v_{n}",
+              "bbox": {
+                "x0": 72.0,
+                "y0": 160.0,
+                "x1": 215.41195678710938,
+                "y1": 176.4879913330078
+              },
+              "font_name": "Helvetica",
+              "font_size": 12.0,
+              "flags": 0,
+              "color": "#000000",
+              "origin": [
+                72.0,
+                172.89999389648438
+              ]
+            }
+          ],
+          "style_seed": {
+            "font_size": 12.0,
+            "font_name": "Helvetica",
+            "bold": false,
+            "italic": false,
+            "color": "#111111"
+          },
+          "formula_id": "p0001_formula_3dd24ace77cb"
+        }
+      ],
+      "assets": [
+        {
+          "asset_id": "p0001_formula_3dd24ace77cb",
+          "page_id": "p0001",
+          "kind": "formula",
+          "bbox": {
+            "x0": 72.0,
+            "y0": 160.0,
+            "x1": 215.41195678710938,
+            "y1": 176.4879913330078
+          },
+          "path": "/api/documents/doc_numbered_formula_smoke/assets/p0001_formula_3dd24ace77cb.png",
+          "alt_text": "\\int f_s d\\Omega v_{n} \\tag{3}",
+          "formula_id": "p0001_formula_3dd24ace77cb"
+        }
+      ]
+    }
+  ],
+  "formulas": [
+    {
+      "formula_id": "p0001_formula_3dd24ace77cb",
+      "page_id": "p0001",
+      "source_block_id": "p0001_b5398f39a0912",
+      "anchor_block_id": null,
+      "asset_id": "p0001_formula_3dd24ace77cb",
+      "latex": "\\int f_s d\\Omega v_{n} \\tag{3}",
+      "source_text": "\\int f_s d\\Omega , (3) v_{n}",
+      "source_text_range": [
+        0,
+        28
+      ],
+      "span_ids": [],
+      "display_mode": "display",
+      "confidence": 0.96,
+      "ocr_provider": "deterministic",
+      "ocr_confidence": 0.96,
+      "source_kind": "text_layer",
+      "quality_flags": [
+        "legacy_formula_migrated",
+        "legacy_formula_replaced:Fc8b2d8c531b1",
+        "formula_display_cluster",
+        "formula_text_fallback",
+        "latex_heuristic",
+        "formula_equation_number_preserved",
+        "formula_ocr_unavailable",
+        "formula_crop_padded",
+        "ocr_image_upscaled",
+        "ocr_text_layer_passthrough"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "workflow_id": "workflow_job_text_manual",
+  "job_id": "job_text_manual",
+  "doc_id": "doc_text_manual",
+  "status": "failed",
+  "current_step": "fail",
+  "progress": 1.0,
+  "input_sources": [
+    {
+      "source_id": "source_1",
+      "input_type": "text",
+      "source_role": "content",
+      "filename": "t.txt",
+      "mime_type": "text/plain",
+      "size_bytes": 39,
+      "sha256": null,
+      "artifact_path": null,
+      "quality_flags": []
+    }
+  ],
+  "user_intent": {
+    "target_lang": "zh-CN",
+    "output_kind": "translation",
+    "style_intent": "academic",
+    "typesetting_standard": "none",
+    "instruction": "",
+    "preserve_policy": [
+      "citations",
+      "formulas",
+      "tables",
+      "figures",
+      "reference_markers"
+    ],
+    "reference_assets": [],
+    "constraints": {
+      "page_width_pt": 612.0,
+      "page_height_pt": 792.0,
+      "target_font_size_pt": 11.0,
+      "allow_continuation": true,
+      "preserve_images": true
+    }
+  },
+  "steps": [
+    {
+      "step_id": "4_fail_1",
+      "name": "fail",
+      "status": "failed",
+      "progress": 1.0,
+      "attempt": 1,
+      "message": "Failed",
+      "input_artifacts": [],
+      "output_artifacts": [],
+      "diagnostics": {},
+      "error": "disk I/O error"
+    }
+  ],
+  "artifacts": {},
+  "diagnostics": {},
+  "error": null
+}

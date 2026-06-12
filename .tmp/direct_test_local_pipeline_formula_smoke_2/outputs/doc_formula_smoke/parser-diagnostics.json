@@ -1,0 +1,67 @@
+{
+  "kind": "parser_diagnostics",
+  "page_count": 1,
+  "text_block_count": 4,
+  "asset_count": 0,
+  "role_counts": {
+    "title": 1,
+    "paragraph": 2,
+    "heading": 1
+  },
+  "asset_counts": {},
+  "formula_diagnostics": {
+    "kind": "formula_diagnostics",
+    "formula_count": 2,
+    "inline_count": 1,
+    "display_count": 1,
+    "latex_success_count": 2,
+    "fallback_count": 2,
+    "low_confidence_formula_ids": [],
+    "unresolved_placeholders": [],
+    "quality_flag_counts": {
+      "formula_text_fallback": 2,
+      "latex_heuristic": 2,
+      "formula_ocr_unavailable": 2
+    },
+    "ocr_provider": {
+      "name": "pix2text",
+      "status": "unavailable",
+      "error": "[WinError 5] 拒绝访问。: 'C:\\\\Users\\\\Admin\\\\AppData\\\\Roaming\\\\Ultralytics'"
+    },
+    "formula_fragment_cluster_count": 0,
+    "formula_fragment_suppressed_block_count": 0,
+    "formula_fragment_clusters": []
+  },
+  "formula_fragment_cluster_count": 0,
+  "formula_fragment_suppressed_block_count": 0,
+  "formula_fragment_clusters": [],
+  "fallback_flags": [
+    "visual_formula_recognition_disabled",
+    "formula_recognition_deterministic",
+    "formula_inline_text_only",
+    "formula_low_confidence",
+    "legacy_formula_migrated",
+    "legacy_formula_replaced:F4e0e5a78d018",
+    "formula_text_fallback",
+    "latex_heuristic",
+    "formula_ocr_unavailable",
+    "legacy_formula_replaced:F9a2fcf194842",
+    "formula_display_cluster",
+    "formula_crop_padded",
+    "ocr_image_upscaled",
+    "ocr_text_layer_passthrough"
+  ],
+  "unsupported_features": [
+    {
+      "kind": "vector_assets",
+      "status": "placeholder_only",
+      "message": "Vector graphics are carried as page-positioned placeholders; raster image assets and text-level formulas/tables are preserved as fallbacks."
+    }
+  ],
+  "pdf_parse_ms": 7604.61,
+  "formula_count": 3,
+  "formula_candidate_count": 3,
+  "formula_enrichment_ms": 281.61,
+  "visual_formula_recognition_enabled": false,
+  "formula_recognizer_type": "deterministic"
+}

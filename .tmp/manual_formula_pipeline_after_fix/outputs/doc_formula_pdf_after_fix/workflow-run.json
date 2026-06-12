@@ -1,0 +1,307 @@
+{
+  "workflow_id": "workflow_job_formula_pdf_after_fix",
+  "job_id": "job_formula_pdf_after_fix",
+  "doc_id": "doc_formula_pdf_after_fix",
+  "status": "completed",
+  "current_step": "complete",
+  "progress": 1.0,
+  "input_sources": [
+    {
+      "source_id": "content_source",
+      "input_type": "pdf",
+      "source_role": "content",
+      "filename": "doc_formula.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "ecb274e82e32199e1fd09e7dbbac97a9b24b27387ba24d13725112a604ef2381",
+      "artifact_path": "D:\\macos\\trans-typeset\\.tmp\\manual_formula_pipeline\\uploads\\doc_formula.pdf",
+      "quality_flags": []
+    },
+    {
+      "source_id": "layout_source",
+      "input_type": "pdf",
+      "source_role": "layout_reference",
+      "filename": "doc_formula.pdf",
+      "mime_type": "application/pdf",
+      "size_bytes": 1425,
+      "sha256": "ecb274e82e32199e1fd09e7dbbac97a9b24b27387ba24d13725112a604ef2381",
+      "artifact_path": "D:\\macos\\trans-typeset\\.tmp\\manual_formula_pipeline\\uploads\\doc_formula.pdf",
+      "quality_flags": [
+        "layout_source_fallback_to_content"
+      ]
+    }
+  ],
+  "user_intent": {
+    "target_lang": "zh-CN",
+    "output_kind": "translation",
+    "style_intent": "academic",
+    "typesetting_standard": "none",
+    "instruction": "",
+    "preserve_policy": [
+      "citations",
+      "formulas",
+      "tables",
+      "figures",
+      "reference_markers"
+    ],
+    "reference_assets": [],
+    "constraints": {
+      "page_width_pt": 612.0,
+      "page_height_pt": 792.0,
+      "target_font_size_pt": 11.0,
+      "allow_continuation": true,
+      "preserve_images": true
+    }
+  },
+  "steps": [
+    {
+      "step_id": "10_read_input_1",
+      "name": "read_input",
+      "status": "running",
+      "progress": 0.05,
+      "attempt": 1,
+      "message": "Reading pdf input",
+      "input_artifacts": [],
+      "output_artifacts": [
+        "normalized-input"
+      ],
+      "diagnostics": {},
+      "error": null
+    },
+    {
+      "step_id": "10_read_input_1",
+      "name": "read_input",
+      "status": "completed",
+      "progress": 0.2,
+      "attempt": 1,
+      "message": "Pdf adapter completed",
+      "input_artifacts": [],
+      "output_artifacts": [
+        "normalized-input",
+        "document-ir",
+        "parser-diagnostics",
+        "formula-recognition",
+        "formula-diagnostics"
+      ],
+      "diagnostics": {},
+      "error": null
+    },
+    {
+      "step_id": "14_analyze_intent_1",
+      "name": "analyze_intent",
+      "status": "completed",
+      "progress": 0.25,
+      "attempt": 1,
+      "message": "User intent normalized",
+      "input_artifacts": [
+        "normalized-input"
+      ],
+      "output_artifacts": [
+        "user-intent"
+      ],
+      "diagnostics": {
+        "output_kind": "translation",
+        "style_intent": "academic",
+        "has_instruction": false,
+        "typesetting_standard": "none"
+      },
+      "error": null
+    },
+    {
+      "step_id": "18_semantic_recognize_1",
+      "name": "semantic_recognize",
+      "status": "completed",
+      "progress": 0.28,
+      "attempt": 1,
+      "message": "Semantic layout analysis completed",
+      "input_artifacts": [
+        "document-ir",
+        "user-intent"
+      ],
+      "output_artifacts": [
+        "semantic-analysis"
+      ],
+      "diagnostics": {
+        "confidence": 0.83,
+        "quality_flags": [
+          "deterministic_semantic_analysis",
+          "layout_source_fallback_to_content",
+          "semantic_model_fallback"
+        ],
+        "model_used": false
+      },
+      "error": null
+    },
+    {
+      "step_id": "10_build_plan_1",
+      "name": "build_plan",
+      "status": "completed",
+      "progress": 0.3,
+      "attempt": 1,
+      "message": "Layout intent plan built",
+      "input_artifacts": [
+        "document-ir",
+        "user-intent",
+        "semantic-analysis"
+      ],
+      "output_artifacts": [
+        "layout-intent-plan"
+      ],
+      "diagnostics": {
+        "quality_flags": [
+          "semantic_analysis_considered",
+          "planner_fallback"
+        ],
+        "planner_fallback": true
+      },
+      "error": null
+    },
+    {
+      "step_id": "13_validate_plan_1",
+      "name": "validate_plan",
+      "status": "completed",
+      "progress": 0.33,
+      "attempt": 1,
+      "message": "Layout intent plan validated",
+      "input_artifacts": [
+        "layout-intent-plan"
+      ],
+      "output_artifacts": [
+        "validation-and-repair"
+      ],
+      "diagnostics": {
+        "status": "valid"
+      },
+      "error": null
+    },
+    {
+      "step_id": "9_translate_1",
+      "name": "translate",
+      "status": "running",
+      "progress": 0.36,
+      "attempt": 1,
+      "message": "Translating 0 of 1 chunks",
+      "input_artifacts": [
+        "translation-chunks"
+      ],
+      "output_artifacts": [
+        "translation-plans",
+        "translation-progress"
+      ],
+      "diagnostics": {},
+      "error": null
+    },
+    {
+      "step_id": "9_translate_1",
+      "name": "translate",
+      "status": "completed",
+      "progress": 0.78,
+      "attempt": 1,
+      "message": "Translated 1 chunks",
+      "input_artifacts": [
+        "translation-chunks"
+      ],
+      "output_artifacts": [
+        "translation-plans",
+        "translation-progress"
+      ],
+      "diagnostics": {},
+      "error": null
+    },
+    {
+      "step_id": "6_render_1",
+      "name": "render",
+      "status": "completed",
+      "progress": 0.86,
+      "attempt": 1,
+      "message": "Preview rendered",
+      "input_artifacts": [
+        "document-ir",
+        "layout-intent-plan",
+        "translation-plans"
+      ],
+      "output_artifacts": [
+        "renderer-diagnostics",
+        "layout-trace",
+        "preview"
+      ],
+      "diagnostics": {
+        "quality_flag_counts": {
+          "mock_translation": 3,
+          "formula_height_adjusted": 4,
+          "text_script_marker_rendered": 1,
+          "formula_height_risk": 3,
+          "formula_preserved_without_translation": 1,
+          "formula_like_block": 1
+        }
+      },
+      "error": null
+    },
+    {
+      "step_id": "15_evaluate_render_1",
+      "name": "evaluate_render",
+      "status": "completed",
+      "progress": 0.88,
+      "attempt": 1,
+      "message": "Render diagnostics evaluated",
+      "input_artifacts": [
+        "renderer-diagnostics"
+      ],
+      "output_artifacts": [
+        "render-evaluation"
+      ],
+      "diagnostics": {
+        "kind": "render_evaluation",
+        "accepted": true,
+        "quality_flag_counts": {
+          "mock_translation": 3,
+          "formula_height_adjusted": 4,
+          "text_script_marker_rendered": 1,
+          "formula_height_risk": 3,
+          "formula_preserved_without_translation": 1,
+          "formula_like_block": 1
+        },
+        "layout_issue_count": 0,
+        "blocking_flags": {},
+        "repair_recommended": false
+      },
+      "error": null
+    },
+    {
+      "step_id": "10_export_pdf_1",
+      "name": "export_pdf",
+      "status": "completed",
+      "progress": 0.96,
+      "attempt": 1,
+      "message": "PDF exported",
+      "input_artifacts": [
+        "preview"
+      ],
+      "output_artifacts": [
+        "download",
+        "pdf-export-diagnostics"
+      ],
+      "diagnostics": {},
+      "error": null
+    },
+    {
+      "step_id": "8_complete_1",
+      "name": "complete",
+      "status": "completed",
+      "progress": 1.0,
+      "attempt": 1,
+      "message": "Workflow completed",
+      "input_artifacts": [],
+      "output_artifacts": [
+        "preview",
+        "download",
+        "pdf-export-diagnostics"
+      ],
+      "diagnostics": {},
+      "error": null
+    }
+  ],
+  "artifacts": {},
+  "diagnostics": {},
+  "error": null
+}

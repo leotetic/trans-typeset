@@ -98,6 +98,22 @@ def normalize_pdf_text_fragment(text: str) -> str:
     return _CONTROL_CHARS.sub(" ", normalized)
 
 
+def alpha_word_tokens(
+    text: str,
+    *,
+    min_len: int = 3,
+    ignore_latex_commands: bool = True,
+) -> list[str]:
+    normalized = normalize_pdf_text(text)
+    if min_len < 1:
+        raise ValueError("min_len must be positive")
+    if ignore_latex_commands:
+        pattern = rf"(?<!\\)\b[A-Za-z]{{{min_len},}}\b"
+    else:
+        pattern = rf"\b[A-Za-z]{{{min_len},}}\b"
+    return re.findall(pattern, normalized)
+
+
 def formula_corruption_flags(
     text: str,
     *,

@@ -1,0 +1,43 @@
+{
+  "doc_id": "doc_1",
+  "pages": [
+    {
+      "page_id": "p1",
+      "size": {
+        "width": 300.0,
+        "height": 400.0
+      },
+      "blocks": [
+        {
+          "block_id": "b1",
+          "page_id": "p1",
+          "role": "paragraph",
+          "bbox": {
+            "x0": 10.0,
+            "y0": 10.0,
+            "x1": 120.0,
+            "y1": 40.0
+          },
+          "column": 0,
+          "reading_order": 0,
+          "source_text": "Alpha",
+          "text_for_translation": "",
+          "formulas": [],
+          "span_refs": [],
+          "lines": [],
+          "spans": [],
+          "style_seed": {
+            "font_size": 10.0,
+            "font_name": null,
+            "bold": false,
+            "italic": false,
+            "color": "#111111"
+          },
+          "formula_id": null
+        }
+      ],
+      "assets": []
+    }
+  ],
+  "formulas": []
+}

@@ -1,0 +1,121 @@
+[
+  {
+    "schema_version": "0.1",
+    "chunk_id": "doc_plan_v3_regression_chunk_0001",
+    "target_lang": "zh-CN",
+    "blocks": [
+      {
+        "source_block_id": "p0001_b98db7d995894",
+        "translated_text": "【译】Plan V3 Formula Regression Fixture",
+        "inline_items": [],
+        "role": "title",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b56859f584269",
+        "translated_text": "【译】The density {{formula:p0001_formula_341db929c96e}} and citation 50^{-4} remain readable.",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_341db929c96e}}",
+            "source_token": "{{formula:p0001_formula_341db929c96e}}",
+            "asset_id": "p0001_formula_341db929c96e"
+          }
+        ],
+        "role": "paragraph",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b032ca8c3e8d9",
+        "translated_text": "【译】We solve {{formula:p0001_formula_3f21b28bdefa}} in the text and preserve it.",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_3f21b28bdefa}}",
+            "source_token": "{{formula:p0001_formula_3f21b28bdefa}}",
+            "asset_id": "p0001_formula_3f21b28bdefa"
+          }
+        ],
+        "role": "paragraph",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b46acda834ae1",
+        "translated_text": "{{formula:p0001_formula_b3ce83d28123}}",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_b3ce83d28123}}",
+            "source_token": "{{formula:p0001_formula_b3ce83d28123}}",
+            "asset_id": "p0001_formula_b3ce83d28123"
+          }
+        ],
+        "role": "formula",
+        "render_intent": "normal",
+        "quality_flags": [
+          "formula_preserved_without_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b4e1743c929e9",
+        "translated_text": "{{formula:p0001_formula_8a853edb7dbb}}",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_8a853edb7dbb}}",
+            "source_token": "{{formula:p0001_formula_8a853edb7dbb}}",
+            "asset_id": "p0001_formula_8a853edb7dbb"
+          }
+        ],
+        "role": "formula",
+        "render_intent": "normal",
+        "quality_flags": [
+          "formula_preserved_without_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b616b7c3facae",
+        "translated_text": "{{formula:p0001_formula_8a7eaad7ccff}}",
+        "inline_items": [
+          {
+            "kind": "formula",
+            "text": "{{formula:p0001_formula_8a7eaad7ccff}}",
+            "source_token": "{{formula:p0001_formula_8a7eaad7ccff}}",
+            "asset_id": "p0001_formula_8a7eaad7ccff"
+          }
+        ],
+        "role": "formula",
+        "render_intent": "normal",
+        "quality_flags": [
+          "formula_preserved_without_translation"
+        ]
+      },
+      {
+        "source_block_id": "p0001_b515628fcce35",
+        "translated_text": "【译】\\frac{\\alpha}{\\beta + 1} = q_s , (4)",
+        "inline_items": [
+          {
+            "kind": "citation",
+            "text": "(4)",
+            "source_token": "(4)",
+            "asset_id": null
+          }
+        ],
+        "role": "heading",
+        "render_intent": "normal",
+        "quality_flags": [
+          "mock_translation"
+        ]
+      }
+    ]
+  }
+]

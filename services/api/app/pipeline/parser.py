@@ -18,6 +18,7 @@ from pdf_translator_schema.models import DocumentBlock, TextLineIR, TextSpanIR
 
 from .formula_processing import build_formula_diagnostics, normalize_document_formulas
 from .formulas.normalization import (
+    contains_natural_language,
     is_noise_text,
     normalize_pdf_text,
     normalize_pdf_text_fragment,
@@ -68,8 +69,10 @@ def classify_role(
         or re.search(r"\b\d+\s*[+\-*/]\s*\d+\b", stripped)
         or re.search(r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/]\s*[A-Za-z0-9α-ωΑ-Ω]\b", stripped)
     )
+    if has_math_operator and contains_natural_language(stripped):
+        has_math_operator = False
     if has_math_operator and re.fullmatch(
-        r"[A-Za-z0-9\s+\-*/=().,<>≤≥∑∫α-ωΑ-Ω^_]+",
+        r"[A-Za-z0-9\s+\-*/=().,<>[\]{}\\≤≥∑∫α-ωΑ-Ω^_]+",
         stripped,
     ):
         return BlockRole.FORMULA

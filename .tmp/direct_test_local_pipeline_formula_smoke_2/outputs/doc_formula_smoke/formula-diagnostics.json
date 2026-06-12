@@ -1,0 +1,176 @@
+{
+  "kind": "formula_diagnostics",
+  "formula_count": 3,
+  "inline_count": 2,
+  "display_count": 1,
+  "latex_success_count": 3,
+  "fallback_count": 3,
+  "low_confidence_formula_ids": [],
+  "unresolved_placeholders": [],
+  "quality_flag_counts": {
+    "formula_inline_text_only": 1,
+    "formula_low_confidence": 2,
+    "legacy_formula_migrated": 2,
+    "legacy_formula_replaced:F4e0e5a78d018": 1,
+    "formula_text_fallback": 2,
+    "latex_heuristic": 2,
+    "formula_ocr_unavailable": 2,
+    "legacy_formula_replaced:F9a2fcf194842": 1,
+    "formula_display_cluster": 1,
+    "formula_crop_padded": 1,
+    "ocr_image_upscaled": 1,
+    "ocr_text_layer_passthrough": 1
+  },
+  "ocr_provider": {
+    "name": "pix2text",
+    "status": "unavailable",
+    "error": "[WinError 5] 拒绝访问。: 'C:\\\\Users\\\\Admin\\\\AppData\\\\Roaming\\\\Ultralytics'"
+  },
+  "formula_fragment_cluster_count": 0,
+  "formula_fragment_suppressed_block_count": 0,
+  "formula_fragment_clusters": [],
+  "candidate_count": 3,
+  "recognized_count": 3,
+  "accepted_count": 3,
+  "rejected_count": 0,
+  "rejected_records": [],
+  "formula_enrichment_ms": 281.61,
+  "recognizer_type": "deterministic",
+  "visual_formula_recognition_enabled": false,
+  "quality_flags": [
+    "visual_formula_recognition_disabled",
+    "formula_recognition_deterministic",
+    "formula_inline_text_only",
+    "formula_low_confidence",
+    "legacy_formula_migrated",
+    "legacy_formula_replaced:F4e0e5a78d018",
+    "formula_text_fallback",
+    "latex_heuristic",
+    "formula_ocr_unavailable",
+    "legacy_formula_replaced:F9a2fcf194842",
+    "formula_display_cluster",
+    "formula_crop_padded",
+    "ocr_image_upscaled",
+    "ocr_text_layer_passthrough"
+  ],
+  "enrichment": {
+    "kind": "formula_diagnostics",
+    "parser_cluster_count": 0,
+    "enrichment_candidate_count": 3,
+    "display_cluster_promoted_count": 0,
+    "legacy_formula_migrated_count": 2,
+    "candidate_count": 3,
+    "recognized_count": 3,
+    "accepted_count": 3,
+    "rejected_count": 0,
+    "quality_flags": [
+      "visual_formula_recognition_disabled",
+      "formula_recognition_deterministic",
+      "formula_inline_text_only",
+      "formula_low_confidence",
+      "legacy_formula_migrated",
+      "legacy_formula_replaced:F4e0e5a78d018",
+      "formula_text_fallback",
+      "latex_heuristic",
+      "formula_ocr_unavailable",
+      "legacy_formula_replaced:F9a2fcf194842",
+      "formula_display_cluster",
+      "formula_crop_padded",
+      "ocr_image_upscaled",
+      "ocr_text_layer_passthrough"
+    ],
+    "records": [
+      {
+        "formula_id": "p0001_formula_47737119abc6",
+        "status": "recognized",
+        "accepted_provider": "text_layer_normalizer",
+        "accepted_confidence": 0.92,
+        "validator_status": "accepted",
+        "fallback_reason": null,
+        "source_kind": "inline_text",
+        "quality_flags": [
+          "formula_inline_text_only",
+          "formula_low_confidence"
+        ],
+        "latex": "n_{e}"
+      },
+      {
+        "formula_id": "p0001_formula_4248d50a04e1",
+        "status": "recognized",
+        "accepted_provider": "text_layer_normalizer",
+        "accepted_confidence": 0.92,
+        "validator_status": "accepted",
+        "fallback_reason": null,
+        "source_kind": "inline_text",
+        "quality_flags": [
+          "legacy_formula_migrated",
+          "legacy_formula_replaced:F4e0e5a78d018",
+          "formula_text_fallback",
+          "latex_heuristic",
+          "formula_ocr_unavailable",
+          "formula_low_confidence"
+        ],
+        "latex": "E = mc^2"
+      },
+      {
+        "formula_id": "p0001_formula_82a286fb1eca",
+        "status": "recognized",
+        "accepted_provider": "deterministic",
+        "accepted_confidence": 0.96,
+        "validator_status": "accepted",
+        "fallback_reason": null,
+        "source_kind": "text_layer",
+        "quality_flags": [
+          "legacy_formula_migrated",
+          "legacy_formula_replaced:F9a2fcf194842",
+          "formula_display_cluster",
+          "formula_text_fallback",
+          "latex_heuristic",
+          "formula_ocr_unavailable",
+          "formula_crop_padded",
+          "ocr_image_upscaled",
+          "ocr_text_layer_passthrough",
+          "formula_visual_escalated"
+        ],
+        "latex": "\\int f_s d\\Omega"
+      }
+    ],
+    "rejected_records": [],
+    "source_counts": {
+      "inline_text": 2,
+      "text_layer": 1
+    },
+    "recognizer_type": "deterministic",
+    "visual_formula_recognition_enabled": false,
+    "ocr": {
+      "kind": "ocr_diagnostics",
+      "record_count": 1,
+      "records": [
+        {
+          "candidate_id": "p0001_formula_82a286fb1eca",
+          "source_kind": "text_layer",
+          "display_mode": "display",
+          "status": "recognized",
+          "provider": "deterministic",
+          "confidence": 0.96,
+          "attempts": [
+            {
+              "provider": "deterministic",
+              "status": "recognized",
+              "confidence": 0.96,
+              "quality_flags": [
+                "ocr_image_upscaled",
+                "ocr_text_layer_passthrough"
+              ],
+              "validator_status": "accepted"
+            }
+          ]
+        }
+      ],
+      "quality_flags": [
+        "ocr_image_upscaled",
+        "ocr_text_layer_passthrough"
+      ]
+    }
+  }
+}

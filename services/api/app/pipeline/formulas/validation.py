@@ -237,6 +237,8 @@ def _katex_render_error(latex: str) -> str | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
             cwd=_project_root(),
         )
@@ -244,7 +246,8 @@ def _katex_render_error(latex: str) -> str | None:
         return None
     if completed.returncode in {0, 3}:
         return None
-    return completed.stderr.strip() or "katex_render_failed"
+    stderr = completed.stderr or ""
+    return stderr.strip() or "katex_render_failed"
 
 
 def _project_root() -> Path:

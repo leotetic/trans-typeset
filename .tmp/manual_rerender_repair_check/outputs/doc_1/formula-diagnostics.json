@@ -1,0 +1,42 @@
+{
+  "kind": "formula_diagnostics",
+  "formula_count": 0,
+  "inline_count": 0,
+  "display_count": 0,
+  "latex_success_count": 0,
+  "fallback_count": 0,
+  "low_confidence_formula_ids": [],
+  "unresolved_placeholders": [],
+  "quality_flag_counts": {},
+  "ocr_provider": {
+    "name": "pix2text",
+    "status": "unavailable",
+    "error": "[WinError 5] 拒绝访问。: 'C:\\\\Users\\\\Admin\\\\AppData\\\\Roaming\\\\Ultralytics'"
+  },
+  "formula_fragment_cluster_count": 0,
+  "formula_fragment_suppressed_block_count": 0,
+  "formula_fragment_clusters": [],
+  "candidate_count": 0,
+  "recognized_count": 0,
+  "accepted_count": 0,
+  "rejected_count": 0,
+  "rejected_records": [],
+  "formula_enrichment_ms": 1.95,
+  "recognizer_type": "deterministic",
+  "visual_formula_recognition_enabled": true,
+  "quality_flags": [
+    "formula_recognition_deterministic"
+  ],
+  "enrichment": {
+    "kind": "formula_diagnostics",
+    "candidate_count": 0,
+    "recognized_count": 0,
+    "accepted_count": 0,
+    "rejected_count": 0,
+    "quality_flags": [
+      "formula_recognition_deterministic"
+    ],
+    "recognizer_type": "deterministic",
+    "visual_formula_recognition_enabled": true
+  }
+}

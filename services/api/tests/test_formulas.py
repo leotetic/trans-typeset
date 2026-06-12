@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from app.pipeline.parser import parse_pdf
@@ -11,6 +12,7 @@ from app.pipeline.formulas import (
     detect_formula_candidates,
     enrich_document_formulas,
 )
+import app.pipeline.formulas.validation as formula_validation
 from app.pipeline.formulas.normalization import latex_from_pdf_text
 from app.pipeline.formulas.recognizer import FormulaRecognitionError, _extract_json_object
 from app.pipeline.formulas.validation import validate_formula_latex
@@ -184,6 +186,54 @@ def test_detector_keeps_inline_formula_boundary_before_explanation() -> None:
     assert len(candidates) == 1
     assert candidates[0].display_mode == "inline"
     assert candidates[0].source_text == "B=p"
+
+
+def test_legacy_formula_normalization_does_not_promote_sentence_formula_role_to_display() -> None:
+    block = DocumentBlock(
+        block_id="b_sentence_formula",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=90),
+        reading_order=0,
+        source_text="We solve E = mc^2 in the text and preserve it.",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    normalized_block = normalized.pages[0].blocks[0]
+    assert normalized_block.formula_id is None
+    assert len(normalized_block.formulas) == 1
+    formula = normalized_block.formulas[0]
+    assert formula.source_text == "E = mc^2"
+    assert formula.kind == "inline"
+    assert normalized_block.text_for_translation == (
+        f"We solve {{{{formula:{formula.formula_id}}}}} in the text and preserve it."
+    )
+
+
+def test_formula_validation_handles_empty_stderr_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        formula_validation.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=2, stdout="", stderr=None),
+    )
+
+    assert formula_validation._katex_render_error(r"\int f_s\,d\Omega") == "katex_render_failed"
 
 
 def test_detector_does_not_promote_prose_paragraphs_to_display_formulas() -> None:
@@ -1291,6 +1341,40 @@ def test_legacy_formula_normalization_extracts_mid_equation_number_with_short_ta
     assert r"\tag{3}" in formula.latex
     assert "(3)" not in formula.latex.replace(r"\tag{3}", "")
     assert "v_{n}" in formula.latex
+    assert "formula_equation_number_preserved" in formula.quality_flags
+
+
+def test_legacy_formula_normalization_recognizes_tex_command_display_formula() -> None:
+    block = DocumentBlock(
+        block_id="b_tex_display",
+        page_id="p1",
+        role=BlockRole.HEADING,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=95),
+        reading_order=0,
+        source_text=r"\frac{\alpha}{\beta + 1} = q_s , (4)",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    normalized_block = normalized.pages[0].blocks[0]
+    formula = normalized.formulas[0]
+
+    assert normalized_block.text_for_translation == f"{{{{formula:{formula.formula_id}}}}}"
+    assert formula.display_mode == "display"
+    assert formula.latex == r"\frac{\alpha}{\beta + 1} = q_s \tag{4}"
     assert "formula_equation_number_preserved" in formula.quality_flags
 
 

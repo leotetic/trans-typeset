@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import sqlite3
 from typing import Any, AsyncIterator
 
 from pdf_translator_schema import InputKind, UserIntent, WorkflowRun
@@ -160,10 +161,25 @@ async def _async_checkpoint_saver(
 
     checkpoint_dir = context.storage.root / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    async with AsyncSqliteSaver.from_conn_string(
-        str(checkpoint_dir / "langgraph.sqlite")
-    ) as saver:
-        yield saver
+    try:
+        async with AsyncSqliteSaver.from_conn_string(
+            str(checkpoint_dir / "langgraph.sqlite")
+        ) as saver:
+            await saver.setup()
+            yield saver
+            return
+    except Exception as exc:
+        if _should_fallback_to_memory_checkpointer(exc):
+            yield MemorySaver()
+            return
+        raise
+
+
+def _should_fallback_to_memory_checkpointer(exc: Exception) -> bool:
+    if isinstance(exc, sqlite3.Error):
+        return True
+    message = str(exc).lower()
+    return "sqlite" in exc.__class__.__module__.lower() or "disk i/o error" in message
 
 
 class _FallbackTypesettingGraph:

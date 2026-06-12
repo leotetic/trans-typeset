@@ -337,15 +337,18 @@ def _katex_render_to_string(latex: str, *, display: bool) -> str | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
         )
     except Exception:
         return None
     if completed.returncode == 3:
         return _KATEX_UNAVAILABLE
-    if completed.returncode != 0 or not completed.stdout.strip():
+    stdout = completed.stdout or ""
+    if completed.returncode != 0 or not stdout.strip():
         return None
-    return completed.stdout
+    return stdout
 
 
 def _strip_latex_equation_tag(latex: str) -> tuple[str, str | None]:
