@@ -1306,12 +1306,116 @@ def test_continuous_reflow_allocates_display_formula_height() -> None:
     html = render_to_html(render_document)
 
     assert render_block.role == BlockRole.FORMULA
-    assert render_block.bbox.y1 - render_block.bbox.y0 > 34.0
+    assert render_block.bbox.y1 - render_block.bbox.y0 > 30.0
     assert render_document.layout_trace["blocks"][0]["estimated_lines"] > 1
     assert "formula_height_adjusted" in render_block.quality_flags
-    assert "formula_height_risk" in render_block.quality_flags
+    assert "formula_height_risk" not in render_block.quality_flags
     assert 'class="katex-display"' in html
     assert '--h-pt: 16.2pt' not in html
+
+
+def test_katex_height_uses_strut_height_without_double_counting_depth() -> None:
+    html = (
+        '<span class="katex-display"><span class="katex">'
+        '<span class="strut" style="height:1.8em;vertical-align:-0.6em;"></span>'
+        "</span></span>"
+    )
+
+    height = renderer_models._height_from_katex_html(html, 10.0)
+
+    assert height == pytest.approx(18.0)
+
+
+def test_rendered_formula_height_prefers_measured_katex_over_heuristic() -> None:
+    latex = (
+        r"\frac{\partial V}{\partial t} = \nabla^2 V + \sum_i x_i + "
+        r"\int_0^1 \frac{a_i}{b_i}\,dx"
+    )
+    expected_height = 12.0 * (1.8 + 0.15)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda _latex, display=True: (
+            '<span class="strut" style="height:1.8em;vertical-align:-0.9em;"></span>'
+        ),
+    )
+    try:
+        height = renderer_models._formula_rendered_or_heuristic_height(latex, 12.0)
+    finally:
+        monkeypatch.undo()
+
+    assert height == pytest.approx(expected_height)
+    assert height < renderer_models._formula_latex_heuristic_height(latex, 12.0)
+
+
+def test_formula_only_block_uses_visual_formula_height_for_long_single_line_latex() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=50, y0=90, x1=250, y1=120),
+        source_text="{{formula:formula_1}}",
+        font_size=12,
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=" + ".join([f"x_{{{index}}}" for index in range(1, 40)]),
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+    style = renderer_models._style_for_role(defaults, BlockRole.FORMULA)
+    visual_height = 12.0 * (1.8 + 0.15 + renderer_models._FORMULA_LIKE_VERTICAL_MARGIN_EM)
+    estimation_text = renderer_models._formula_estimation_text(
+        formula.source_text,
+        document,
+        formula,
+    )
+    estimated_formula_lines = renderer_models._estimated_line_count(
+        estimation_text,
+        200.0,
+        12.0,
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda _latex, display=True: (
+            '<span class="strut" style="height:1.8em;vertical-align:-0.6em;"></span>'
+        ),
+    )
+    try:
+        visual_only_height = renderer_models._estimated_formula_aware_height(
+            formula.source_text,
+            200.0,
+            12.0,
+            style.line_height,
+            document=document,
+            block=formula,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert estimated_formula_lines > 1
+    assert visual_only_height == pytest.approx(visual_height)
+    assert visual_only_height < estimated_formula_lines * 12.0 * max(style.line_height, 1.2)
 
 
 def test_continuous_reflow_tracks_multi_display_formula_height_diagnostics() -> None:
@@ -1670,6 +1774,75 @@ def test_continuous_reflow_uses_formula_source_number_as_renderer_span() -> None
     assert 'data-formula-number="(3)"' in html
 
 
+def test_continuous_reflow_advances_fallback_numbering_after_preserved_number() -> None:
+    document = _display_formula_document(
+        [
+            ("p1_f1", "formula_1", r"\int f_s\,d\Omega"),
+            ("p1_f2", "formula_2", r"\partial f_s / \partial t"),
+        ]
+    )
+    document = document.model_copy(
+        update={
+            "formulas": [
+                document.formulas[0].model_copy(
+                    update={"source_text": r"\int f_s\,d\Omega , (4) v_{n}"}
+                ),
+                document.formulas[1],
+            ]
+        },
+        deep=True,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+
+    blocks = [block for page in render_document.pages for block in page.blocks]
+    assert [block.formula_number for block in blocks] == ["(4)", "(5)"]
+
+
+def test_continuous_reflow_strips_preserved_number_from_formula_latex_markup() -> None:
+    document = _display_formula_document(
+        [("p1_f1", "formula_1", r"\int f_s\,d\Omega")]
+    )
+    document = document.model_copy(
+        update={
+            "formulas": [
+                document.formulas[0].model_copy(
+                    update={"source_text": r"\int f_s\,d\Omega : (4) v'_{n}"}
+                )
+            ]
+        },
+        deep=True,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    assert 'data-formula-number="(4)"' in html
+    assert "(4) v&#x27;_{n}" not in html
+    assert "(4) v'_{n}" not in html
+    assert html.count('class="formula-equation-number"') == 1
+
+
 def test_renderer_converts_leftover_text_subscript_and_superscript_markers() -> None:
     paragraph = _block(
         "p1_body",
@@ -1696,6 +1869,32 @@ def test_renderer_converts_leftover_text_subscript_and_superscript_markers() -> 
     assert "50^{" not in html
 
 
+def test_renderer_converts_bare_script_markers_without_base() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=360, y1=140),
+        source_text="Detached ^{3}, ^{50–54}, and _{tail} stay readable.",
+        reading_order=0,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([paragraph]),
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    html = render_to_html(render_document)
+    block = render_document.pages[0].blocks[0]
+
+    assert "text_script_marker_rendered" in block.quality_flags
+    assert "<sup>3</sup>" in html
+    assert "<sup>50–54</sup>" in html
+    assert "<sub>tail</sub>" in html
+    assert "^{3}" not in html
+    assert "_{tail}" not in html
+
+
 def test_continuous_reflow_formula_numbering_defaults_to_none() -> None:
     document = _display_formula_document([("p1_f1", "formula_1", "E = mc^2")])
     defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
@@ -1711,6 +1910,181 @@ def test_continuous_reflow_formula_numbering_defaults_to_none() -> None:
     assert render_document.pages[0].blocks[0].formula_number is None
     assert 'class="formula-equation-number"' not in html
     assert 'data-formula-number=' not in html
+
+
+def test_continuous_reflow_safely_splits_formula_bearing_paragraphs() -> None:
+    intro = _block(
+        "intro",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=80),
+        source_text="Prelude text. Prelude text. Prelude text.",
+        reading_order=0,
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=320, y1=160),
+        source_text=(
+            "Body {{formula:formula_1}} text continues with more explanation and "
+            "{{formula:formula_2}} references that should wrap across pages "
+            "without forcing the entire paragraph onto the next page. "
+            "Body {{formula:formula_1}} text continues with more explanation and "
+            "{{formula:formula_2}} references that should wrap across pages "
+            "without forcing the entire paragraph onto the next page."
+        ),
+        reading_order=1,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[intro, paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex="E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+            FormulaIR(
+                formula_id="formula_2",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"\alpha_{e} = \beta^{2}",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+        ],
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 240.0,
+                    "height_pt": 150.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    blocks = [block for page in render_document.pages for block in page.blocks]
+    formula_blocks = [block for block in blocks if block.block_id.startswith("p1_body")]
+
+    assert len(render_document.pages) > 1
+    assert len(blocks) > 1
+    assert render_document.pages[0].blocks[0].block_id == "intro"
+    assert formula_blocks[0].block_id == "p1_body__reflow_01"
+    assert "reflow_split" in formula_blocks[0].quality_flags
+    assert formula_blocks[0].html is not None
+    assert any("reflow_continued" in block.quality_flags for block in formula_blocks[1:])
+    assert sum(1 for block in formula_blocks if block.html is not None) >= 2
+    assert html.count('data-formula-id="formula_1"') >= 1
+    assert html.count('data-formula-id="formula_2"') >= 1
+
+
+def test_continuous_reflow_formula_paragraph_keeps_number_only_on_first_fragment() -> None:
+    intro = _block(
+        "intro",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=80),
+        source_text="Prelude text. Prelude text. Prelude text.",
+        reading_order=0,
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=320, y1=160),
+        source_text=(
+            "{{formula:formula_1}} (4) with explanatory text that is intentionally "
+            "long enough to split across pages while preserving only one equation "
+            "number on the first fragment. The continuation should remain plain prose "
+            "after the display formula and still reflow safely across pages."
+        ),
+        reading_order=1,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[intro, paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        formula_numbering="parenthesized",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 240.0,
+                    "height_pt": 150.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    blocks = [block for page in render_document.pages for block in page.blocks]
+    formula_blocks = [block for block in blocks if block.block_id.startswith("p1_body")]
+
+    assert len(formula_blocks) > 1
+    assert formula_blocks[0].formula_number == "(4)"
+    assert all(block.formula_number is None for block in formula_blocks[1:])
+    assert "reflow_continued" in formula_blocks[1].quality_flags
+    assert html.count('class="formula-equation-number"') == 1
 
 
 def test_continuous_reflow_headings_use_gbt_heiti_font_stack() -> None:

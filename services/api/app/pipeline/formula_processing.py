@@ -75,6 +75,9 @@ _INLINE_PATTERNS = [
         r"(?:\\[A-Za-z]+|∫|∑|∇)[A-Za-z0-9α-ωΑ-Ω_{}()[\]\s+\-−*/=.,\\]+"
     ),
 ]
+_INLINE_SCRIPT_SUFFIX_PATTERN = re.compile(
+    r"\s*(?:[_^]\s*(?:\{[^{}\n\r]{1,32}\}|\\?[A-Za-z0-9α-ωΑ-Ω+\-–−]+))[)\]]*"
+)
 
 
 @dataclass(frozen=True)
@@ -718,10 +721,12 @@ def _detect_formula_matches(block: DocumentBlock) -> list[FormulaMatch]:
     matches: list[FormulaMatch] = []
     for pattern in _INLINE_PATTERNS:
         for raw_match in pattern.finditer(block.source_text):
-            candidate = _trim_formula_candidate(raw_match.group(0))
+            start = raw_match.start()
+            end = _expand_inline_formula_script_suffix(block.source_text, start, raw_match.end())
+            candidate = _trim_formula_candidate(block.source_text[start:end])
             if not candidate or not _looks_like_formula(candidate):
                 continue
-            start = raw_match.start() + raw_match.group(0).find(candidate)
+            start = start + block.source_text[start:end].find(candidate)
             end = start + len(candidate)
             if any(start < current.end and end > current.start for current in matches):
                 continue
@@ -777,6 +782,18 @@ def _math_signal_count(text: str) -> int:
 def _trim_formula_candidate(text: str) -> str:
     candidate, _truncated = truncate_raw_at_language_boundary(text)
     return candidate
+
+
+def _expand_inline_formula_script_suffix(text: str, start: int, end: int) -> int:
+    cursor = end
+    while cursor < len(text):
+        match = _INLINE_SCRIPT_SUFFIX_PATTERN.match(text, cursor)
+        if match is None or match.end() <= cursor:
+            break
+        cursor = match.end()
+    while cursor < len(text) and text[cursor] in ")]":
+        cursor += 1
+    return cursor
 
 
 def _formula_id(block_id: str, text: str, index: int) -> str:

@@ -1344,6 +1344,38 @@ def test_legacy_formula_normalization_extracts_mid_equation_number_with_short_ta
     assert "formula_equation_number_preserved" in formula.quality_flags
 
 
+def test_legacy_formula_normalization_extracts_mid_equation_number_with_prime_tail() -> None:
+    block = DocumentBlock(
+        block_id="b_mid_prime_number",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=95),
+        reading_order=0,
+        source_text=r"\int f_s d \Omega : (4) v'_{n}",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    formula = normalized.formulas[0]
+    assert r"\tag{4}" in formula.latex
+    assert "(4)" not in formula.latex.replace(r"\tag{4}", "")
+    assert "v'_{n}" in formula.latex
+    assert "formula_equation_number_preserved" in formula.quality_flags
+
+
 def test_legacy_formula_normalization_recognizes_tex_command_display_formula() -> None:
     block = DocumentBlock(
         block_id="b_tex_display",
@@ -1481,6 +1513,103 @@ def test_span_inline_detection_absorbs_trailing_subscript_span() -> None:
     assert len(candidates) == 1
     assert candidates[0].source_text == r"\alpha [w] = \alpha [E_{e}]"
     assert candidates[0].span_ids == ("s_formula", "s_sub")
+
+
+def test_detector_keeps_inline_formula_script_group_together_for_regex_candidates() -> None:
+    block = DocumentBlock(
+        block_id="b_inline_script",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=220, y1=90),
+        reading_order=0,
+        source_text=r"Measure d^{3}v and continue.",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert len(candidates) == 1
+    assert candidates[0].source_text == r"d^{3}v"
+    assert candidates[0].source_text_range == (8, 14)
+
+
+def test_span_inline_detection_absorbs_trailing_superscript_span() -> None:
+    spans = [
+        TextSpanIR(
+            span_id="s_formula",
+            page_id="p1",
+            block_id="b_inline_sup",
+            line_id="l1",
+            text="d^",
+            bbox=BoundingBox(x0=20, y0=60, x1=34, y1=72),
+            font_name="Cambria Math",
+            font_size=10,
+        ),
+        TextSpanIR(
+            span_id="s_sup",
+            page_id="p1",
+            block_id="b_inline_sup",
+            line_id="l1",
+            text="{3}v",
+            bbox=BoundingBox(x0=34, y0=58, x1=52, y1=72),
+            font_name="Times New Roman",
+            font_size=7,
+        ),
+        TextSpanIR(
+            span_id="s_text",
+            page_id="p1",
+            block_id="b_inline_sup",
+            line_id="l1",
+            text=" remains.",
+            bbox=BoundingBox(x0=52, y0=60, x1=102, y1=72),
+            font_name="Times New Roman",
+            font_size=10,
+        ),
+    ]
+    block = DocumentBlock(
+        block_id="b_inline_sup",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=220, y1=80),
+        reading_order=0,
+        source_text=r"d^{3}v remains.",
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_inline_sup",
+                text=r"d^{3}v remains.",
+                bbox=BoundingBox(x0=20, y0=60, x1=102, y1=72),
+                span_ids=[span.span_id for span in spans],
+            )
+        ],
+        spans=spans,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert len(candidates) == 1
+    assert candidates[0].source_text == r"d^{3}v"
+    assert candidates[0].span_ids == ("s_formula", "s_sup")
 
 
 def test_latex_normalization_trims_unrepairable_trailing_script_marker() -> None:

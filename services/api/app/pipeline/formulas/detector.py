@@ -28,7 +28,10 @@ _MATH_SIGNAL_PATTERN = re.compile(
 )
 _EQUATION_NUMBER_SUFFIX = re.compile(r"(?:[,;:]\s*)?(\(\d+\))\s*$")
 _EQUATION_NUMBER_WITH_SHORT_TAIL = re.compile(
-    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$"
+    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'+\-*/=:.,\s]{1,24})$"
+)
+_SCRIPT_GROUP_SUFFIX_PATTERN = re.compile(
+    r"\s*(?:[_^]\s*(?:\{[^{}\n\r]{1,32}\}|\\?[A-Za-z0-9α-ωΑ-Ω+\-–−]+))[)\]]*"
 )
 _FORMULA_CLUSTER_CACHE_ATTR = "_formula_fragment_cluster_diagnostics"
 _DISPLAY_CLUSTER_MAX_TEXT_LEN = 240
@@ -730,7 +733,9 @@ def _regex_inline_formula_candidates(block: DocumentBlock) -> list[FormulaCandid
         r"[A-Za-zα-ωΑ-Ω]\s*(?:\^|_)\s*\{?[A-Za-z0-9+\-]+\}?)(?![A-Za-z])"
     )
     for match in pattern.finditer(block.source_text):
-        text = match.group(0).strip()
+        start = match.start()
+        end = _expand_inline_formula_script_suffix(block.source_text, start, match.end())
+        text = block.source_text[start:end].strip()
         if not _looks_like_inline_formula_text(text):
             continue
         candidates.append(
@@ -738,7 +743,7 @@ def _regex_inline_formula_candidates(block: DocumentBlock) -> list[FormulaCandid
                 candidate_id=_candidate_id(
                     block.page_id,
                     "inline_text",
-                    f"{block.block_id}:{match.start()}:{text}",
+                    f"{block.block_id}:{start}:{text}",
                     block.bbox,
                 ),
                 page_id=block.page_id,
@@ -746,7 +751,7 @@ def _regex_inline_formula_candidates(block: DocumentBlock) -> list[FormulaCandid
                 source_kind=FormulaSourceKind.INLINE_TEXT,
                 anchor_block_id=block.block_id,
                 source_text=text,
-                source_text_range=(match.start(), match.end()),
+                source_text_range=(start, end),
                 display_mode="inline",
                 quality_flags=("formula_inline_text_only",),
             )
@@ -780,16 +785,42 @@ def _span_continues_dangling_script(
     if not current:
         return False
     current_text = "".join(item.text for item in current).rstrip()
-    if not current_text or current_text[-1] not in {"_", "^"}:
+    if not current_text:
         return False
     text = span.text.strip()
     if not text:
+        return False
+    if current_text[-1] not in {"_", "^"} and not re.search(
+        r"[A-Za-z0-9α-ωΑ-Ω)\]]\s*[_^]\s*(?:\{[^{}]*\}?|\\?[A-Za-z0-9α-ωΑ-Ω+\-–−]*)?$",
+        current_text,
+    ):
         return False
     if re.fullmatch(r"\{?[A-Za-z0-9α-ωΑ-Ω+\-–−]{1,12}\}?[)\]]*", text):
         return True
     if text.startswith("{") and "}" in text[:16]:
         return True
     return False
+
+
+def _expand_inline_formula_script_suffix(text: str, start: int, end: int) -> int:
+    cursor = end
+    fragment = text[start:cursor]
+    if fragment.count("{") > fragment.count("}") and "}" in text[cursor : cursor + 34]:
+        closing = text.find("}", cursor, cursor + 34)
+        if closing != -1:
+            cursor = closing + 1
+    while cursor < len(text):
+        match = _SCRIPT_GROUP_SUFFIX_PATTERN.match(text, cursor)
+        if match is None or match.end() <= cursor:
+            break
+        cursor = match.end()
+    while cursor < len(text) and text[cursor] in ")]":
+        cursor += 1
+    if cursor > start and "}" in text[start:cursor]:
+        variable_match = re.match(r"[A-Za-zα-ωΑ-Ω](?![A-Za-zα-ωΑ-Ω]{2,})", text[cursor:])
+        if variable_match is not None:
+            cursor += variable_match.end()
+    return cursor
 
 
 def _looks_like_inline_formula_text(text: str) -> bool:

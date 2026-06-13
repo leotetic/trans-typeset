@@ -59,9 +59,9 @@ _LATEX_TAG_STAR_PATTERN = re.compile(r"\\tag\*\s*\{(?P<number>[^{}]+)\}")
 _SOURCE_EQUATION_NUMBER_ANYWHERE_PATTERN = re.compile(
     r"[（(]\s*(?P<number>[A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?)\s*[)）]"
 )
-_SHORT_EQUATION_TAIL_PATTERN = re.compile(r"[A-Za-z0-9α-ωΑ-Ω_{}^\\\s+\-*/.,]+")
+_SHORT_EQUATION_TAIL_PATTERN = re.compile(r"[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'\s+\-*/=:.,]+")
 _TEXT_SCRIPT_MARKER_PATTERN = re.compile(
-    r"(?P<base>\b[A-Za-z0-9α-ωΑ-Ω]+)(?P<op>[_^])\{(?P<script>[^{}\n\r]{1,32})\}"
+    r"(?P<base>\b[A-Za-z0-9α-ωΑ-Ω]+)?(?P<op>[_^])\{(?P<script>[^{}\n\r]{1,32})\}"
 )
 _FORMULA_CORRUPTION_FALLBACK_FLAGS = {
     "formula_text_layer_corrupt",
@@ -290,9 +290,11 @@ def _non_formula_text_html(text: str) -> tuple[str, list[str]]:
     for match in _TEXT_SCRIPT_MARKER_PATTERN.finditer(text):
         parts.append(escape(text[cursor : match.start()]))
         tag = "sub" if match.group("op") == "_" else "sup"
-        parts.append(
-            f'{escape(match.group("base"))}<{tag}>{escape(match.group("script"))}</{tag}>'
-        )
+        base = match.group("base") or ""
+        if base:
+            parts.append(f"{escape(base)}<{tag}>{escape(match.group('script'))}</{tag}>")
+        else:
+            parts.append(f"<{tag}>{escape(match.group('script'))}</{tag}>")
         cursor = match.end()
         changed = True
     parts.append(escape(text[cursor:]))
@@ -376,6 +378,22 @@ def _extract_source_equation_number(text: str) -> str | None:
     if tail and not _SHORT_EQUATION_TAIL_PATTERN.fullmatch(tail):
         return None
     return f"({match.group('number').strip()})"
+
+
+def _equation_number_value(number: str | None) -> int | None:
+    if not number:
+        return None
+    match = re.fullmatch(r"\((\d+)\)", number.strip())
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _formula_counter_after_preserved_number(current: int, number: str | None) -> int:
+    parsed = _equation_number_value(number)
+    if parsed is None:
+        return current
+    return max(current, parsed)
 
 
 def _formula_fallback_html(
@@ -714,6 +732,9 @@ def _estimated_formula_aware_height(
         block,
         font_size_pt=font_size_pt,
     )
+    has_formula_only_content = not _normalized_text(
+        _FORMULA_REF_PATTERN.sub(" ", _FORMULA_PLACEHOLDER_PATTERN.sub(" ", text))
+    )
     min_display_lines = _FORMULA_LIKE_MIN_LINES if formula_like else _DISPLAY_FORMULA_MIN_LINES
     vertical_margin_em = (
         _FORMULA_LIKE_VERTICAL_MARGIN_EM
@@ -737,7 +758,10 @@ def _estimated_formula_aware_height(
             vertical_margin_em
             + max(0, len(formula_visual_heights) - 1) * _DISPLAY_FORMULA_PER_NODE_MARGIN_EM
         )
-        display_height = max(display_height, visual_height)
+        if block.role == BlockRole.FORMULA or has_formula_only_content:
+            display_height = visual_height
+        else:
+            display_height = max(display_height, visual_height)
     return max(estimated_height, display_height)
 
 
@@ -781,7 +805,7 @@ def _formula_rendered_or_heuristic_height(latex: str, font_size_pt: float) -> fl
     rendered = _katex_html(render_latex, display=True) if render_latex.strip() else None
     rendered_height = _height_from_katex_html(rendered, font_size_pt) if rendered else None
     if rendered_height is not None:
-        return max(rendered_height, _formula_latex_heuristic_height(render_latex, font_size_pt))
+        return rendered_height + font_size_pt * 0.15
     return _formula_latex_heuristic_height(render_latex, font_size_pt)
 
 
@@ -789,14 +813,11 @@ def _height_from_katex_html(html: str, font_size_pt: float) -> float | None:
     max_em = 0.0
     for match in _KATEX_STRUT_STYLE_PATTERN.finditer(html):
         height_em = 0.0
-        depth_em = 0.0
         for value_match in _CSS_EM_VALUE_PATTERN.finditer(match.group("style")):
             value = float(value_match.group("value"))
             if value_match.group("name").lower() == "height":
                 height_em = max(height_em, value)
-            else:
-                depth_em = max(depth_em, abs(min(value, 0.0)))
-        max_em = max(max_em, height_em + depth_em)
+        max_em = max(max_em, height_em)
     if max_em <= 0:
         return None
     return max_em * font_size_pt
@@ -961,6 +982,70 @@ def _display_formula_source_number(
 def _strip_source_equation_number_from_text(text: str) -> str:
     stripped = _SOURCE_EQUATION_NUMBER_PATTERN.sub("", text).rstrip(" \t\n\r,;:")
     return stripped if stripped else text
+
+
+def _strip_source_equation_number_from_formula_text(text: str, number: str | None) -> str:
+    if not text or not number:
+        return text
+    pattern = re.compile(r"(?:[,;:]\s*)?" + re.escape(number) + r"(?P<tail>\s*)")
+    match = None
+    for candidate in pattern.finditer(text):
+        tail = text[candidate.end() :].strip(" \t\n\r,;:")
+        if tail and not _SHORT_EQUATION_TAIL_PATTERN.fullmatch(tail):
+            continue
+        match = candidate
+    if match is None:
+        return text
+    stripped = (text[: match.start()] + text[match.end() :]).rstrip(" \t\n\r,;:")
+    return stripped if stripped else text
+
+
+def _formula_with_stripped_source_number(formula: Any, number: str | None) -> Any:
+    if not number:
+        return formula
+    source_text = getattr(formula, "source_text", "") or ""
+    latex = getattr(formula, "latex", "") or ""
+    updates: dict[str, Any] = {}
+    stripped_source = _strip_source_equation_number_from_formula_text(source_text, number)
+    stripped_latex = _strip_source_equation_number_from_formula_text(latex, number)
+    if stripped_source != source_text:
+        updates["source_text"] = stripped_source
+    if stripped_latex != latex:
+        updates["latex"] = stripped_latex
+    if not updates:
+        return formula
+    if hasattr(formula, "model_copy"):
+        return formula.model_copy(update=updates)
+    return formula
+
+
+def _document_with_stripped_formula_source_numbers(
+    document: DocumentIR,
+    text: str,
+    block: DocumentBlock,
+    number: str | None,
+) -> DocumentIR:
+    if not number:
+        return document
+    formula_refs = _display_formula_refs(text, document, block)
+    if not formula_refs:
+        return document
+    updated_formulas = list(document.formulas)
+    updated = False
+    for index, formula in enumerate(updated_formulas):
+        if not any(
+            getattr(formula, "formula_id", None) == getattr(ref, "formula_id", None)
+            for ref in formula_refs
+        ):
+            continue
+        updated_formula = _formula_with_stripped_source_number(formula, number)
+        if updated_formula is formula:
+            continue
+        updated_formulas[index] = updated_formula
+        updated = True
+    if not updated:
+        return document
+    return document.model_copy(update={"formulas": updated_formulas}, deep=True)
 
 
 def _formula_estimation_text(
@@ -1415,8 +1500,18 @@ class RenderDocument:
                 if estimated_display_count >= 1:
                     source_formula_number = _display_formula_source_number(text, document, block)
                     if source_formula_number is not None:
+                        document = _document_with_stripped_formula_source_numbers(
+                            document,
+                            text,
+                            block,
+                            source_formula_number,
+                        )
                         text = _strip_source_equation_number_from_text(text)
                         formula_number = source_formula_number or None
+                        formula_counter = _formula_counter_after_preserved_number(
+                            formula_counter,
+                            formula_number,
+                        )
                         quality_flags.append("formula_number_source_preserved")
                     elif defaults.formula_numbering == "parenthesized":
                         if estimated_display_count > 1:
@@ -1803,8 +1898,18 @@ def _from_ir_and_plans_continuous_reflow(
         if estimated_display_count >= 1:
             source_formula_number = _display_formula_source_number(text, document, block)
             if source_formula_number is not None:
+                document = _document_with_stripped_formula_source_numbers(
+                    document,
+                    text,
+                    block,
+                    source_formula_number,
+                )
                 text = _strip_source_equation_number_from_text(text)
                 formula_number = source_formula_number or None
+                formula_counter = _formula_counter_after_preserved_number(
+                    formula_counter,
+                    formula_number,
+                )
                 flags.append("formula_number_source_preserved")
             elif defaults.formula_numbering == "parenthesized":
                 if estimated_display_count > 1:
@@ -1849,10 +1954,10 @@ def _from_ir_and_plans_continuous_reflow(
         ):
             finish_page()
             first_fragment_height = content_bottom - cursor_y - style.space_before_pt
-        fragments = (
-            [text]
-            if html is not None
-            else _split_reflow_text(
+        if html is not None and not _should_safe_split_formula_reflow_text(text, block):
+            fragments = [text]
+        elif _should_safe_split_formula_reflow_text(text, block):
+            fragments = _split_formula_reflow_text(
                 text,
                 content_width,
                 content_bottom - content_y0,
@@ -1861,9 +1966,23 @@ def _from_ir_and_plans_continuous_reflow(
                 document=document,
                 source_block=block,
             )
-        )
+        else:
+            fragments = _split_reflow_text(
+                text,
+                content_width,
+                content_bottom - content_y0,
+                style,
+                first_max_height_pt=first_fragment_height if current_blocks else None,
+                document=document,
+                source_block=block,
+            )
         fragment_count = len(fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
+            fragment_html = (
+                html
+                if fragment_count == 1
+                else _formula_html_for_text(fragment, document, block)[0]
+            )
             fragment_height = _estimated_reflow_height(
                 fragment,
                 content_width,
@@ -1908,7 +2027,7 @@ def _from_ir_and_plans_continuous_reflow(
                     font_scale=style.font_size_pt / block.style_seed.font_size
                     if block.style_seed.font_size
                     else 1.0,
-                    html=html if fragment_count == 1 else None,
+                    html=fragment_html,
                     render_intent=render_intent,
                     text_align=style.alignment,
                     font_weight=700 if style.bold else 400,
@@ -2394,6 +2513,160 @@ def _split_reflow_text(
             rebalance_at = _best_reflow_split_index(fragment, max(1, int(len(fragment) * 0.75)))
             rest = f"{fragment[rebalance_at:].strip()} {rest}".strip()
             fragment = fragment[:rebalance_at].strip()
+        if not fragment:
+            fragment = remaining[:chars_for_fragment].strip()
+            rest = remaining[chars_for_fragment:].strip()
+        fragments.append(fragment)
+        remaining = rest
+    return [fragment for fragment in fragments if fragment]
+
+
+def _contains_formula_tokens(text: str) -> bool:
+    return bool(
+        _FORMULA_REF_PATTERN.search(text) or _FORMULA_PLACEHOLDER_PATTERN.search(text)
+    )
+
+
+def _should_safe_split_formula_reflow_text(
+    text: str,
+    block: DocumentBlock,
+) -> bool:
+    return block.role != BlockRole.FORMULA and _contains_formula_tokens(text)
+
+
+def _best_formula_reflow_split_index(text: str, max_chars: int) -> int:
+    max_chars = min(max_chars, len(text))
+    if max_chars <= 0:
+        return 1
+
+    cursor = 0
+    best = 0
+    for match in _FORMULA_REF_PATTERN.finditer(text):
+        if match.start() > cursor:
+            segment = text[cursor : match.start()]
+            if match.start() > max_chars:
+                available = max_chars - cursor
+                if available <= 0:
+                    return max(1, best)
+                local_split = _best_reflow_split_index(segment, available)
+                if segment[:local_split].strip():
+                    return cursor + local_split
+                return max(1, best)
+            best = match.start()
+        if match.end() > max_chars:
+            return max(1, best) if best > 0 else match.end()
+        best = match.end()
+        cursor = match.end()
+
+    legacy_cursor = 0
+    legacy_best = 0
+    legacy_text = text
+    for match in _FORMULA_PLACEHOLDER_PATTERN.finditer(legacy_text):
+        if match.start() > legacy_cursor:
+            segment = legacy_text[legacy_cursor : match.start()]
+            if match.start() > max_chars:
+                available = max_chars - legacy_cursor
+                if available <= 0:
+                    return max(1, legacy_best)
+                local_split = _best_reflow_split_index(segment, available)
+                if segment[:local_split].strip():
+                    return legacy_cursor + local_split
+                return max(1, legacy_best)
+            legacy_best = match.start()
+        if match.end() > max_chars:
+            return max(1, legacy_best) if legacy_best > 0 else match.end()
+        legacy_best = match.end()
+        legacy_cursor = match.end()
+
+    split_pattern = re.compile(
+        f"{_FORMULA_REF_PATTERN.pattern}|{_FORMULA_PLACEHOLDER_PATTERN.pattern}"
+    )
+    cursor = 0
+    best = 0
+    for match in split_pattern.finditer(text):
+        if match.start() > cursor:
+            segment = text[cursor : match.start()]
+            if match.start() > max_chars:
+                available = max_chars - cursor
+                if available <= 0:
+                    return max(1, best)
+                local_split = _best_reflow_split_index(segment, available)
+                if segment[:local_split].strip():
+                    return cursor + local_split
+                return max(1, best)
+            best = match.start()
+        if match.end() > max_chars:
+            return max(1, best) if best > 0 else match.end()
+        best = match.end()
+        cursor = match.end()
+
+    tail = text[cursor:]
+    if tail:
+        available = max_chars - cursor
+        if len(text) <= max_chars:
+            return len(text)
+        if available <= 0:
+            return max(1, best)
+        local_split = _best_reflow_split_index(tail, available)
+        if tail[:local_split].strip():
+            return cursor + local_split
+    return max(1, min(max_chars, len(text)))
+
+
+def _split_formula_reflow_text(
+    text: str,
+    width_pt: float,
+    max_height_pt: float,
+    style: RoleStyleDefaults,
+    *,
+    first_max_height_pt: float | None = None,
+    document: DocumentIR | None = None,
+    source_block: DocumentBlock | None = None,
+) -> list[str]:
+    text = _normalized_text(text)
+    if not text:
+        return []
+    fragments: list[str] = []
+    remaining = text
+    while remaining:
+        height_for_fragment = first_max_height_pt if not fragments and first_max_height_pt else max_height_pt
+        lines_for_fragment = max(
+            1,
+            int(height_for_fragment / (style.font_size_pt * style.line_height)),
+        )
+        chars_for_fragment = max(
+            1,
+            _estimated_chars_for_lines(width_pt, style.font_size_pt, lines_for_fragment),
+        )
+        chars_for_fragment = min(
+            chars_for_fragment,
+            _max_reflow_chars_to_fit(
+                remaining,
+                width_pt,
+                style,
+                height_for_fragment,
+                document=document,
+                source_block=source_block,
+            ),
+        )
+        if len(remaining) <= chars_for_fragment:
+            fragments.append(remaining)
+            break
+        split_index = _best_formula_reflow_split_index(remaining, chars_for_fragment)
+        fragment = remaining[:split_index].strip()
+        rest = remaining[split_index:].strip()
+        if rest and (
+            len(rest) < _MIN_FINAL_FRAGMENT_CHARS
+            or _estimated_line_count(rest, width_pt, style.font_size_pt)
+            < _MIN_FINAL_FRAGMENT_LINES
+        ):
+            rebalance_at = _best_formula_reflow_split_index(
+                fragment,
+                max(1, int(len(fragment) * 0.75)),
+            )
+            if 0 < rebalance_at < len(fragment):
+                rest = f"{fragment[rebalance_at:].strip()} {rest}".strip()
+                fragment = fragment[:rebalance_at].strip()
         if not fragment:
             fragment = remaining[:chars_for_fragment].strip()
             rest = remaining[chars_for_fragment:].strip()

@@ -18,7 +18,7 @@ _FORMULA_PROSE_FRAGMENT = re.compile(
 )
 _EQUATION_NUMBER_SUFFIX = re.compile(r"(?:[,;:]\s*)?(\(\d+\))\s*$")
 _EQUATION_NUMBER_WITH_SHORT_TAIL = re.compile(
-    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$"
+    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'+\-*/=:.,\s]{1,24})$"
 )
 _TRAILING_SCRIPT_OPERATOR = re.compile(r"(?:[_^]\s*)+$")
 _HYPHEN_SPLIT_WORD = re.compile(r"\b([A-Za-z]{2,})-\s+([A-Za-z]{2,})\b")
@@ -390,7 +390,7 @@ def _strip_equation_number(text: str, equation_number: str) -> str:
         tail = text[candidate.end() :].strip()
         if not tail or (
             len(tail) <= 24
-            and re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]+", tail)
+            and re.fullmatch(r"[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'+\-*/=:.,\s]+", tail)
             and not re.search(
                 r"\b(?:and|as|for|from|is|represents?|the|where|with)\b",
                 tail,
