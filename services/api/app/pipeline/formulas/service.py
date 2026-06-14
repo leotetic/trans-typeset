@@ -35,6 +35,8 @@ _TEXT_ESCALATION_FLAGS = {
     "formula_text_truncated",
     "formula_delimiter_repaired",
     "formula_text_layer_corrupt",
+    "formula_pdf_ligature_corrupt",
+    "formula_underbrace_artifact_repaired",
     "formula_slash_glyph_suspect",
     "formula_prime_glyph_suspect",
 }
@@ -43,6 +45,7 @@ _DISPLAY_COMPLEXITY_FLAGS = {
     "formula_cluster_incomplete",
     "formula_delimiter_repaired",
 }
+_FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR = "_formula_ocr_provider_diagnostics"
 _DISPLAY_COMPLEXITY_PATTERN = re.compile(
     r"(?:\\(?:frac|sum|int|partial|nabla|sqrt|left|right)|[∂∇∫∑]|[(){}\[\]])"
 )
@@ -238,6 +241,9 @@ async def enrich_document_formulas(
 
     enriched = _attach_formulas(working_document, formulas)
     ocr_diagnostics = ocr_service.diagnostics()
+    active_provider_order = [
+        str(item) for item in ocr_diagnostics.get("active_provider_order", [])
+    ]
     diagnostics = {
         "kind": "formula_diagnostics",
         "parser_cluster_count": _parser_cluster_count(document),
@@ -262,8 +268,14 @@ async def enrich_document_formulas(
         "source_counts": _source_counts(candidates),
         "recognizer_type": recognizer_type,
         "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
+        "ocr_provider": _ocr_provider_status(active_provider_order),
         "ocr": ocr_diagnostics,
     }
+    setattr(
+        enriched,
+        _FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR,
+        {"active_provider_order": active_provider_order},
+    )
     return FormulaEnrichmentResult(
         document=enriched,
         formulas=formulas,
@@ -783,6 +795,18 @@ def _formula_diagnostic_base_flags(
     if recognizer_type == "deterministic":
         flags.append("formula_recognition_deterministic")
     return flags
+
+
+def _ocr_provider_status(active_provider_order: list[str]) -> dict:
+    try:
+        import pix2text  # noqa: F401
+    except Exception as exc:
+        status = {"name": "pix2text", "status": "unavailable", "error": str(exc)[:160]}
+    else:
+        status = {"name": "pix2text", "status": "available"}
+    status["active_provider_order"] = list(active_provider_order)
+    status["active_provider_order_includes_pix2text"] = "pix2text" in active_provider_order
+    return status
 
 
 def _parser_cluster_count(document: DocumentIR) -> int:

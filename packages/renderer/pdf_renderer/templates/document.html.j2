@@ -297,6 +297,8 @@
             class="asset asset-{{ asset.kind | css_class }}{% for flag in asset.quality_flags %} quality-{{ flag | css_class }}{% endfor %}"
             data-asset-id="{{ asset.asset_id }}"
             data-asset-kind="{{ asset.kind }}"
+            {% if asset.figure_group_id %}data-figure-group-id="{{ asset.figure_group_id }}"{% endif %}
+            {% if asset.caption_block_id %}data-caption-block-id="{{ asset.caption_block_id }}"{% endif %}
             style="
               --x-pt: {{ asset.bbox.x0 }}pt;
               --y-pt: {{ asset.bbox.y0 }}pt;
@@ -316,6 +318,8 @@
             class="block role-{{ block.role | css_class }} intent-{{ block.render_intent | css_class }}{% for flag in block.quality_flags %} quality-{{ flag | css_class }}{% endfor %}"
             data-block-id="{{ block.block_id }}"
             data-render-intent="{{ block.render_intent }}"
+            {% if block.figure_group_id %}data-figure-group-id="{{ block.figure_group_id }}"{% endif %}
+            {% if block.caption_for_asset_id %}data-caption-for-asset-id="{{ block.caption_for_asset_id }}"{% endif %}
             data-font-scale="{{ block.font_scale }}"
             data-bold="{{ block.style_seed.bold | lower }}"
             data-italic="{{ block.style_seed.italic | lower }}"

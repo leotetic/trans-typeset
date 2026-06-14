@@ -100,7 +100,7 @@ class OCRService:
 
         for provider in _ordered_providers(self.providers, prefer_visual=prefer_visual):
             provider_name = getattr(provider, "name", provider.__class__.__name__)
-            if text_candidate and provider_name in {"pix2text", "openai_vision"} and not visual_candidate:
+            if text_candidate and provider_name in {"pix2text", "openai_vision", "minimax_vision"} and not visual_candidate:
                 continue
             self._emit_record(
                 {
@@ -228,8 +228,14 @@ class OCRService:
         return best
 
     def diagnostics(self) -> dict:
+        provider_order = [
+            str(getattr(provider, "name", provider.__class__.__name__))
+            for provider in self.providers
+        ]
         return {
             "kind": "ocr_diagnostics",
+            "active_provider_order": provider_order,
+            "provider_order": provider_order,
             "record_count": len(self.records),
             "records": self.records,
             "quality_flags": _unique(
@@ -276,7 +282,7 @@ def _ordered_providers(
 ) -> list[OCRProvider]:
     if not prefer_visual:
         return providers
-    visual_names = {"pix2text", "openai_vision"}
+    visual_names = {"pix2text", "openai_vision", "minimax_vision"}
     preferred = [
         provider
         for provider in providers

@@ -19,6 +19,9 @@ class Settings:
     openai_api_key: str = ""
     openai_api_key_from_env: bool = False
     openai_model: str = "gpt-4.1-mini"
+    minimax_api_key: str = ""
+    minimax_endpoint: str = "https://api.minimaxi.com/v1/chat/completions"
+    minimax_model: str = "MiniMax-M3"
     storage_dir: Path = Path("data")
     default_target_lang: str = "zh-CN"
     cors_origins: tuple[str, ...] = ("http://localhost:5173", "http://127.0.0.1:5173")
@@ -106,6 +109,23 @@ def load_settings() -> Settings:
         _provider_value(dotenv_config, "OPENAI_MODEL", "gpt-4.1-mini").strip()
         or "gpt-4.1-mini"
     )
+    minimax_api_key = (
+        _provider_value(dotenv_config, "MINIMAX_API_KEY", "").strip()
+        or _provider_value(dotenv_config, "MINIMAX_APIKEY", "").strip()
+        or openai_api_key
+    )
+    minimax_endpoint = (
+        _provider_value(
+            dotenv_config,
+            "MINIMAX_ENDPOINT",
+            "https://api.minimaxi.com/v1/chat/completions",
+        ).strip()
+        or "https://api.minimaxi.com/v1/chat/completions"
+    )
+    minimax_model = (
+        _provider_value(dotenv_config, "MINIMAX_MODEL", "MiniMax-M3").strip()
+        or "MiniMax-M3"
+    )
     layout_planner_model = (
         _provider_value(dotenv_config, "LAYOUT_PLANNER_MODEL", "").strip()
         or openai_model
@@ -126,6 +146,9 @@ def load_settings() -> Settings:
         openai_api_key=openai_api_key,
         openai_api_key_from_env=bool(openai_api_key),
         openai_model=openai_model,
+        minimax_api_key=minimax_api_key,
+        minimax_endpoint=minimax_endpoint,
+        minimax_model=minimax_model,
         storage_dir=Path(os.getenv("STORAGE_DIR", "data")),
         default_target_lang=os.getenv("DEFAULT_TARGET_LANG", "zh-CN"),
         cors_origins=parse_csv(os.getenv("CORS_ORIGINS", default_cors)),

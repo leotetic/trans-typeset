@@ -49,7 +49,10 @@ ALLOWED_TARGET_LANGS=zh-CN,zh-TW,ja-JP,ko-KR,en-US
 MAX_UPLOAD_BYTES=52428800
 TRANSLATION_CONCURRENCY=2
 TRANSLATOR_MAX_ATTEMPTS=2
-OCR_PROVIDER_ORDER=pix2text,deterministic
+MINIMAX_API_KEY=
+MINIMAX_ENDPOINT=https://api.minimaxi.com/v1/chat/completions
+MINIMAX_MODEL=MiniMax-M3
+OCR_PROVIDER_ORDER=minimax_vision,pix2text,deterministic
 OCR_PROVIDER_TIMEOUT_SECONDS=12
 OCR_MAX_VISUAL_CANDIDATES=12
 VITE_DEV_HOST=127.0.0.1
@@ -59,7 +62,7 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 
 当用户说明包含 `GB/T 7713.1` 时，renderer 在 continuous_reflow 模式下执行 GB/T 公式编号：display formula 单独成块、居中排版，编号 `(1)`、`(2)`… 顺序生成并右端对齐；译文自带源编号时保留原编号不重复编号，多 display formula block 跳过编号，均写入对应 quality flag，`renderer-diagnostics` 汇总 `formula_numbered_count`。标题/一级小节默认使用黑体字体栈（SimHei/Heiti SC fallback），正文保持宋体栈。渲染模板已强制开启 HTML autoescape，PDF 抽取文本中的 `<`、`&` 等字符不会再破坏 preview/PDF 结构。
 
-公式识别默认先尝试 Pix2Text 视觉 OCR，再回退 deterministic 文本层路径；Pix2Text 初始化、识别超时或不可用都不会阻塞数字版论文主流程。系统会从文本层识别行内/行间公式，清理 PDF 常见控制字符和符号编码，保守切分自然语言边界，并把公式作为 preserve token 传给 translator。AIP remapped font 这类疑似腐败文本层会降置信度并优先视觉 crop；无法结构化渲染的公式会回退为低调的原文/图片 fallback，并写入非阻塞质量 flag。OpenAI 视觉公式识别可通过 `OCR_PROVIDER_ORDER=openai_vision,pix2text,deterministic` 加入，条件是本地配置了 API key；它不依赖 `AGENT_ENABLE_VISION_ANALYSIS`。
+公式识别可通过 MiniMax-M3 视觉 OCR 优先识别公式 crop，再回退 Pix2Text 和 deterministic 文本层路径；`MINIMAX_API_KEY` 未设置时会复用 `OPENAI_API_KEY`，默认 endpoint 为 `https://api.minimaxi.com/v1/chat/completions`。MiniMax provider 使用严格 JSON prompt，只接受 `latex`、`display_mode`、`confidence` 和 `quality_flags`，拒绝 bbox/page/x/y 等布局字段，输出进入 `DocumentIR.formulas[].latex` 后由 renderer 的 KaTeX 链路渲染。Pix2Text 初始化、识别超时或远端 provider 不可用都不会阻塞数字版论文主流程。系统会从文本层识别行内/行间公式，清理 PDF 常见控制字符和符号编码，保守切分自然语言边界，并把公式作为 preserve token 传给 translator。AIP remapped font 这类疑似腐败文本层会降置信度并优先视觉 crop；无法结构化渲染的公式会回退为低调的原文/图片 fallback，并写入非阻塞质量 flag。OpenAI 视觉公式识别也可通过 `OCR_PROVIDER_ORDER=openai_vision,pix2text,deterministic` 加入，条件是本地配置了 API key；公式视觉 OCR 不依赖 `AGENT_ENABLE_VISION_ANALYSIS`。
 
 ## Troubleshooting
 

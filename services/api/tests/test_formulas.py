@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,10 +14,16 @@ from app.pipeline.formulas import (
     enrich_document_formulas,
 )
 import app.pipeline.formulas.validation as formula_validation
-from app.pipeline.formulas.normalization import latex_from_pdf_text
+from app.pipeline.formulas.normalization import formula_corruption_flags, latex_from_pdf_text
 from app.pipeline.formulas.recognizer import FormulaRecognitionError, _extract_json_object
 from app.pipeline.formulas.validation import validate_formula_latex
-from app.pipeline.ocr import DeterministicOCRProvider, OCRService, Pix2TextOCRProvider
+from app.pipeline.ocr import (
+    DeterministicOCRProvider,
+    MiniMaxVisionOCRProvider,
+    OCRService,
+    Pix2TextOCRProvider,
+)
+from pdf_renderer import RenderDocument, render_to_html
 from pdf_translator_schema import (
     Asset,
     BlockRole,
@@ -234,6 +241,23 @@ def test_formula_validation_handles_empty_stderr_without_crashing(
     )
 
     assert formula_validation._katex_render_error(r"\int f_s\,d\Omega") == "katex_render_failed"
+
+
+def test_formula_ligature_marks_text_layer_corrupt() -> None:
+    flags = formula_corruption_flags("J \\cdot E |ﬄﬄ{zﬄﬄ}")
+
+    assert "formula_text_layer_corrupt" in flags
+    assert "formula_pdf_ligature_corrupt" in flags
+
+
+def test_underbrace_text_layer_artifact_is_removed_from_latex() -> None:
+    latex, flags = latex_from_pdf_text("J · E |{z} 1 = A |ﬄﬄ{zﬄﬄ} 3")
+
+    assert "\ufb04" not in latex
+    assert "ffl" not in latex
+    assert "|{" not in latex
+    assert "formula_pdf_ligature_repaired" in flags
+    assert "formula_underbrace_artifact_repaired" in flags
 
 
 def test_detector_does_not_promote_prose_paragraphs_to_display_formulas() -> None:
@@ -730,7 +754,9 @@ def test_ocr_service_falls_back_to_deterministic_provider() -> None:
 
     assert result.provider == "deterministic"
     assert result.latex == "E = mc^2"
-    assert service.diagnostics()["record_count"] == 1
+    diagnostics = service.diagnostics()
+    assert diagnostics["record_count"] == 1
+    assert diagnostics["active_provider_order"] == ["empty", "deterministic"]
 
 
 def test_ocr_service_times_out_slow_provider_and_falls_back_to_deterministic() -> None:
@@ -780,6 +806,144 @@ def test_pix2text_init_failure_returns_unavailable_result(monkeypatch: pytest.Mo
     assert "ocr_provider_unavailable" in result.quality_flags
 
 
+def test_minimax_provider_sends_adaptive_thinking_payload_and_data_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "formula.png"
+    image_path.write_bytes(b"fake-png")
+    requests: list[dict] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"latex":"\\\\frac{\\\\partial f_s}{\\\\partial t}",'
+                                '"display_mode":"display","confidence":0.92,'
+                                '"quality_flags":["minimax_vision_used"]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, endpoint, *, headers, json):
+            requests.append({"endpoint": endpoint, "headers": headers, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("app.pipeline.ocr.providers.httpx.AsyncClient", FakeClient)
+    provider = MiniMaxVisionOCRProvider(
+        api_key="secret-key",
+        endpoint="https://api.minimaxi.com/v1/chat/completions",
+        model="MiniMax-M3",
+    )
+    candidate = detect_formula_candidates(_document())[1]
+
+    result = asyncio.run(provider.recognize_formula(candidate, image_path=image_path))
+
+    assert result.provider == "minimax_vision"
+    assert result.latex == r"\frac{\partial f_s}{\partial t}"
+    assert result.confidence == pytest.approx(0.92)
+    assert "minimax_vision_used" in result.quality_flags
+    request = requests[0]
+    assert request["headers"]["Authorization"] == "Bearer secret-key"
+    body = request["json"]
+    assert body["model"] == "MiniMax-M3"
+    assert body["thinking"] == {"type": "adaptive"}
+    content = body["messages"][1]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_minimax_provider_rejects_coordinate_bearing_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "formula.png"
+    image_path.write_bytes(b"fake-png")
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"latex":"x=y","display_mode":"display",'
+                                '"confidence":0.9,"quality_flags":[],"bbox":[0,0,1,1]}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return None
+
+        async def post(self, endpoint, *, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.pipeline.ocr.providers.httpx.AsyncClient", FakeClient)
+    provider = MiniMaxVisionOCRProvider(api_key="secret-key")
+    candidate = detect_formula_candidates(_document())[1]
+
+    with pytest.raises(FormulaRecognitionError):
+        asyncio.run(provider.recognize_formula(candidate, image_path=image_path))
+
+
+def test_ocr_service_falls_back_when_minimax_provider_fails(tmp_path: Path) -> None:
+    image_path = tmp_path / "formula_asset.png"
+    image_path.write_bytes(b"fake-image")
+    candidate = detect_formula_candidates(_document())[1]
+    candidate = replace(candidate, image_path=str(image_path))
+
+    class FailingMiniMaxProvider:
+        name = "minimax_vision"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            raise RuntimeError("minimax unavailable")
+
+    service = OCRService(
+        providers=[FailingMiniMaxProvider(), DeterministicOCRProvider()],
+        asset_base_path=tmp_path,
+    )
+
+    result = asyncio.run(service.recognize_formula(candidate, prefer_visual=True))
+
+    assert result.provider == "deterministic"
+    diagnostics = service.diagnostics()
+    assert diagnostics["active_provider_order"] == ["minimax_vision", "deterministic"]
+    assert diagnostics["records"][0]["attempts"][0]["provider"] == "minimax_vision"
+    assert diagnostics["records"][0]["attempts"][0]["status"] == "failed"
+
+
 def test_formula_recognition_result_rejects_model_coordinates() -> None:
     with pytest.raises(ValidationError):
         FormulaRecognitionResult.model_validate(
@@ -812,6 +976,103 @@ def test_formula_service_updates_document_ir_and_diagnostics(tmp_path) -> None:
     assert "formula_visual_mock_rejected" in result.diagnostics["quality_flags"]
     assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
     assert result.diagnostics["recognizer_type"] == "deterministic"
+
+
+def test_formula_service_reports_active_ocr_provider_order(tmp_path) -> None:
+    class EmptyPix2TextProvider:
+        name = "pix2text"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            return OCRRecognitionResult(
+                region_kind="formula",
+                provider="pix2text",
+                confidence=0,
+                quality_flags=["empty_provider"],
+            )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            _document(),
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            ocr_service=OCRService(
+                providers=[EmptyPix2TextProvider(), DeterministicOCRProvider()]
+            ),
+        )
+    )
+
+    assert result.diagnostics["ocr"]["active_provider_order"] == [
+        "pix2text",
+        "deterministic",
+    ]
+    assert result.diagnostics["ocr_provider"]["active_provider_order"] == [
+        "pix2text",
+        "deterministic",
+    ]
+    assert result.diagnostics["ocr_provider"]["active_provider_order_includes_pix2text"] is True
+
+
+def test_formula_service_accepts_minimax_latex_for_renderer(tmp_path) -> None:
+    (tmp_path / "formula_asset.png").write_bytes(b"fake-image")
+    block = DocumentBlock(
+        block_id="b_minimax_display",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+        reading_order=0,
+        source_text=r"@fs=@t þ f 0 s=k2 (4)",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+                assets=[
+                    Asset(
+                        asset_id="formula_asset",
+                        page_id="p1",
+                        kind="formula",
+                        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+                        path="/api/documents/doc_1/assets/formula_asset.png",
+                    )
+                ],
+            )
+        ],
+    )
+
+    class MiniMaxProvider:
+        name = "minimax_vision"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            return OCRRecognitionResult(
+                text=r"\frac{\partial f_s}{\partial t} + \frac{f'_s}{k^2}",
+                latex=r"\frac{\partial f_s}{\partial t} + \frac{f'_s}{k^2}",
+                region_kind="formula",
+                provider="minimax_vision",
+                confidence=0.94,
+                quality_flags=["minimax_vision_used"],
+            )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            recognizer=DeterministicFormulaRecognizer(),
+            ocr_service=OCRService(providers=[MiniMaxProvider(), DeterministicOCRProvider()]),
+            visual_formula_recognition_enabled=True,
+        )
+    )
+
+    assert len(result.formulas) == 1
+    assert result.formulas[0].ocr_provider == "minimax_vision"
+    assert r"\frac{\partial f_s}{\partial t}" in result.formulas[0].latex
+    assert result.document.pages[0].blocks[0].source_text.startswith("{{formula:")
+    html = render_to_html(RenderDocument.from_ir_and_plans(result.document, [], "zh-CN"))
+    assert 'data-latex="\\frac{\\partial f_s}{\\partial t} + \\frac{f&#x27;_s}{k^2}"' in html
+    assert "formula-ir" in html
 
 
 def test_formula_service_migrates_legacy_display_formula_cluster(tmp_path) -> None:

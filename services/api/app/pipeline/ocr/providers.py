@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import mimetypes
 from pathlib import Path
 from typing import Protocol
 
+import httpx
+from pydantic import ValidationError
+from pdf_translator_schema import FormulaRecognitionResult
 from pdf_translator_schema.models import OCRRecognitionResult
 
 from ..formulas.detector import FormulaCandidate
 from ..formulas.normalization import formula_corruption_flags, latex_from_pdf_text
-from ..formulas.recognizer import OpenAIFormulaRecognizer
+from ..formulas.recognizer import (
+    FormulaRecognitionError,
+    OpenAIFormulaRecognizer,
+    _extract_json_object,
+    _response_content,
+)
 from ..formulas.validation import validate_formula_latex
 
 
@@ -153,6 +163,117 @@ class OpenAIVisionOCRProvider:
         )
 
 
+class MiniMaxVisionOCRProvider:
+    name = "minimax_vision"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        endpoint: str = "https://api.minimaxi.com/v1/chat/completions",
+        model: str = "MiniMax-M3",
+        timeout_seconds: float = 60.0,
+        max_completion_tokens: int = 700,
+    ) -> None:
+        self.api_key = api_key.strip()
+        self.endpoint = endpoint.strip() or "https://api.minimaxi.com/v1/chat/completions"
+        self.model = model.strip() or "MiniMax-M3"
+        self.timeout_seconds = timeout_seconds
+        self.max_completion_tokens = max_completion_tokens
+
+    async def recognize_formula(
+        self,
+        candidate: FormulaCandidate,
+        *,
+        image_path: Path | None = None,
+    ) -> OCRRecognitionResult:
+        if not self.api_key:
+            return OCRRecognitionResult(
+                region_kind="formula",
+                provider=self.name,
+                confidence=0.0,
+                quality_flags=["minimax_api_key_missing", "ocr_provider_unavailable"],
+            )
+        if image_path is None or not image_path.exists():
+            return OCRRecognitionResult(
+                text=candidate.source_text,
+                region_kind="formula",
+                provider=self.name,
+                confidence=0.0,
+                quality_flags=["ocr_visual_image_missing", "ocr_provider_unavailable"],
+            )
+
+        payload = self._build_payload(candidate, image_path)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+            response = await client.post(
+                self.endpoint,
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+
+        content = _response_content(response.json())
+        raw = _extract_json_object(content)
+        try:
+            recognized = FormulaRecognitionResult.model_validate(raw)
+        except ValidationError as exc:
+            raise FormulaRecognitionError(
+                f"MiniMax formula recognition response failed schema validation: {exc}"
+            ) from exc
+
+        latex, repair_flags = _strip_formula_delimiters(recognized.latex)
+        validation = validate_formula_latex(
+            latex,
+            source_text=candidate.source_text,
+            display_mode=recognized.display_mode,
+        )
+        quality_flags = _unique(
+            [
+                *recognized.quality_flags,
+                *repair_flags,
+                *validation.quality_flags,
+            ]
+        )
+        return OCRRecognitionResult(
+            text=latex,
+            latex=latex,
+            region_kind="formula",
+            provider=self.name,
+            confidence=recognized.confidence,
+            quality_flags=quality_flags,
+        )
+
+    def _build_payload(self, candidate: FormulaCandidate, image_path: Path) -> dict:
+        return {
+            "model": self.model,
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": _MINIMAX_FORMULA_SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": _minimax_formula_user_prompt(candidate),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": _image_data_url(image_path)},
+                        },
+                    ],
+                },
+            ],
+            "max_completion_tokens": self.max_completion_tokens,
+        }
+
+
 class DeterministicOCRProvider:
     name = "deterministic"
 
@@ -243,6 +364,48 @@ def _coerce_confidence(value: object) -> float:
     except (TypeError, ValueError):
         return 0.86
     return max(0.0, min(1.0, confidence))
+
+
+_MINIMAX_FORMULA_SYSTEM_PROMPT = (
+    "You are a formula OCR engine for academic papers. Recognize exactly one formula "
+    "from the provided image and return one strict JSON object only. Do not return "
+    "Markdown, prose, code fences, page information, coordinates, bbox, x/y, width, "
+    "height, top, right, bottom, or left fields. The JSON object must contain exactly "
+    "these keys: latex, display_mode, confidence, quality_flags. latex must be "
+    "KaTeX-compatible LaTeX without surrounding $, $$, \\(...\\), or \\[...\\]. "
+    "Preserve subscripts, superscripts, fractions, integrals, sums, Greek letters, "
+    "matrices, bracket structure, and operators. Do not translate variable names and "
+    "do not include surrounding prose. If an independent equation number appears at "
+    "the right edge, encode it as \\tag{n} in latex."
+)
+
+
+def _minimax_formula_user_prompt(candidate: FormulaCandidate) -> str:
+    return (
+        "Recognize this academic formula image as LaTeX. "
+        f"Expected display_mode: {candidate.display_mode}. "
+        "Use display_mode \"display\" for a standalone equation and \"inline\" only "
+        "for an inline math fragment. Return JSON only. "
+        f"Nearby extracted text, which may be noisy and incomplete: {candidate.source_text[:500]}"
+    )
+
+
+def _image_data_url(path: Path) -> str:
+    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def _strip_formula_delimiters(latex: str) -> tuple[str, list[str]]:
+    stripped = latex.strip()
+    repairs: list[str] = []
+    pairs = (("$$", "$$"), ("$", "$"), (r"\(", r"\)"), (r"\[", r"\]"))
+    for start, end in pairs:
+        if stripped.startswith(start) and stripped.endswith(end) and len(stripped) > len(start) + len(end):
+            stripped = stripped[len(start) : -len(end)].strip()
+            repairs.append("formula_delimiter_repaired")
+            break
+    return stripped, repairs
 
 
 def _unique(values: list[str]) -> list[str]:

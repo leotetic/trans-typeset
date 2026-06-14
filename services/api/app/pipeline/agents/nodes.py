@@ -1154,6 +1154,8 @@ def _runtime_config_for_state(runtime_config: dict[str, Any]) -> dict[str, Any]:
         result["render_defaults"] = render_defaults.model_dump(mode="json")
     if result.get("openai_api_key"):
         result["openai_api_key"] = "***"
+    if result.get("minimax_api_key"):
+        result["minimax_api_key"] = "***"
     return result
 
 

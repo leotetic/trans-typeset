@@ -104,6 +104,17 @@ def effective_runtime_config(storage: Storage) -> dict:
             persisted.get("vision_analyzer_model", settings.vision_analyzer_model)
         ).strip()
         or settings.openai_model,
+        "minimax_api_key": str(
+            persisted.get("minimax_api_key", settings.minimax_api_key)
+        ).strip(),
+        "minimax_endpoint": str(
+            persisted.get("minimax_endpoint", settings.minimax_endpoint)
+        ).strip()
+        or settings.minimax_endpoint,
+        "minimax_model": str(
+            persisted.get("minimax_model", settings.minimax_model)
+        ).strip()
+        or settings.minimax_model,
     }
     if settings.openai_api_key_from_env:
         provider_config = {
@@ -112,7 +123,12 @@ def effective_runtime_config(storage: Storage) -> dict:
             "openai_model": settings.openai_model,
             "layout_planner_model": settings.layout_planner_model or settings.openai_model,
             "vision_analyzer_model": settings.vision_analyzer_model or settings.openai_model,
+            "minimax_api_key": settings.minimax_api_key or settings.openai_api_key,
+            "minimax_endpoint": settings.minimax_endpoint,
+            "minimax_model": settings.minimax_model,
         }
+    if not provider_config["minimax_api_key"]:
+        provider_config["minimax_api_key"] = provider_config["openai_api_key"]
 
     has_model_key = bool(provider_config["openai_api_key"])
     configured_concurrency = int(

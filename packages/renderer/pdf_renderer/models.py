@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import ceil
 from html import escape, unescape
 from functools import lru_cache
@@ -68,6 +68,30 @@ _FORMULA_CORRUPTION_FALLBACK_FLAGS = {
     "formula_slash_glyph_suspect",
     "formula_prime_glyph_suspect",
 }
+_REFLOW_HEIGHT_SAFETY_PT = 0.6
+_REFLOW_FORMULA_HEIGHT_SAFETY_EM = 0.2
+_FIGURE_GROUP_SPACE_BEFORE_PT = 8.0
+_FIGURE_GROUP_SPACE_BETWEEN_PT = 4.0
+_FIGURE_GROUP_SPACE_AFTER_PT = 8.0
+_FIGURE_CAPTION_MAX_DISTANCE_PT = 90.0
+
+
+@dataclass(frozen=True)
+class _PreparedReflowBlock:
+    block: DocumentBlock
+    text: str
+    render_intent: str
+    flags: list[str]
+    style: RoleStyleDefaults
+    html: str | None
+    formula_number: str | None
+
+
+@dataclass(frozen=True)
+class _ReflowFigureGroup:
+    asset: Asset
+    caption: DocumentBlock | None
+    order: tuple[float, float, float, int]
 
 
 def _bbox_width(bbox: BoundingBox) -> float:
@@ -805,7 +829,7 @@ def _formula_rendered_or_heuristic_height(latex: str, font_size_pt: float) -> fl
     rendered = _katex_html(render_latex, display=True) if render_latex.strip() else None
     rendered_height = _height_from_katex_html(rendered, font_size_pt) if rendered else None
     if rendered_height is not None:
-        return rendered_height + font_size_pt * 0.15
+        return max(rendered_height, _formula_latex_heuristic_height(render_latex, font_size_pt))
     return _formula_latex_heuristic_height(render_latex, font_size_pt)
 
 
@@ -813,11 +837,14 @@ def _height_from_katex_html(html: str, font_size_pt: float) -> float | None:
     max_em = 0.0
     for match in _KATEX_STRUT_STYLE_PATTERN.finditer(html):
         height_em = 0.0
+        depth_em = 0.0
         for value_match in _CSS_EM_VALUE_PATTERN.finditer(match.group("style")):
             value = float(value_match.group("value"))
             if value_match.group("name").lower() == "height":
                 height_em = max(height_em, value)
-        max_em = max(max_em, height_em)
+            elif value_match.group("name").lower() == "vertical-align":
+                depth_em = max(depth_em, abs(value))
+        max_em = max(max_em, height_em + depth_em)
     if max_em <= 0:
         return None
     return max_em * font_size_pt
@@ -1197,6 +1224,8 @@ class RenderBlock:
     line_height: float | None = None
     font_stack: list[str] | None = None
     formula_number: str | None = None
+    figure_group_id: str | None = None
+    caption_for_asset_id: str | None = None
     quality_flags: list[str] = field(default_factory=list)
 
 
@@ -1207,6 +1236,8 @@ class RenderAsset:
     bbox: BoundingBox
     path: str | None = None
     alt_text: str | None = None
+    figure_group_id: str | None = None
+    caption_block_id: str | None = None
     quality_flags: list[str] = field(default_factory=list)
 
 
@@ -1290,6 +1321,45 @@ class RenderDocument:
                                 "overlap_ratio": round(overlap_ratio, 4),
                             }
                         )
+        for trace in self.layout_trace.get("blocks", []):
+            flags = trace.get("quality_flags", [])
+            if "overflow_clipped" in flags:
+                issues.append(
+                    {
+                        "kind": "overflow_clipped",
+                        "page_id": trace.get("output_page_id"),
+                        "item_id": trace.get("render_block_id"),
+                        "item_type": "block",
+                        "required_height_pt": trace.get("required_height_pt"),
+                        "allocated_height_pt": trace.get("allocated_height_pt"),
+                    }
+                )
+        for group in self.layout_trace.get("figure_groups", []):
+            flags = group.get("quality_flags", [])
+            if "figure_group_separated" in flags:
+                issues.append(
+                    {
+                        "kind": "figure_group_separated",
+                        "page_id": group.get("output_page_id"),
+                        "item_id": group.get("asset_id"),
+                        "item_type": "asset",
+                        "other_id": group.get("caption_render_block_id")
+                        or group.get("caption_block_id"),
+                        "other_type": "block",
+                    }
+                )
+            if "asset_caption_mismatch" in flags:
+                issues.append(
+                    {
+                        "kind": "asset_caption_mismatch",
+                        "page_id": group.get("output_page_id"),
+                        "item_id": group.get("asset_id"),
+                        "item_type": "asset",
+                        "other_id": group.get("caption_render_block_id")
+                        or group.get("caption_block_id"),
+                        "other_type": "block",
+                    }
+                )
         return issues
 
     def diagnostics(self) -> dict[str, Any]:
@@ -1394,6 +1464,18 @@ class RenderDocument:
                     "flagged_assets": asset_flags,
                 }
             )
+        for group in self.layout_trace.get("figure_groups", []):
+            for flag in group.get("quality_flags", []):
+                if flag in {
+                    "figure_group_separated",
+                    "asset_caption_mismatch",
+                    "asset_caption_missing",
+                    "figure_group_split",
+                }:
+                    quality_flag_counts[flag] = quality_flag_counts.get(flag, 0) + 1
+        for artifact in self.layout_trace.get("suppressed_artifacts", []):
+            for flag in artifact.get("quality_flags", []):
+                quality_flag_counts[flag] = quality_flag_counts.get(flag, 0) + 1
         return {
             "doc_id": self.doc_id,
             "target_lang": self.target_lang,
@@ -1766,19 +1848,11 @@ def _from_ir_and_plans_continuous_reflow(
         cursor_y = content_y0
 
     ordered_pages = sorted(document.pages, key=lambda item: item.page_id)
-    ordered_items: list[tuple[str, DocumentBlock | Asset]] = []
+    figure_group_traces: list[dict[str, Any]] = []
+    ordered_items: list[tuple[str, DocumentBlock | Asset | _ReflowFigureGroup]] = []
     for page in ordered_pages:
         source_page_ids.add(page.page_id)
-        page_items: list[tuple[float, float, float, str, DocumentBlock | Asset]] = [
-            (
-                float(block.reading_order),
-                block.bbox.y0,
-                block.bbox.x0,
-                "block",
-                block,
-            )
-            for block in page.blocks
-        ]
+        renderable_assets: list[Asset] = []
         for asset in page.assets:
             usage = asset_usages.get(asset.asset_id, "preserve")
             suppression_reason = _reflow_asset_suppression_reason(asset)
@@ -1800,9 +1874,10 @@ def _from_ir_and_plans_continuous_reflow(
                         "asset_id": asset.asset_id,
                         "source_page_id": asset.page_id,
                         "reason": suppression_reason,
-                        "quality_flags": ["formula_asset_suppressed"]
-                        if asset.kind == "formula"
-                        else ["asset_suppressed_placeholder"],
+                        "quality_flags": _reflow_suppressed_asset_quality_flags(
+                            asset,
+                            suppression_reason,
+                        ),
                     }
                 )
             elif not asset.path:
@@ -1814,18 +1889,190 @@ def _from_ir_and_plans_continuous_reflow(
                     }
                 )
             else:
-                order = _asset_reading_order(page.blocks, asset)
-                page_items.append((order, asset.bbox.y0, asset.bbox.x0, "asset", asset))
+                renderable_assets.append(asset)
+
+        figure_groups = _build_reflow_figure_groups(page.blocks, renderable_assets)
+        grouped_asset_ids = {group.asset.asset_id for group in figure_groups}
+        grouped_caption_ids = {
+            group.caption.block_id
+            for group in figure_groups
+            if group.caption is not None
+        }
+        page_items: list[
+            tuple[tuple[float, float, float, int], str, DocumentBlock | Asset | _ReflowFigureGroup]
+        ] = []
+        for block in page.blocks:
+            if block.block_id in grouped_caption_ids:
+                continue
+            page_items.append(
+                (
+                    (
+                        float(block.reading_order),
+                        block.bbox.y0,
+                        block.bbox.x0,
+                        0,
+                    ),
+                    "block",
+                    block,
+                )
+            )
+        for group in figure_groups:
+            page_items.append((group.order, "figure_group", group))
+        for asset in renderable_assets:
+            if asset.asset_id in grouped_asset_ids:
+                continue
+            page_items.append((_reflow_asset_order(page.blocks, asset), "asset", asset))
         ordered_items.extend(
             (kind, item)
-            for _, _, _, kind, item in sorted(
+            for _, kind, item in sorted(
                 page_items,
-                key=lambda entry: (entry[0], entry[1], entry[2], entry[3]),
+                key=lambda entry: (entry[0], entry[1]),
             )
         )
     ordered_items = _merge_formula_like_ordered_items(ordered_items, document, translations)
 
     for kind, item in ordered_items:
+        if kind == "figure_group":
+            group = item
+            if not isinstance(group, _ReflowFigureGroup):
+                continue
+            asset = group.asset
+            caption = group.caption
+            figure_group_id = f"figure-group-{asset.asset_id}"
+            _, asset_height = _reflow_asset_dimensions(asset, page_size, content_width)
+            caption_prepared: _PreparedReflowBlock | None = None
+            caption_required_height = 0.0
+            if caption is not None and not _should_suppress_reflow_block(caption):
+                caption_prepared, document, formula_counter = _prepare_reflow_block(
+                    document=document,
+                    block=caption,
+                    plan=translations.get(caption.block_id),
+                    layout_intent=layout_intents.get(caption.block_id),
+                    defaults=defaults,
+                    content_width=content_width,
+                    formula_counter=formula_counter,
+                )
+                if caption_prepared.text.strip():
+                    caption_required_height = _reflow_required_height(
+                        caption_prepared.text,
+                        content_width,
+                        caption_prepared.style,
+                        document=document,
+                        source_block=caption,
+                    )
+                else:
+                    caption_prepared = None
+
+            group_required_height = (
+                _FIGURE_GROUP_SPACE_BEFORE_PT
+                + asset_height
+                + (
+                    _FIGURE_GROUP_SPACE_BETWEEN_PT
+                    + (caption_prepared.style.space_before_pt if caption_prepared else 0.0)
+                    + caption_required_height
+                    + (caption_prepared.style.space_after_pt if caption_prepared else 0.0)
+                    if caption_prepared
+                    else _FIGURE_GROUP_SPACE_AFTER_PT
+                )
+            )
+            group_too_tall = group_required_height > (content_bottom - content_y0)
+            if (
+                current_blocks or current_assets
+            ) and cursor_y + group_required_height > content_bottom:
+                finish_page()
+
+            asset_flags = ["reflow_asset", "figure_grouped"]
+            if caption_prepared is not None:
+                asset_flags.append("figure_caption_grouped")
+            if group_too_tall:
+                asset_flags.append("figure_group_split")
+            asset_output_page_id = f"r{page_index:04d}"
+            cursor_y = _append_reflow_asset(
+                asset=asset,
+                page_size=page_size,
+                content_x0=content_x0,
+                content_y0=content_y0,
+                content_width=content_width,
+                content_bottom=content_bottom,
+                cursor_y=cursor_y,
+                current_assets=current_assets,
+                current_page_id=lambda: f"r{page_index:04d}",
+                asset_traces=asset_traces,
+                quality_flags=asset_flags,
+                figure_group_id=figure_group_id,
+                caption_block_id=caption.block_id if caption else None,
+                space_before=_FIGURE_GROUP_SPACE_BEFORE_PT,
+                space_after=_FIGURE_GROUP_SPACE_BETWEEN_PT,
+            )
+
+            caption_output_page_id: str | None = None
+            caption_render_block_id: str | None = None
+            if caption_prepared is not None:
+                if (
+                    current_blocks or current_assets
+                ) and cursor_y + caption_prepared.style.space_before_pt + caption_required_height > content_bottom:
+                    if not group_too_tall:
+                        finish_page()
+                    else:
+                        caption_prepared = replace(
+                            caption_prepared,
+                            flags=_unique_flags(
+                                [*caption_prepared.flags, "figure_group_split"]
+                            ),
+                        )
+                cursor_y += caption_prepared.style.space_before_pt
+                if cursor_y + caption_required_height > content_bottom:
+                    caption_prepared = replace(
+                        caption_prepared,
+                        flags=_unique_flags(
+                            [*caption_prepared.flags, "overflow_clipped"]
+                        ),
+                    )
+                caption_block, caption_trace, cursor_y = _render_reflow_fragment(
+                    prepared=caption_prepared,
+                    fragment=caption_prepared.text,
+                    fragment_index=1,
+                    fragment_count=1,
+                    fragment_html=caption_prepared.html,
+                    document=document,
+                    content_width=content_width,
+                    content_x0=content_x0,
+                    cursor_y=cursor_y,
+                    page_index=page_index,
+                    figure_group_id=figure_group_id,
+                    caption_for_asset_id=asset.asset_id,
+                )
+                current_blocks.append(caption_block)
+                rendered_source_ids.add(caption.block_id)
+                block_traces.append(caption_trace)
+                caption_output_page_id = caption_trace["output_page_id"]
+                caption_render_block_id = caption_block.block_id
+
+            figure_group_quality_flags = ["figure_grouped"]
+            if caption is None:
+                figure_group_quality_flags.append("asset_caption_missing")
+            if caption_output_page_id and caption_output_page_id != asset_output_page_id:
+                figure_group_quality_flags.extend(
+                    ["figure_group_separated", "asset_caption_mismatch"]
+                )
+            if group_too_tall:
+                figure_group_quality_flags.append("figure_group_split")
+            figure_group_traces.append(
+                {
+                    "figure_group_id": figure_group_id,
+                    "asset_id": asset.asset_id,
+                    "caption_block_id": caption.block_id if caption else None,
+                    "caption_render_block_id": caption_render_block_id,
+                    "source_page_id": asset.page_id,
+                    "output_page_id": asset_output_page_id,
+                    "caption_output_page_id": caption_output_page_id,
+                    "order_index": len(figure_group_traces),
+                    "required_height_pt": round(group_required_height, 4),
+                    "quality_flags": _unique_flags(figure_group_quality_flags),
+                }
+            )
+            continue
+
         if kind == "asset":
             asset = item
             if not isinstance(asset, Asset):
@@ -1867,8 +2114,16 @@ def _from_ir_and_plans_continuous_reflow(
 
         plan = translations.get(block.block_id)
         layout_intent = layout_intents.get(block.block_id)
-        text, render_intent, flags = _translated_text_for_block(block, plan, layout_intent)
-        if not text.strip():
+        prepared, document, formula_counter = _prepare_reflow_block(
+            document=document,
+            block=block,
+            plan=plan,
+            layout_intent=layout_intent,
+            defaults=defaults,
+            content_width=content_width,
+            formula_counter=formula_counter,
+        )
+        if not prepared.text.strip():
             suppressed_artifacts.append(
                 {
                     "kind": "empty_text_block_suppressed",
@@ -1878,100 +2133,46 @@ def _from_ir_and_plans_continuous_reflow(
             )
             continue
 
-        style = _style_for_role(defaults, block.role)
-        if _is_formula_like_reflow_block(block, text, plan):
-            style = _formula_like_style(style)
-            flags.append("formula_like_block")
-        if render_intent == "compact":
-            style = style.model_copy(
-                update={
-                    "font_size_pt": max(9.0, style.font_size_pt * 0.9),
-                    "line_height": min(style.line_height, 1.35),
-                }
-            )
-            flags.append("compact_reflow")
-        if layout_intent is not None:
-            flags.extend(layout_intent.quality_flags)
-        original_height = max(0.0, block.bbox.y1 - block.bbox.y0)
-        estimated_display_count = _display_formula_count(text, document, block)
-        formula_number: str | None = None
-        if estimated_display_count >= 1:
-            source_formula_number = _display_formula_source_number(text, document, block)
-            if source_formula_number is not None:
-                document = _document_with_stripped_formula_source_numbers(
-                    document,
-                    text,
-                    block,
-                    source_formula_number,
-                )
-                text = _strip_source_equation_number_from_text(text)
-                formula_number = source_formula_number or None
-                formula_counter = _formula_counter_after_preserved_number(
-                    formula_counter,
-                    formula_number,
-                )
-                flags.append("formula_number_source_preserved")
-            elif defaults.formula_numbering == "parenthesized":
-                if estimated_display_count > 1:
-                    flags.append("formula_number_skipped_multi_display")
-                else:
-                    formula_counter += 1
-                    formula_number = f"({formula_counter})"
-                    flags.append("gbt_formula_numbered")
-
-        html, formula_flags = _formula_html_for_text(
-            text,
-            document,
-            block,
-        )
-        flags.extend(formula_flags)
-
         if block.role == BlockRole.REFERENCE and current_blocks:
             finish_page()
 
-        estimated_height = _estimated_reflow_height(
-            text,
+        full_required_height = _reflow_required_height(
+            prepared.text,
             content_width,
-            style,
+            prepared.style,
             document=document,
             source_block=block,
         )
-        if estimated_height > original_height + _LAYOUT_EPSILON_PT:
-            flags.append("formula_height_adjusted")
-        if estimated_display_count > 1:
-            flags.append("formula_multi_display_block")
-        if estimated_height > max(original_height, style.font_size_pt * style.line_height) * 1.25:
-            flags.append("formula_height_risk")
         keep_with_next = block.role in {BlockRole.TITLE, BlockRole.HEADING}
-        if keep_with_next and current_blocks and cursor_y + estimated_height + 36 > content_bottom:
+        if keep_with_next and current_blocks and cursor_y + full_required_height + 36 > content_bottom:
             finish_page()
 
-        first_fragment_height = content_bottom - cursor_y - style.space_before_pt
+        first_fragment_height = content_bottom - cursor_y - prepared.style.space_before_pt
         if (
             current_blocks
             and first_fragment_height
-            < style.font_size_pt * style.line_height * _MIN_FINAL_FRAGMENT_LINES
+            < prepared.style.font_size_pt * prepared.style.line_height * _MIN_FINAL_FRAGMENT_LINES
         ):
             finish_page()
-            first_fragment_height = content_bottom - cursor_y - style.space_before_pt
-        if html is not None and not _should_safe_split_formula_reflow_text(text, block):
-            fragments = [text]
-        elif _should_safe_split_formula_reflow_text(text, block):
+            first_fragment_height = content_bottom - cursor_y - prepared.style.space_before_pt
+        if prepared.html is not None and not _should_safe_split_formula_reflow_text(prepared.text, block):
+            fragments = [prepared.text]
+        elif _should_safe_split_formula_reflow_text(prepared.text, block):
             fragments = _split_formula_reflow_text(
-                text,
+                prepared.text,
                 content_width,
                 content_bottom - content_y0,
-                style,
+                prepared.style,
                 first_max_height_pt=first_fragment_height if current_blocks else None,
                 document=document,
                 source_block=block,
             )
         else:
             fragments = _split_reflow_text(
-                text,
+                prepared.text,
                 content_width,
                 content_bottom - content_y0,
-                style,
+                prepared.style,
                 first_max_height_pt=first_fragment_height if current_blocks else None,
                 document=document,
                 source_block=block,
@@ -1979,92 +2180,47 @@ def _from_ir_and_plans_continuous_reflow(
         fragment_count = len(fragments)
         for fragment_index, fragment in enumerate(fragments, start=1):
             fragment_html = (
-                html
+                prepared.html
                 if fragment_count == 1
                 else _formula_html_for_text(fragment, document, block)[0]
             )
-            fragment_height = _estimated_reflow_height(
+            fragment_required_height = _reflow_required_height(
                 fragment,
                 content_width,
-                style,
+                prepared.style,
                 document=document,
                 source_block=block,
             )
-            if current_blocks and cursor_y + style.space_before_pt + fragment_height > content_bottom:
+            if (
+                current_blocks or current_assets
+            ) and cursor_y + prepared.style.space_before_pt + fragment_required_height > content_bottom:
                 finish_page()
 
-            cursor_y += style.space_before_pt
-            if cursor_y + fragment_height > content_bottom and current_blocks:
-                finish_page()
-                cursor_y += style.space_before_pt
-
-            bbox = BoundingBox(
-                x0=content_x0,
-                y0=cursor_y,
-                x1=content_x0 + content_width,
-                y1=min(content_bottom, cursor_y + fragment_height),
+            cursor_y += prepared.style.space_before_pt
+            if cursor_y + fragment_required_height > content_bottom:
+                if current_blocks or current_assets:
+                    finish_page()
+                    cursor_y += prepared.style.space_before_pt
+                if cursor_y + fragment_required_height > content_bottom:
+                    prepared = replace(
+                        prepared,
+                        flags=_unique_flags([*prepared.flags, "overflow_clipped"]),
+                    )
+            render_block, trace, cursor_y = _render_reflow_fragment(
+                prepared=prepared,
+                fragment=fragment,
+                fragment_index=fragment_index,
+                fragment_count=fragment_count,
+                fragment_html=fragment_html,
+                document=document,
+                content_width=content_width,
+                content_x0=content_x0,
+                cursor_y=cursor_y,
+                page_index=page_index,
             )
-            block_flags = list(flags)
-            if getattr(block, "_formula_reflow_clustered", False):
-                block_flags.extend(["formula_reflow_clustered", "formula_like_compacted"])
-            if fragment_count > 1:
-                block_flags.append("reflow_split")
-                if fragment_index > 1:
-                    block_flags.append("reflow_continued")
-            render_block_id = (
-                block.block_id
-                if fragment_count == 1
-                else f"{block.block_id}__reflow_{fragment_index:02d}"
-            )
-            current_blocks.append(
-                RenderBlock(
-                    block_id=render_block_id,
-                    role=block.role,
-                    bbox=bbox,
-                    text=fragment,
-                    style_seed=block.style_seed,
-                    font_size_pt=style.font_size_pt,
-                    font_scale=style.font_size_pt / block.style_seed.font_size
-                    if block.style_seed.font_size
-                    else 1.0,
-                    html=fragment_html,
-                    render_intent=render_intent,
-                    text_align=style.alignment,
-                    font_weight=700 if style.bold else 400,
-                    font_style="italic" if style.italic else "normal",
-                    first_line_indent_em=style.first_line_indent_em
-                    if fragment_index == 1
-                    else 0.0,
-                    line_height=style.line_height,
-                    font_stack=style.font_stack,
-                    formula_number=formula_number if fragment_index == 1 else None,
-                    quality_flags=_unique_flags(block_flags),
-                )
-            )
+            current_blocks.append(render_block)
             rendered_source_ids.add(block.block_id)
-            block_traces.append(
-                {
-                    "source_block_id": block.block_id,
-                    "render_block_id": render_block_id,
-                    "source_page_id": block.page_id,
-                    "output_page_id": f"r{page_index:04d}",
-                    "role": block.role.value,
-                    "translated_chars": len(fragment),
-                    "estimated_lines": _estimated_formula_aware_line_count(
-                        fragment,
-                        content_width,
-                        style.font_size_pt,
-                        style.line_height,
-                        document=document,
-                        block=block,
-                    ),
-                    "bbox": bbox.model_dump(),
-                    "fragment_index": fragment_index,
-                    "fragment_count": fragment_count,
-                    "quality_flags": _unique_flags(block_flags),
-                }
-            )
-            cursor_y = bbox.y1 + style.space_after_pt
+            block_traces.append(trace)
 
     if current_blocks or current_assets or not pages:
         finish_page()
@@ -2077,6 +2233,7 @@ def _from_ir_and_plans_continuous_reflow(
         rendered_source_ids=rendered_source_ids,
         block_traces=block_traces,
         asset_traces=asset_traces,
+        figure_group_traces=figure_group_traces,
         suppressed_artifacts=suppressed_artifacts,
     )
     return RenderDocument(
@@ -2117,6 +2274,222 @@ def _translated_text_for_block(
         if plan.role != block.role:
             quality_flags.append("role_mismatch")
     return text, render_intent, quality_flags
+
+
+def _prepare_reflow_block(
+    *,
+    document: DocumentIR,
+    block: DocumentBlock,
+    plan: Any,
+    layout_intent: Any,
+    defaults: RenderDefaults,
+    content_width: float,
+    formula_counter: int,
+) -> tuple[_PreparedReflowBlock, DocumentIR, int]:
+    text, render_intent, flags = _translated_text_for_block(block, plan, layout_intent)
+    style = _style_for_role(defaults, block.role)
+    is_formula_like = _is_formula_like_reflow_block(block, text, plan)
+    if is_formula_like:
+        style = _formula_like_style(style)
+        flags.append("formula_like_block")
+    if render_intent == "compact":
+        style = style.model_copy(
+            update={
+                "font_size_pt": max(9.0, style.font_size_pt * 0.9),
+                "line_height": min(style.line_height, 1.35),
+            }
+        )
+        flags.append("compact_reflow")
+    if layout_intent is not None:
+        flags.extend(layout_intent.quality_flags)
+
+    original_height = max(0.0, block.bbox.y1 - block.bbox.y0)
+    estimated_display_count = _display_formula_count(text, document, block)
+    formula_number: str | None = None
+    if estimated_display_count >= 1:
+        source_formula_number = _display_formula_source_number(text, document, block)
+        if source_formula_number is not None:
+            document = _document_with_stripped_formula_source_numbers(
+                document,
+                text,
+                block,
+                source_formula_number,
+            )
+            text = _strip_source_equation_number_from_text(text)
+            formula_number = source_formula_number or None
+            formula_counter = _formula_counter_after_preserved_number(
+                formula_counter,
+                formula_number,
+            )
+            flags.append("formula_number_source_preserved")
+        elif defaults.formula_numbering == "parenthesized":
+            if estimated_display_count > 1:
+                flags.append("formula_number_skipped_multi_display")
+            else:
+                formula_counter += 1
+                formula_number = f"({formula_counter})"
+                flags.append("gbt_formula_numbered")
+
+    html, formula_flags = _formula_html_for_text(
+        text,
+        document,
+        block,
+    )
+    flags.extend(formula_flags)
+
+    estimated_height = _estimated_reflow_height(
+        text,
+        content_width,
+        style,
+        document=document,
+        source_block=block,
+    )
+    if estimated_height > original_height + _LAYOUT_EPSILON_PT:
+        flags.append("formula_height_adjusted")
+    if estimated_display_count > 1:
+        flags.append("formula_multi_display_block")
+    if estimated_height > max(original_height, style.font_size_pt * style.line_height) * 1.25:
+        flags.append("formula_height_risk")
+
+    return (
+        _PreparedReflowBlock(
+            block=block,
+            text=text,
+            render_intent=render_intent,
+            flags=_unique_flags(flags),
+            style=style,
+            html=html,
+            formula_number=formula_number,
+        ),
+        document,
+        formula_counter,
+    )
+
+
+def _reflow_required_height(
+    text: str,
+    width_pt: float,
+    style: RoleStyleDefaults,
+    *,
+    document: DocumentIR | None = None,
+    source_block: DocumentBlock | None = None,
+) -> float:
+    base_height = _estimated_reflow_height(
+        text,
+        width_pt,
+        style,
+        document=document,
+        source_block=source_block,
+    )
+    safety = _REFLOW_HEIGHT_SAFETY_PT
+    if (
+        source_block is not None
+        and _is_formula_like_block_for_estimation(source_block, text)
+    ) or _contains_formula_tokens(text):
+        safety += style.font_size_pt * _REFLOW_FORMULA_HEIGHT_SAFETY_EM
+    return base_height + safety
+
+
+def _render_reflow_fragment(
+    *,
+    prepared: _PreparedReflowBlock,
+    fragment: str,
+    fragment_index: int,
+    fragment_count: int,
+    fragment_html: str | None,
+    document: DocumentIR,
+    content_width: float,
+    content_x0: float,
+    cursor_y: float,
+    page_index: int,
+    figure_group_id: str | None = None,
+    caption_for_asset_id: str | None = None,
+) -> tuple[RenderBlock, dict[str, Any], float]:
+    block = prepared.block
+    style = prepared.style
+    required_height = _reflow_required_height(
+        fragment,
+        content_width,
+        style,
+        document=document,
+        source_block=block,
+    )
+    bbox = BoundingBox(
+        x0=content_x0,
+        y0=cursor_y,
+        x1=content_x0 + content_width,
+        y1=cursor_y + required_height,
+    )
+    allocated_height = _bbox_height(bbox)
+    height_slack = allocated_height - required_height
+    block_flags = list(prepared.flags)
+    if getattr(block, "_formula_reflow_clustered", False):
+        block_flags.extend(["formula_reflow_clustered", "formula_like_compacted"])
+    if fragment_count > 1:
+        block_flags.append("reflow_split")
+        if fragment_index > 1:
+            block_flags.append("reflow_continued")
+    if height_slack < -_LAYOUT_EPSILON_PT:
+        block_flags.append("overflow_clipped")
+    render_block_id = (
+        block.block_id
+        if fragment_count == 1
+        else f"{block.block_id}__reflow_{fragment_index:02d}"
+    )
+    quality_flags = _unique_flags(block_flags)
+    render_block = RenderBlock(
+        block_id=render_block_id,
+        role=block.role,
+        bbox=bbox,
+        text=fragment,
+        style_seed=block.style_seed,
+        font_size_pt=style.font_size_pt,
+        font_scale=style.font_size_pt / block.style_seed.font_size
+        if block.style_seed.font_size
+        else 1.0,
+        html=fragment_html,
+        render_intent=prepared.render_intent,
+        text_align=style.alignment,
+        font_weight=700 if style.bold else 400,
+        font_style="italic" if style.italic else "normal",
+        first_line_indent_em=style.first_line_indent_em
+        if fragment_index == 1
+        else 0.0,
+        line_height=style.line_height,
+        font_stack=style.font_stack,
+        formula_number=prepared.formula_number if fragment_index == 1 else None,
+        figure_group_id=figure_group_id,
+        caption_for_asset_id=caption_for_asset_id,
+        quality_flags=quality_flags,
+    )
+    trace = {
+        "source_block_id": block.block_id,
+        "render_block_id": render_block_id,
+        "source_page_id": block.page_id,
+        "output_page_id": f"r{page_index:04d}",
+        "role": block.role.value,
+        "translated_chars": len(fragment),
+        "estimated_lines": _estimated_formula_aware_line_count(
+            fragment,
+            content_width,
+            style.font_size_pt,
+            style.line_height,
+            document=document,
+            block=block,
+        ),
+        "bbox": bbox.model_dump(),
+        "allocated_height_pt": round(allocated_height, 4),
+        "required_height_pt": round(required_height, 4),
+        "height_slack_pt": round(height_slack, 4),
+        "fragment_index": fragment_index,
+        "fragment_count": fragment_count,
+        "quality_flags": quality_flags,
+    }
+    if figure_group_id:
+        trace["figure_group_id"] = figure_group_id
+    if caption_for_asset_id:
+        trace["caption_for_asset_id"] = caption_for_asset_id
+    return render_block, trace, bbox.y1 + style.space_after_pt
 
 
 def _is_formula_like_text(text: str) -> bool:
@@ -2166,11 +2539,11 @@ def _formula_like_style(style: RoleStyleDefaults) -> RoleStyleDefaults:
 
 
 def _merge_formula_like_ordered_items(
-    ordered_items: list[tuple[str, DocumentBlock | Asset]],
+    ordered_items: list[tuple[str, DocumentBlock | Asset | _ReflowFigureGroup]],
     document: DocumentIR,
     translations: dict[str, Any],
-) -> list[tuple[str, DocumentBlock | Asset]]:
-    merged: list[tuple[str, DocumentBlock | Asset]] = []
+) -> list[tuple[str, DocumentBlock | Asset | _ReflowFigureGroup]]:
+    merged: list[tuple[str, DocumentBlock | Asset | _ReflowFigureGroup]] = []
     index = 0
     while index < len(ordered_items):
         kind, item = ordered_items[index]
@@ -2369,12 +2742,104 @@ def _asset_reading_order(blocks: list[DocumentBlock], asset: Asset) -> float:
     return -0.5
 
 
+def _reflow_asset_order(
+    blocks: list[DocumentBlock],
+    asset: Asset,
+) -> tuple[float, float, float, int]:
+    nearby_blocks = [
+        block
+        for block in blocks
+        if _bbox_vertical_distance(block.bbox, asset.bbox) <= _FIGURE_CAPTION_MAX_DISTANCE_PT
+    ]
+    column = min((block.column for block in nearby_blocks), default=0)
+    return (
+        _asset_reading_order(blocks, asset),
+        asset.bbox.y0,
+        asset.bbox.x0,
+        column,
+    )
+
+
+def _bbox_vertical_distance(a: BoundingBox, b: BoundingBox) -> float:
+    if a.y1 < b.y0:
+        return b.y0 - a.y1
+    if b.y1 < a.y0:
+        return a.y0 - b.y1
+    return 0.0
+
+
+def _asset_is_captionable(asset: Asset) -> bool:
+    return asset.kind in {"image", "figure", "table"}
+
+
+def _block_is_figure_caption(block: DocumentBlock) -> bool:
+    if block.role in {BlockRole.CAPTION, BlockRole.FIGURE}:
+        return True
+    text = (block.source_text or block.text_for_translation or "").strip().lower()
+    return bool(re.match(r"^(fig\.?|figure|图|表)\s*\d+", text))
+
+
+def _caption_distance_score(asset: Asset, caption: DocumentBlock) -> tuple[float, float, int]:
+    vertical_distance = _bbox_vertical_distance(asset.bbox, caption.bbox)
+    below_penalty = 0.0 if caption.bbox.y0 >= asset.bbox.y0 else 30.0
+    horizontal_distance = abs(
+        ((asset.bbox.x0 + asset.bbox.x1) / 2)
+        - ((caption.bbox.x0 + caption.bbox.x1) / 2)
+    )
+    return (
+        vertical_distance + below_penalty + horizontal_distance * 0.05,
+        vertical_distance,
+        caption.reading_order,
+    )
+
+
+def _build_reflow_figure_groups(
+    blocks: list[DocumentBlock],
+    assets: list[Asset],
+) -> list[_ReflowFigureGroup]:
+    caption_candidates = [block for block in blocks if _block_is_figure_caption(block)]
+    used_caption_ids: set[str] = set()
+    groups: list[_ReflowFigureGroup] = []
+    for asset in sorted(
+        [asset for asset in assets if _asset_is_captionable(asset)],
+        key=lambda item: (item.bbox.y0, item.bbox.x0, item.asset_id),
+    ):
+        candidates = [
+            caption
+            for caption in caption_candidates
+            if caption.block_id not in used_caption_ids
+            and _bbox_vertical_distance(asset.bbox, caption.bbox)
+            <= _FIGURE_CAPTION_MAX_DISTANCE_PT
+        ]
+        caption = min(candidates, key=lambda item: _caption_distance_score(asset, item)) if candidates else None
+        if caption is None:
+            continue
+        used_caption_ids.add(caption.block_id)
+        asset_order = _reflow_asset_order(blocks, asset)
+        order = (
+            min(asset_order[0], float(caption.reading_order) - 0.25),
+            min(asset.bbox.y0, caption.bbox.y0),
+            min(asset.bbox.x0, caption.bbox.x0),
+            min(asset_order[3], caption.column),
+        )
+        groups.append(_ReflowFigureGroup(asset=asset, caption=caption, order=order))
+    return groups
+
+
 def _reflow_asset_suppression_reason(asset: Asset) -> str | None:
     if asset.kind == "formula":
         return "formula_rendered_from_text"
     if asset.kind == "figure" and not asset.path:
-        return "vector_placeholder_without_renderable_asset"
+        return "vector_asset_not_rasterized"
     return None
+
+
+def _reflow_suppressed_asset_quality_flags(asset: Asset, reason: str) -> list[str]:
+    if asset.kind == "formula":
+        return ["formula_asset_suppressed"]
+    if reason == "vector_asset_not_rasterized":
+        return ["vector_asset_not_rasterized"]
+    return ["asset_suppressed_placeholder"]
 
 
 def _append_reflow_asset(
@@ -2389,17 +2854,21 @@ def _append_reflow_asset(
     current_assets: list[RenderAsset],
     current_page_id: Any,
     asset_traces: list[dict[str, Any]],
+    quality_flags: list[str] | None = None,
+    figure_group_id: str | None = None,
+    caption_block_id: str | None = None,
+    space_before: float = 8.0,
+    space_after: float = 8.0,
 ) -> float:
     width, height = _reflow_asset_dimensions(asset, page_size, content_width)
-    space_before = 8.0
-    space_after = 8.0
+    flags = _unique_flags(quality_flags or ["reflow_asset"])
     cursor_y += space_before
     x0 = content_x0 + max(0.0, (content_width - width) / 2)
     bbox = BoundingBox(
         x0=x0,
         y0=cursor_y,
         x1=x0 + width,
-        y1=min(content_bottom, cursor_y + height),
+        y1=cursor_y + height,
     )
     current_assets.append(
         RenderAsset(
@@ -2408,19 +2877,27 @@ def _append_reflow_asset(
             bbox=bbox,
             path=asset.path,
             alt_text=asset.alt_text,
-            quality_flags=["reflow_asset"],
+            figure_group_id=figure_group_id,
+            caption_block_id=caption_block_id,
+            quality_flags=flags,
         )
     )
-    asset_traces.append(
-        {
-            "asset_id": asset.asset_id,
-            "source_page_id": asset.page_id,
-            "output_page_id": current_page_id(),
-            "kind": asset.kind,
-            "bbox": bbox.model_dump(),
-            "quality_flags": ["reflow_asset"],
-        }
-    )
+    trace = {
+        "asset_id": asset.asset_id,
+        "source_page_id": asset.page_id,
+        "output_page_id": current_page_id(),
+        "kind": asset.kind,
+        "bbox": bbox.model_dump(),
+        "allocated_height_pt": round(_bbox_height(bbox), 4),
+        "required_height_pt": round(height, 4),
+        "height_slack_pt": round(_bbox_height(bbox) - height, 4),
+        "quality_flags": flags,
+    }
+    if figure_group_id:
+        trace["figure_group_id"] = figure_group_id
+    if caption_block_id:
+        trace["caption_block_id"] = caption_block_id
+    asset_traces.append(trace)
     return bbox.y1 + space_after
 
 
@@ -2764,6 +3241,7 @@ def _build_reflow_trace(
     rendered_source_ids: set[str],
     block_traces: list[dict[str, Any]],
     asset_traces: list[dict[str, Any]],
+    figure_group_traces: list[dict[str, Any]],
     suppressed_artifacts: list[dict[str, Any]],
 ) -> dict[str, Any]:
     source_block_count = sum(len(page.blocks) for page in document.pages)
@@ -2785,6 +3263,7 @@ def _build_reflow_trace(
         "page_utilization": _page_utilization(pages),
         "blocks": block_traces,
         "assets": asset_traces,
+        "figure_groups": figure_group_traces,
     }
 
 

@@ -29,6 +29,7 @@ FORMULA_REF_PATTERN = re.compile(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}")
 _GREEK_TO_LATEX = GREEK_TO_LATEX
 _SYMBOL_TO_LATEX = SYMBOL_TO_LATEX
 _FORMULA_CLUSTER_CACHE_ATTR = "_formula_fragment_cluster_diagnostics"
+_FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR = "_formula_ocr_provider_diagnostics"
 _CLUSTER_MERGED_FROM_PREFIX = "formula_cluster_merged_from:"
 _CLUSTER_PRIMARY_FLAG = "formula_fragment_cluster_primary"
 _CLUSTER_SUPPRESSED_FLAG = "formula_fragment_cluster_suppressed"
@@ -177,6 +178,16 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
                         }
                     )
     cluster_diagnostics = _formula_cluster_diagnostics(document)
+    ocr_provider_diagnostics = getattr(
+        document,
+        _FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR,
+        None,
+    )
+    active_provider_order = (
+        ocr_provider_diagnostics.get("active_provider_order")
+        if isinstance(ocr_provider_diagnostics, dict)
+        else None
+    )
     return {
         "kind": "formula_diagnostics",
         "formula_count": len(formulas),
@@ -187,7 +198,7 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
         "low_confidence_formula_ids": low_confidence,
         "unresolved_placeholders": unresolved,
         "quality_flag_counts": _formula_flag_counts(formulas),
-        "ocr_provider": _formula_ocr_provider_status(),
+        "ocr_provider": _formula_ocr_provider_status(active_provider_order),
         **cluster_diagnostics,
     }
 
@@ -813,12 +824,17 @@ def _formula_flag_counts(formulas: list[FormulaIR]) -> dict[str, int]:
     return counts
 
 
-def _formula_ocr_provider_status() -> dict[str, str]:
+def _formula_ocr_provider_status(active_provider_order: list[str] | None = None) -> dict:
     try:
         import pix2text  # noqa: F401
     except Exception as exc:
-        return {"name": "pix2text", "status": "unavailable", "error": str(exc)[:160]}
-    return {"name": "pix2text", "status": "available"}
+        status = {"name": "pix2text", "status": "unavailable", "error": str(exc)[:160]}
+    else:
+        status = {"name": "pix2text", "status": "available"}
+    if active_provider_order is not None:
+        status["active_provider_order"] = list(active_provider_order)
+        status["active_provider_order_includes_pix2text"] = "pix2text" in active_provider_order
+    return status
 
 
 def _unique(values: list[str]) -> list[str]:

@@ -252,6 +252,193 @@ def test_repair_marks_formula_like_paragraph_blocks() -> None:
     assert "formula_cluster_preserved" in block["quality_flags"]
 
 
+def test_openai_translator_retries_when_chinese_prose_stays_english(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="The oscillations intensify when the magnetic field increases.",
+            )
+        ],
+        render_defaults=RenderDefaults(target_lang="zh-CN"),
+        constraints=TranslationConstraints(),
+    )
+    calls: list[dict] = []
+    english_payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "The oscillations intensify when the magnetic field increases.",
+                "role": "paragraph",
+            }
+        ],
+    }
+    chinese_payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "当磁场增强时，振荡会加剧。",
+                "role": "paragraph",
+            }
+        ],
+    }
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    class FakeResponse:
+        def __init__(self, content: object) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> FakeResponse:
+            calls.append(kwargs["json"])
+            return FakeResponse(english_payload if len(calls) == 1 else chinese_payload)
+
+    monkeypatch.setattr(translator_module.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1",
+        "key",
+        "model",
+        max_attempts=2,
+    )
+
+    plan = asyncio.run(translator.translate(chunk))
+
+    assert len(calls) == 2
+    assert plan.blocks[0].translated_text == "当磁场增强时，振荡会加剧。"
+    assert "Previous attempt failed validation" in calls[1]["messages"][1]["content"]
+
+
+def test_openai_translator_falls_back_when_chinese_prose_remains_english() -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="The oscillations intensify when the magnetic field increases.",
+            )
+        ],
+        render_defaults=RenderDefaults(target_lang="zh-CN"),
+        constraints=TranslationConstraints(),
+    )
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1",
+        "key",
+        "model",
+        max_attempts=1,
+    )
+    payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "The oscillations intensify when the magnetic field increases.",
+                "role": "paragraph",
+            }
+        ],
+    }
+
+    plan = translator._validate_or_repair_content(chunk, payload, attempt=1)
+
+    assert plan.blocks[0].translated_text == chunk.source_blocks[0].source_text
+    assert "missing_translation" in plan.blocks[0].quality_flags
+    assert "target_language_mismatch" in plan.blocks[0].quality_flags
+
+
+def test_target_language_check_skips_non_prose_and_non_translation_blocks() -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="formula",
+                role=BlockRole.FORMULA,
+                source_text="{{formula:F1}}",
+                preserve_tokens=["{{formula:F1}}"],
+                requires_translation=False,
+            ),
+            SourceBlock(
+                block_id="reference",
+                role=BlockRole.REFERENCE,
+                source_text="Smith J. Plasma Sources Sci Technol. 2025.",
+            ),
+            SourceBlock(
+                block_id="date",
+                role=BlockRole.PARAGRAPH,
+                source_text="25 April 2025.",
+            ),
+            SourceBlock(
+                block_id="preserved",
+                role=BlockRole.PARAGRAPH,
+                source_text="The model should preserve this block.",
+                requires_translation=False,
+            ),
+        ],
+        render_defaults=RenderDefaults(target_lang="zh-CN"),
+        constraints=TranslationConstraints(),
+    )
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1",
+        "key",
+        "model",
+        max_attempts=1,
+    )
+    payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": source.block_id,
+                "translated_text": source.source_text,
+                "inline_items": [
+                    {"kind": "formula", "text": "{{formula:F1}}", "source_token": "{{formula:F1}}"}
+                ]
+                if source.block_id == "formula"
+                else [],
+                "role": source.role.value,
+            }
+            for source in chunk.source_blocks
+        ],
+    }
+
+    plan = translator._validate_or_repair_content(chunk, payload, attempt=1)
+
+    assert [block.quality_flags for block in plan.blocks] == [[], [], [], []]
+
+
 def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

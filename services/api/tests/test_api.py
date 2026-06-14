@@ -107,6 +107,69 @@ def test_load_settings_prefers_dotenv_provider_values_over_process_env(
     assert loaded.openai_model == "dotenv-model"
 
 
+def test_load_settings_uses_openai_key_as_minimax_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        config_module,
+        "_dotenv_values",
+        lambda: {
+            "OPENAI_API_KEY": "shared-secret",
+            "MINIMAX_MODEL": "MiniMax-M3",
+        },
+    )
+    monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+    monkeypatch.delenv("MINIMAX_APIKEY", raising=False)
+
+    loaded = config_module.load_settings()
+
+    assert loaded.minimax_api_key == "shared-secret"
+    assert loaded.minimax_endpoint == "https://api.minimaxi.com/v1/chat/completions"
+    assert loaded.minimax_model == "MiniMax-M3"
+
+
+def test_load_settings_prefers_explicit_minimax_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        config_module,
+        "_dotenv_values",
+        lambda: {
+            "OPENAI_API_KEY": "shared-secret",
+            "MINIMAX_API_KEY": "minimax-secret",
+            "MINIMAX_ENDPOINT": "https://minimax.example.test/v1/chat/completions",
+            "MINIMAX_MODEL": "MiniMax-M3",
+        },
+    )
+
+    loaded = config_module.load_settings()
+
+    assert loaded.minimax_api_key == "minimax-secret"
+    assert loaded.minimax_endpoint == "https://minimax.example.test/v1/chat/completions"
+    assert loaded.minimax_model == "MiniMax-M3"
+
+
+def test_runtime_config_uses_persisted_openai_key_as_minimax_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config(
+        {
+            "openai_api_key": "persisted-shared-secret",
+            "ocr_provider_order": ["minimax_vision", "deterministic"],
+        }
+    )
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    effective = runtime_config.effective_runtime_config(storage)
+
+    assert effective["minimax_api_key"] == "persisted-shared-secret"
+    assert effective["minimax_endpoint"] == "https://api.minimaxi.com/v1/chat/completions"
+    assert effective["minimax_model"] == "MiniMax-M3"
+
+
 def test_load_settings_rejects_invalid_openai_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

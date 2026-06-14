@@ -26,6 +26,7 @@ class DeterministicFormulaRecognizer:
                 "formula_low_confidence",
                 "formula_text_truncated",
                 "formula_text_layer_corrupt",
+                "formula_pdf_ligature_corrupt",
                 "formula_slash_glyph_suspect",
                 "formula_prime_glyph_suspect",
             }

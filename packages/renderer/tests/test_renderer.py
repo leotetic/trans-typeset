@@ -169,6 +169,33 @@ def test_katex_render_to_string_handles_empty_stdout_without_crashing(
     assert renderer_models._katex_render_to_string(r"\int f_s\,d\Omega", display=True) is None
 
 
+def test_katex_strut_depth_counts_toward_formula_height() -> None:
+    html = '<span class="strut" style="height:0.85em;vertical-align:-0.25em;"></span>'
+
+    height = renderer_models._height_from_katex_html(html, font_size_pt=10)
+
+    assert height == pytest.approx(11.0)
+
+
+def test_formula_height_uses_heuristic_floor_without_extra_padding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda *args, **kwargs: (
+            '<span class="strut" style="height:0.75em;vertical-align:-0.25em;"></span>'
+        ),
+    )
+
+    height = renderer_models._formula_rendered_or_heuristic_height(
+        r"\frac{\partial V}{\partial t} = \sum_i x_i",
+        font_size_pt=10,
+    )
+
+    assert height == pytest.approx(29.0)
+
+
 def test_render_to_pdf_falls_back_when_playwright_driver_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -242,6 +269,51 @@ def test_pdf_export_inlines_api_asset_sources(tmp_path: Path) -> None:
     assert 'src="data:image/png;base64,' in rewritten
     assert diagnostics["asset_rewrites"]["inlined"] == 1
     assert diagnostics["asset_rewrites"]["missing"] == []
+
+
+def test_pdf_export_page_diagnostics_collects_overflow_and_figure_checks() -> None:
+    import asyncio
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.script = ""
+
+        async def evaluate(self, script: str) -> dict[str, object]:
+            self.script = script
+            return {
+                "block_overflow_count": 1,
+                "block_overflows": [
+                    {
+                        "block_id": "p1_b1",
+                        "page_id": "r0001",
+                        "scroll_height": 20,
+                        "client_height": 14,
+                        "scroll_width": 100,
+                        "client_width": 100,
+                    }
+                ],
+                "figure_group_issue_count": 1,
+                "figure_group_issues": [
+                    {
+                        "kind": "figure_group_separated",
+                        "figure_group_id": "figure-group-a1",
+                        "asset_id": "a1",
+                        "caption_block_id": "c1",
+                        "asset_page_id": "r0001",
+                        "caption_page_id": "r0002",
+                    }
+                ],
+            }
+
+    page = FakePage()
+
+    diagnostics = asyncio.run(renderer_module._collect_page_diagnostics(page))
+
+    assert diagnostics["block_overflow_count"] == 1
+    assert diagnostics["figure_group_issue_count"] == 1
+    assert "scrollHeight > clientHeight" in page.script
+    assert "data-figure-group-id" in page.script
+    assert "asset_caption_mismatch" in page.script
 
 
 def test_render_to_html_includes_translated_text_and_block_id() -> None:
@@ -411,6 +483,26 @@ def test_small_bbox_display_formula_expands_before_font_scaling() -> None:
     assert 'class="katex-display"' in html
     assert "quality-box-expanded" in html
     assert "--h-pt: 12.0pt" not in html
+
+
+def test_display_formula_height_does_not_double_count_padding() -> None:
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda _latex, display=True: (
+            '<span class="strut" style="height:1.8em;vertical-align:-0.6em;"></span>'
+        ),
+    )
+    try:
+        height = renderer_models._formula_rendered_or_heuristic_height(
+            r"x = y + 1",
+            font_size_pt=12,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert height == pytest.approx(28.8)
 
 
 def test_inline_formula_ref_renders_inside_paragraph() -> None:
@@ -1154,11 +1246,12 @@ def test_continuous_reflow_uses_gbt_page_layout_without_source_bbox_continuation
             "kind": "asset_ignored",
             "asset_id": "vector_1",
             "source_page_id": "p1",
-            "reason": "vector_placeholder_without_renderable_asset",
-            "quality_flags": ["asset_suppressed_placeholder"],
+            "reason": "vector_asset_not_rasterized",
+            "quality_flags": ["vector_asset_not_rasterized"],
         }
     ]
     assert 'data-asset-id="vector_1"' not in html
+    assert diagnostics["quality_flag_counts"]["vector_asset_not_rasterized"] == 1
     assert "page-footer" in html
 
 
@@ -1266,6 +1359,149 @@ def test_continuous_reflow_suppresses_formula_assets_but_preserves_figures() -> 
     } in render_document.layout_trace["suppressed_artifacts"]
 
 
+def test_continuous_reflow_allocates_required_paragraph_height() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=133.74),
+        source_text="Source paragraph.",
+        font_size=12,
+        reading_order=0,
+    )
+    translated = "天地玄黄宇宙洪荒" * 16
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=translated,
+            role=BlockRole.PARAGRAPH,
+            render_intent="compact",
+        )
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([paragraph]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    block = render_document.pages[0].blocks[0]
+    trace = render_document.layout_trace["blocks"][0]
+    diagnostics = render_document.diagnostics()
+
+    assert trace["estimated_lines"] == 4
+    assert trace["required_height_pt"] > 43.74
+    assert trace["allocated_height_pt"] >= trace["required_height_pt"]
+    assert block.bbox.y1 - block.bbox.y0 == pytest.approx(trace["allocated_height_pt"])
+    assert "overflow_clipped" not in block.quality_flags
+    assert not [
+        issue
+        for issue in diagnostics["layout_issues"]
+        if issue["kind"] == "overflow_clipped"
+    ]
+
+
+def test_continuous_reflow_keeps_figure_images_with_captions() -> None:
+    lead = _block(
+        "p1_lead",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=95),
+        source_text="Lead paragraph.",
+        reading_order=0,
+    )
+    fig1_caption = _block(
+        "p1_fig1_caption",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=230, x1=320, y1=252),
+        source_text="Fig. 1. First figure.",
+        reading_order=1,
+    )
+    fig2_caption = _block(
+        "p1_fig2_caption",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=390, x1=320, y1=412),
+        source_text="Fig. 2. Second figure.",
+        reading_order=2,
+    )
+    fig1 = Asset(
+        asset_id="fig1_image",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=52, y0=140, x1=318, y1=220),
+        path="/api/documents/doc_1/assets/fig1_image.png",
+        alt_text="Figure 1",
+    )
+    fig2 = Asset(
+        asset_id="fig2_image",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=52, y0=300, x1=318, y1=380),
+        path="/api/documents/doc_1/assets/fig2_image.png",
+        alt_text="Figure 2",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_lead",
+            translated_text="引导段落。" * 50,
+            role=BlockRole.PARAGRAPH,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_fig1_caption",
+            translated_text="图 1. 第一幅图。",
+            role=BlockRole.CAPTION,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_fig2_caption",
+            translated_text="图 2. 第二幅图。",
+            role=BlockRole.CAPTION,
+        ),
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 300.0,
+                    "height_pt": 220.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([lead, fig1_caption, fig2_caption], [fig1, fig2]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    group_trace = render_document.layout_trace["figure_groups"]
+    diagnostics = render_document.diagnostics()
+
+    assert [
+        (group["asset_id"], group["caption_block_id"])
+        for group in group_trace
+    ] == [
+        ("fig1_image", "p1_fig1_caption"),
+        ("fig2_image", "p1_fig2_caption"),
+    ]
+    assert all(group["output_page_id"] for group in group_trace)
+    assert group_trace[0]["output_page_id"] == group_trace[0]["caption_output_page_id"]
+    assert group_trace[1]["output_page_id"] == group_trace[1]["caption_output_page_id"]
+    assert group_trace[0]["order_index"] < group_trace[1]["order_index"]
+    assert "figure_group_separated" not in diagnostics["quality_flag_counts"]
+    assert "asset_caption_mismatch" not in diagnostics["quality_flag_counts"]
+
+
 def test_continuous_reflow_allocates_display_formula_height() -> None:
     formula = _block(
         "p1_formula",
@@ -1309,12 +1545,11 @@ def test_continuous_reflow_allocates_display_formula_height() -> None:
     assert render_block.bbox.y1 - render_block.bbox.y0 > 30.0
     assert render_document.layout_trace["blocks"][0]["estimated_lines"] > 1
     assert "formula_height_adjusted" in render_block.quality_flags
-    assert "formula_height_risk" not in render_block.quality_flags
     assert 'class="katex-display"' in html
     assert '--h-pt: 16.2pt' not in html
 
 
-def test_katex_height_uses_strut_height_without_double_counting_depth() -> None:
+def test_katex_height_counts_strut_depth() -> None:
     html = (
         '<span class="katex-display"><span class="katex">'
         '<span class="strut" style="height:1.8em;vertical-align:-0.6em;"></span>'
@@ -1323,15 +1558,15 @@ def test_katex_height_uses_strut_height_without_double_counting_depth() -> None:
 
     height = renderer_models._height_from_katex_html(html, 10.0)
 
-    assert height == pytest.approx(18.0)
+    assert height == pytest.approx(24.0)
 
 
-def test_rendered_formula_height_prefers_measured_katex_over_heuristic() -> None:
+def test_rendered_formula_height_uses_heuristic_floor() -> None:
     latex = (
         r"\frac{\partial V}{\partial t} = \nabla^2 V + \sum_i x_i + "
         r"\int_0^1 \frac{a_i}{b_i}\,dx"
     )
-    expected_height = 12.0 * (1.8 + 0.15)
+    expected_height = renderer_models._formula_latex_heuristic_height(latex, 12.0)
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(
@@ -1347,7 +1582,7 @@ def test_rendered_formula_height_prefers_measured_katex_over_heuristic() -> None
         monkeypatch.undo()
 
     assert height == pytest.approx(expected_height)
-    assert height < renderer_models._formula_latex_heuristic_height(latex, 12.0)
+    assert height > 12.0 * (1.8 + 0.9)
 
 
 def test_formula_only_block_uses_visual_formula_height_for_long_single_line_latex() -> None:
@@ -1381,7 +1616,7 @@ def test_formula_only_block_uses_visual_formula_height_for_long_single_line_late
     )
     defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
     style = renderer_models._style_for_role(defaults, BlockRole.FORMULA)
-    visual_height = 12.0 * (1.8 + 0.15 + renderer_models._FORMULA_LIKE_VERTICAL_MARGIN_EM)
+    visual_height = 12.0 * (1.8 + 0.6 + renderer_models._FORMULA_LIKE_VERTICAL_MARGIN_EM)
     estimation_text = renderer_models._formula_estimation_text(
         formula.source_text,
         document,

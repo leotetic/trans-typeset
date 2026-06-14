@@ -22,6 +22,21 @@ from ..provider_config import ProviderConfigError, normalize_openai_base_url
 from .formula_processing import is_formula_like_text
 from .formulas.validation import FORMULA_REF_PATTERN
 
+_HAN_PATTERN = re.compile(r"[\u4e00-\u9fff]")
+_LATIN_WORD_PATTERN = re.compile(r"\b[A-Za-z]{3,}\b")
+_PROSE_TRANSLATION_ROLES = {
+    BlockRole.ABSTRACT,
+    BlockRole.CAPTION,
+    BlockRole.PARAGRAPH,
+}
+_DATE_ONLY_PATTERN = re.compile(
+    r"^\s*(?:\d{1,2}\s+)?"
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+\d{1,2},?\s+\d{4}[A-Za-z0-9\s,.;:-]*$",
+    re.IGNORECASE,
+)
+
 
 class TranslationError(RuntimeError):
     pass
@@ -270,17 +285,48 @@ class OpenAICompatibleTranslator(Translator):
 
         try:
             plan = TranslationLayoutPlan.model_validate(raw_payload)
-            return validate_layout_plan(chunk, plan)
+            return self._validate_target_language_or_repair(
+                chunk,
+                validate_layout_plan(chunk, plan),
+                attempt,
+            )
         except (ValidationError, LayoutPlanValidationError):
             repaired_payload = self._repair_payload(chunk, raw_payload, attempt)
 
         try:
             repaired_plan = TranslationLayoutPlan.model_validate(repaired_payload)
-            return validate_layout_plan(chunk, repaired_plan)
+            return self._validate_target_language_or_repair(
+                chunk,
+                validate_layout_plan(chunk, repaired_plan),
+                attempt,
+            )
         except (ValidationError, LayoutPlanValidationError) as repair_exc:
             raise TranslationError(
                 f"Translator layout plan validation failed for {chunk.chunk_id}: {repair_exc}"
             ) from repair_exc
+
+    def _validate_target_language_or_repair(
+        self,
+        chunk: TranslationChunk,
+        plan: TranslationLayoutPlan,
+        attempt: int,
+    ) -> TranslationLayoutPlan:
+        mismatched_block_ids = _target_language_mismatch_block_ids(chunk, plan)
+        if not mismatched_block_ids:
+            return plan
+        if attempt < self.max_attempts:
+            raise TranslationError(
+                "Translator target language quality check failed for "
+                f"{chunk.chunk_id}: target_language_mismatch in "
+                f"{', '.join(mismatched_block_ids)}"
+            )
+        repaired_plan = _target_language_fallback_plan(
+            chunk,
+            plan,
+            mismatched_block_ids,
+            attempt,
+        )
+        return validate_layout_plan(chunk, repaired_plan)
 
     def _repair_payload(
         self,
@@ -709,6 +755,139 @@ def _plain_text_salvage(content: str) -> str | None:
     if stripped.startswith("{") or stripped.startswith("["):
         return None
     return stripped
+
+
+def _target_language_mismatch_block_ids(
+    chunk: TranslationChunk,
+    plan: TranslationLayoutPlan,
+) -> list[str]:
+    if not _is_chinese_target(chunk.target_lang):
+        return []
+    source_by_id = {source.block_id: source for source in chunk.source_blocks}
+    mismatches: list[str] = []
+    for block in plan.blocks:
+        source = source_by_id.get(block.source_block_id)
+        if source is None:
+            continue
+        if not _requires_chinese_translation_check(source):
+            continue
+        if _looks_untranslated_for_chinese_target(
+            source.source_text,
+            block.translated_text,
+            source.preserve_tokens,
+        ):
+            mismatches.append(source.block_id)
+    return mismatches
+
+
+def _target_language_fallback_plan(
+    chunk: TranslationChunk,
+    plan: TranslationLayoutPlan,
+    mismatched_block_ids: list[str],
+    attempt: int,
+) -> TranslationLayoutPlan:
+    mismatched = set(mismatched_block_ids)
+    source_by_id = {source.block_id: source for source in chunk.source_blocks}
+    repaired_blocks: list[TranslationBlockPlan] = []
+    for block in plan.blocks:
+        if block.source_block_id not in mismatched:
+            repaired_blocks.append(block)
+            continue
+        source = source_by_id[block.source_block_id]
+        repaired_blocks.append(
+            block.model_copy(
+                update={
+                    "translated_text": source.source_text,
+                    "quality_flags": _unique_strings(
+                        [
+                            *block.quality_flags,
+                            "target_language_mismatch",
+                            "missing_translation",
+                            f"retry_attempt_{attempt}",
+                        ]
+                    ),
+                },
+                deep=True,
+            )
+        )
+    return plan.model_copy(update={"blocks": repaired_blocks}, deep=True)
+
+
+def _is_chinese_target(target_lang: str) -> bool:
+    normalized = target_lang.strip().lower().replace("_", "-")
+    return normalized == "zh" or normalized.startswith("zh-") or normalized.startswith("chinese")
+
+
+def _requires_chinese_translation_check(source: Any) -> bool:
+    if not getattr(source, "requires_translation", True):
+        return False
+    role = getattr(source, "role", BlockRole.UNKNOWN)
+    if role in {BlockRole.FORMULA, BlockRole.TABLE, BlockRole.FIGURE, BlockRole.REFERENCE, BlockRole.FOOTNOTE}:
+        return False
+    if role not in _PROSE_TRANSLATION_ROLES and len(_LATIN_WORD_PATTERN.findall(source.source_text)) < 4:
+        return False
+    source_text = _remove_preserve_tokens(source.source_text, source.preserve_tokens)
+    stripped = source_text.strip()
+    if not stripped:
+        return False
+    if _DATE_ONLY_PATTERN.fullmatch(stripped):
+        return False
+    if _looks_like_non_translatable_token_text(stripped):
+        return False
+    if is_formula_like_text(stripped):
+        return False
+    return len(_LATIN_WORD_PATTERN.findall(stripped)) >= 3
+
+
+def _looks_untranslated_for_chinese_target(
+    source_text: str,
+    translated_text: str,
+    preserve_tokens: list[str],
+) -> bool:
+    comparable = _remove_preserve_tokens(translated_text, preserve_tokens).strip()
+    if not comparable:
+        return True
+    han_count = len(_HAN_PATTERN.findall(comparable))
+    if han_count >= 2:
+        return False
+    comparable_nonspace = re.sub(r"\s+", "", comparable)
+    if not comparable_nonspace:
+        return True
+    if han_count / max(len(comparable_nonspace), 1) >= 0.03:
+        return False
+    if _looks_like_non_translatable_token_text(comparable):
+        return False
+    if is_formula_like_text(comparable):
+        return False
+    latin_words = _LATIN_WORD_PATTERN.findall(comparable)
+    if len(latin_words) < 3:
+        return False
+    source_words = {word.lower() for word in _LATIN_WORD_PATTERN.findall(source_text)}
+    translated_words = {word.lower() for word in latin_words}
+    overlap_ratio = len(source_words & translated_words) / max(len(translated_words), 1)
+    return overlap_ratio >= 0.5 or len(latin_words) >= 5
+
+
+def _remove_preserve_tokens(text: str, preserve_tokens: list[str]) -> str:
+    cleaned = text
+    for token in preserve_tokens:
+        cleaned = cleaned.replace(token, " ")
+    cleaned = FORMULA_REF_PATTERN.sub(" ", cleaned)
+    cleaned = re.sub(r"\[[0-9,\-\s;]+\]", " ", cleaned)
+    return re.sub(r"\s+", " ", cleaned)
+
+
+def _looks_like_non_translatable_token_text(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if re.fullmatch(r"[\W\d_]+", stripped):
+        return True
+    if re.fullmatch(r"(?:[A-Z][A-Za-z'’\-]+,?\s*){1,3}\d{4}[a-z]?", stripped):
+        return True
+    if re.fullmatch(r"(?:Fig(?:ure)?|Table|Sec(?:tion)?)\.?\s*[A-Za-z0-9.\-()]+", stripped, re.IGNORECASE):
+        return True
+    return False
 
 
 def _looks_like_layout_plan_payload_fragment(content: str) -> bool:

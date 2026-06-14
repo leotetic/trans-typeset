@@ -247,6 +247,87 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
           const blocks = [...document.querySelectorAll('.block')];
           const assets = [...document.querySelectorAll('.asset')];
           const images = [...document.images];
+          const blockOverflows = blocks
+            .map((block) => {
+              const scrollHeight = block.scrollHeight;
+              const clientHeight = block.clientHeight;
+              const scrollWidth = block.scrollWidth;
+              const clientWidth = block.clientWidth;
+              const overflows =
+                scrollHeight > clientHeight + 1 || scrollWidth > clientWidth + 1;
+              if (!overflows) {
+                return null;
+              }
+              return {
+                block_id: block.getAttribute('data-block-id'),
+                page_id: block.closest('.page')?.getAttribute('data-page-id') || null,
+                scroll_height: scrollHeight,
+                client_height: clientHeight,
+                scroll_width: scrollWidth,
+                client_width: clientWidth
+              };
+            })
+            .filter(Boolean);
+          const figureGroups = {};
+          assets.forEach((asset) => {
+            const groupId = asset.getAttribute('data-figure-group-id');
+            if (!groupId) {
+              return;
+            }
+            figureGroups[groupId] = figureGroups[groupId] || {};
+            figureGroups[groupId].asset_id = asset.getAttribute('data-asset-id');
+            figureGroups[groupId].asset_page_id =
+              asset.closest('.page')?.getAttribute('data-page-id') || null;
+            figureGroups[groupId].caption_block_id =
+              asset.getAttribute('data-caption-block-id') || null;
+          });
+          blocks.forEach((block) => {
+            const groupId = block.getAttribute('data-figure-group-id');
+            if (!groupId) {
+              return;
+            }
+            figureGroups[groupId] = figureGroups[groupId] || {};
+            figureGroups[groupId].caption_render_block_id =
+              block.getAttribute('data-block-id');
+            figureGroups[groupId].caption_page_id =
+              block.closest('.page')?.getAttribute('data-page-id') || null;
+            figureGroups[groupId].caption_for_asset_id =
+              block.getAttribute('data-caption-for-asset-id') || null;
+          });
+          const figureGroupIssues = Object.entries(figureGroups)
+            .flatMap(([groupId, group]) => {
+              const issues = [];
+              if (
+                group.asset_page_id &&
+                group.caption_page_id &&
+                group.asset_page_id !== group.caption_page_id
+              ) {
+                issues.push({
+                  kind: 'figure_group_separated',
+                  figure_group_id: groupId,
+                  asset_id: group.asset_id || null,
+                  caption_block_id:
+                    group.caption_render_block_id || group.caption_block_id || null,
+                  asset_page_id: group.asset_page_id,
+                  caption_page_id: group.caption_page_id
+                });
+              }
+              if (
+                group.asset_id &&
+                group.caption_for_asset_id &&
+                group.asset_id !== group.caption_for_asset_id
+              ) {
+                issues.push({
+                  kind: 'asset_caption_mismatch',
+                  figure_group_id: groupId,
+                  asset_id: group.asset_id,
+                  caption_block_id:
+                    group.caption_render_block_id || group.caption_block_id || null,
+                  caption_for_asset_id: group.caption_for_asset_id
+                });
+              }
+              return issues;
+            });
           return {
             pages: pages.length,
             blocks: blocks.length,
@@ -261,7 +342,11 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
                   width: getComputedStyle(pages[0]).width,
                   height: getComputedStyle(pages[0]).height
                 }
-              : null
+              : null,
+            block_overflows: blockOverflows,
+            block_overflow_count: blockOverflows.length,
+            figure_group_issues: figureGroupIssues,
+            figure_group_issue_count: figureGroupIssues.length
           };
         }"""
     )

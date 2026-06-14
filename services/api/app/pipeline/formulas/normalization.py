@@ -22,7 +22,19 @@ _EQUATION_NUMBER_WITH_SHORT_TAIL = re.compile(
 )
 _TRAILING_SCRIPT_OPERATOR = re.compile(r"(?:[_^]\s*)+$")
 _HYPHEN_SPLIT_WORD = re.compile(r"\b([A-Za-z]{2,})-\s+([A-Za-z]{2,})\b")
-_RAW_CORRUPTION_MARKER = re.compile(r"[\x01-\x04¼þðÞÐ]|@[A-Za-z]")
+_PDF_LIGATURE_REPLACEMENTS = {
+    "\ufb00": "ff",
+    "\ufb01": "fi",
+    "\ufb02": "fl",
+    "\ufb03": "ffi",
+    "\ufb04": "ffl",
+}
+_PDF_LIGATURE_PATTERN = re.compile("[" + "".join(_PDF_LIGATURE_REPLACEMENTS) + "]")
+_UNDERBRACE_ARTIFACT_PATTERN = re.compile(
+    r"\|\s*(?P<filler>(?:(?:ffl|ffi|ff|fi|fl)|[\s\ufb00-\ufb04])*)"
+    r"\{\s*z(?P<label>(?:(?:ffl|ffi|ff|fi|fl)|[\s\ufb00-\ufb04A-Za-z0-9+\-−])*)\}"
+)
+_RAW_CORRUPTION_MARKER = re.compile(r"[\x01-\x04¼þðÞÐ\ufb00-\ufb04]|@[A-Za-z]")
 _PARTIAL_SLASH_GLYPH_PATTERN = re.compile(
     r"@[A-Za-z][A-Za-z0-9_']*\s*=\s*@[A-Za-z][A-Za-z0-9_']*"
 )
@@ -123,6 +135,10 @@ def formula_corruption_flags(
     has_raw_marker = _RAW_CORRUPTION_MARKER.search(text or "") is not None
     if has_raw_marker:
         flags.append("formula_text_layer_corrupt")
+    if _PDF_LIGATURE_PATTERN.search(text or "") or _PDF_LIGATURE_PATTERN.search(
+        normalized_latex or ""
+    ):
+        flags.append("formula_pdf_ligature_corrupt")
     raw_text = text or ""
     if (
         has_raw_marker
@@ -228,15 +244,17 @@ def contains_natural_language(text: str) -> bool:
 
 def latex_from_pdf_text(text: str) -> tuple[str, list[str]]:
     corruption_flags = formula_corruption_flags(text)
+    repaired_text, ligature_flags = repair_pdf_ligatures(text)
+    repaired_text, underbrace_flags = repair_underbrace_artifacts(repaired_text)
     repaired_text, slash_flags = repair_corrupt_formula_slash_glyphs(
-        text,
+        repaired_text,
         source_text=text,
     )
     normalized, truncated = truncate_at_language_boundary(repaired_text)
     flags: list[str] = (
         ["formula_latex_normalized"] if normalize_pdf_text(repaired_text) != text else []
     )
-    flags.extend([*corruption_flags, *slash_flags])
+    flags.extend([*corruption_flags, *ligature_flags, *underbrace_flags, *slash_flags])
     if truncated:
         flags.append("formula_text_truncated")
     if not normalized or is_noise_text(normalized):
@@ -259,6 +277,34 @@ def latex_from_pdf_text(text: str) -> tuple[str, list[str]]:
     if equation_number is not None:
         latex = f"{latex} \\tag{{{equation_number.strip('()')}}}".strip()
     return latex, _unique([*flags, *balance_flags])
+
+
+def repair_pdf_ligatures(text: str) -> tuple[str, list[str]]:
+    repaired = text
+    for source, replacement in _PDF_LIGATURE_REPLACEMENTS.items():
+        repaired = repaired.replace(source, replacement)
+    return repaired, ["formula_pdf_ligature_repaired"] if repaired != text else []
+
+
+def repair_underbrace_artifacts(text: str) -> tuple[str, list[str]]:
+    if not _UNDERBRACE_ARTIFACT_PATTERN.search(text) and "|{" not in text:
+        return text, []
+
+    repaired = _UNDERBRACE_ARTIFACT_PATTERN.sub(_underbrace_artifact_replacement, text)
+    repaired = re.sub(r"\|\s*\{\s*z\s*[^}]*\}", "", repaired)
+    repaired = re.sub(r"\|\s*(?:ffl|ffi|ff|fi|fl|\s)+\{\s*z(?:\s*(?:ffl|ffi|ff|fi|fl))*\s*\}", "", repaired)
+    if repaired == text:
+        return text, []
+    return re.sub(r"\s+", " ", repaired).strip(), ["formula_underbrace_artifact_repaired"]
+
+
+def _underbrace_artifact_replacement(match: re.Match[str]) -> str:
+    label = match.group("label") or ""
+    for source, replacement in _PDF_LIGATURE_REPLACEMENTS.items():
+        label = label.replace(source, replacement)
+    label = re.sub(r"(?:ffl|ffi|ff|fi|fl|\s)+", "", label)
+    label = label.strip()
+    return f"_{{{label}}}" if label else ""
 
 
 def repair_corrupt_formula_slash_glyphs(

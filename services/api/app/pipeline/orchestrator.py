@@ -30,7 +30,13 @@ from .formulas import (
     OpenAIFormulaRecognizer,
     enrich_document_formulas,
 )
-from .ocr import DeterministicOCRProvider, OCRService, OpenAIVisionOCRProvider, Pix2TextOCRProvider
+from .ocr import (
+    DeterministicOCRProvider,
+    MiniMaxVisionOCRProvider,
+    OCRService,
+    OpenAIVisionOCRProvider,
+    Pix2TextOCRProvider,
+)
 from .parser import UnsupportedPdfError, build_parser_diagnostics, parse_pdf
 from .translator import Translator, build_translator
 from .workflow import (
@@ -325,7 +331,12 @@ async def _enrich_document_formulas(
         runtime_config["openai_api_key"]
         and "openai_vision" in provider_order
     )
+    formula_minimax_enabled = bool(
+        runtime_config.get("minimax_api_key")
+        and "minimax_vision" in provider_order
+    )
     openai_ocr_provider: Any | None = None
+    minimax_ocr_provider: Any | None = None
     recognizer = DeterministicFormulaRecognizer()
     recognizer_type = "deterministic"
     if formula_openai_enabled:
@@ -336,6 +347,13 @@ async def _enrich_document_formulas(
                 model=runtime_config["vision_analyzer_model"],
                 asset_base_path=storage.asset_dir(doc_id),
             )
+        )
+    if formula_minimax_enabled:
+        minimax_ocr_provider = MiniMaxVisionOCRProvider(
+            api_key=runtime_config["minimax_api_key"],
+            endpoint=runtime_config.get("minimax_endpoint", ""),
+            model=runtime_config.get("minimax_model", ""),
+            timeout_seconds=runtime_config.get("ocr_provider_timeout_seconds", 12.0),
         )
     provider_factories: dict[str, Any] = {
         "pix2text": lambda: Pix2TextOCRProvider(
@@ -348,6 +366,10 @@ async def _enrich_document_formulas(
         if provider_name == "openai_vision":
             if openai_ocr_provider is not None:
                 ocr_providers.append(openai_ocr_provider)
+            continue
+        if provider_name == "minimax_vision":
+            if minimax_ocr_provider is not None:
+                ocr_providers.append(minimax_ocr_provider)
             continue
         factory = provider_factories.get(str(provider_name))
         if factory is not None:
@@ -390,7 +412,7 @@ async def _enrich_document_formulas(
         ocr_service=ocr_service,
         recognizer_type=recognizer_type,
         visual_formula_recognition_enabled=any(
-            getattr(provider, "name", "") in {"pix2text", "openai_vision"}
+            getattr(provider, "name", "") in {"pix2text", "openai_vision", "minimax_vision"}
             for provider in ocr_providers
         ),
         on_progress=update_formula_progress,
