@@ -1238,6 +1238,30 @@ textarea:focus-visible {
     #dfe5e3;
 }
 
+.render-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  border-top: 1px solid #ead9a7;
+  border-bottom: 1px solid #ead9a7;
+  background: #fff9e8;
+  color: #725217;
+  padding: 9px 12px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.render-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.render-warning span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .preview-frame::before {
   content: "";
   position: absolute;

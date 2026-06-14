@@ -381,6 +381,11 @@ def build_semantic_layout_analysis(
 def render_evaluation_summary(renderer_diagnostics: dict[str, Any]) -> dict[str, Any]:
     quality_counts = renderer_diagnostics.get("quality_flag_counts")
     layout_issues = renderer_diagnostics.get("layout_issues")
+    browser_overflow_count = int(renderer_diagnostics.get("browser_block_overflow_count") or 0)
+    browser_figure_group_issue_count = int(
+        renderer_diagnostics.get("browser_figure_group_issue_count") or 0
+    )
+    browser_unavailable = bool(renderer_diagnostics.get("browser_validation_unavailable"))
     if not isinstance(quality_counts, dict):
         quality_counts = {}
     if not isinstance(layout_issues, list):
@@ -390,13 +395,22 @@ def render_evaluation_summary(renderer_diagnostics: dict[str, Any]) -> dict[str,
         for flag, count in quality_counts.items()
         if flag in {"overflow_clipped", "asset_missing_path", "missing_translation"}
     }
+    if browser_overflow_count:
+        blocking_flags["browser_overflow"] = browser_overflow_count
+    if browser_figure_group_issue_count:
+        blocking_flags["browser_figure_group_issue"] = browser_figure_group_issue_count
+    repair_recommended = bool(blocking_flags or layout_issues) and not browser_unavailable
     return {
         "kind": "render_evaluation",
-        "accepted": not blocking_flags and not layout_issues,
+        "accepted": not blocking_flags and not layout_issues and not browser_unavailable,
         "quality_flag_counts": quality_counts,
         "layout_issue_count": len(layout_issues),
+        "browser_block_overflow_count": browser_overflow_count,
+        "browser_figure_group_issue_count": browser_figure_group_issue_count,
+        "browser_validation_unavailable": browser_unavailable,
         "blocking_flags": blocking_flags,
-        "repair_recommended": bool(blocking_flags or layout_issues),
+        "repair_recommended": repair_recommended,
+        "manual_action_required": browser_unavailable,
     }
 
 

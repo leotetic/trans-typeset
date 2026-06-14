@@ -45,8 +45,8 @@ def make_nodes(context: TypesettingGraphContext) -> dict[str, Any]:
     async def translate_chunks(state: TypesettingGraphState) -> TypesettingGraphState:
         return await _translate_chunks_node(state, context)
 
-    def render_preview(state: TypesettingGraphState) -> TypesettingGraphState:
-        return _render_preview(state, context)
+    async def render_preview(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _render_preview(state, context)
 
     def evaluate_render(state: TypesettingGraphState) -> TypesettingGraphState:
         return _evaluate_render(state, context)
@@ -800,7 +800,7 @@ async def _translate_chunks_node(
     }
 
 
-def _render_preview(
+async def _render_preview(
     state: TypesettingGraphState,
     context: TypesettingGraphContext,
 ) -> TypesettingGraphState:
@@ -829,7 +829,7 @@ def _render_preview(
         chunks=status_chunks,
     )
     render_defaults = render_defaults_for_intent(context.storage, target_lang, intent)
-    html, renderer_diagnostics = context.render_preview_artifacts(
+    html, renderer_diagnostics = await context.render_preview_artifacts(
         doc_id,
         document,
         plans,

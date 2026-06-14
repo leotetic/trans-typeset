@@ -316,6 +316,107 @@ def test_pdf_export_page_diagnostics_collects_overflow_and_figure_checks() -> No
     assert "asset_caption_mismatch" in page.script
 
 
+def test_browser_layout_iterations_apply_measured_height_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=130),
+        source_text="Source paragraph.",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="天地玄黄宇宙洪荒" * 18,
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    calls: list[str] = []
+
+    async def fake_measure(html: str, *, asset_base_path=None) -> dict[str, object]:
+        calls.append(html)
+        signature = html.split('data-layout-signature="', 1)[1].split('"', 1)[0]
+        if len(calls) == 1:
+            return {
+                "page": {
+                    "block_overflow_count": 1,
+                    "block_overflows": [
+                        {
+                            "block_id": "p1_body",
+                            "source_block_id": "p1_body",
+                            "layout_signature": signature,
+                            "page_id": "r0001",
+                            "scroll_height": 54,
+                            "client_height": 40,
+                            "scroll_width": 100,
+                            "client_width": 100,
+                        }
+                    ],
+                    "figure_group_issue_count": 0,
+                    "figure_group_issues": [],
+                }
+            }
+        return {
+            "page": {
+                "block_overflow_count": 0,
+                "block_overflows": [],
+                "figure_group_issue_count": 0,
+                "figure_group_issues": [],
+            }
+        }
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure)
+
+    _html, render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([paragraph]),
+            [plan],
+            "zh-CN",
+            render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+        )
+    )
+
+    assert len(calls) == 2
+    assert diagnostics["browser_validation"]["status"] == "passed"
+    assert diagnostics["browser_block_overflow_count"] == 0
+    assert diagnostics["layout_iterations"][0]["browser_block_overflow_count"] == 1
+    assert diagnostics["layout_iterations"][1]["measured_height_override_count"] == 1
+    assert render_document.pages[0].blocks[0].layout_signature is not None
+
+
+def test_browser_layout_unavailable_marks_renderer_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    async def fake_measure(_html: str, *, asset_base_path=None) -> dict[str, object]:
+        raise RuntimeError("chromium unavailable")
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure)
+
+    _html, _render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([
+                _block(
+                    "p1_body",
+                    BlockRole.PARAGRAPH,
+                    BoundingBox(x0=50, y0=90, x1=250, y1=130),
+                )
+            ]),
+            [],
+            "zh-CN",
+            render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+        )
+    )
+
+    assert diagnostics["browser_validation"]["status"] == "unavailable"
+    assert diagnostics["browser_validation_unavailable"] is True
+    assert diagnostics["quality_flag_counts"]["browser_validation_unavailable"] == 1
+
+
 def test_render_to_html_includes_translated_text_and_block_id() -> None:
     block = _block(
         "p1_b1",
@@ -1500,6 +1601,223 @@ def test_continuous_reflow_keeps_figure_images_with_captions() -> None:
     assert group_trace[0]["order_index"] < group_trace[1]["order_index"]
     assert "figure_group_separated" not in diagnostics["quality_flag_counts"]
     assert "asset_caption_mismatch" not in diagnostics["quality_flag_counts"]
+
+
+def test_continuous_reflow_defers_figure_group_and_backfills_text() -> None:
+    lead = _block(
+        "p1_lead",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=95),
+        source_text="Lead paragraph.",
+        reading_order=0,
+    )
+    caption = _block(
+        "p1_fig_caption",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=230, x1=320, y1=252),
+        source_text="Fig. 1. Deferred figure.",
+        reading_order=1,
+    )
+    body = _block(
+        "p1_body_after",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=260, x1=320, y1=320),
+        source_text="Body after figure.",
+        reading_order=2,
+    )
+    figure = Asset(
+        asset_id="fig_deferred",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=50, y0=120, x1=300, y1=230),
+        path="/api/documents/doc_1/assets/fig_deferred.png",
+        alt_text="Deferred figure",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_lead",
+            translated_text="Lead translated text. " * 4,
+            role=BlockRole.PARAGRAPH,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_fig_caption",
+            translated_text="Fig. 1. Deferred figure caption.",
+            role=BlockRole.CAPTION,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_body_after",
+            translated_text="Backfill text. " * 10,
+            role=BlockRole.PARAGRAPH,
+        ),
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 300.0,
+                    "height_pt": 220.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([lead, caption, body], [figure]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+
+    group_trace = render_document.layout_trace["figure_groups"][0]
+    first_page = render_document.pages[0]
+
+    assert group_trace["asset_id"] == "fig_deferred"
+    assert group_trace["deferred_from_page"] == "r0001"
+    assert group_trace["float_placement"] in {"page_top", "page_bottom"}
+    assert not first_page.assets
+    assert {block.source_block_id for block in first_page.blocks} >= {"p1_lead", "p1_body_after"}
+
+
+def test_continuous_reflow_shrinks_oversized_figure_group_with_floor() -> None:
+    caption = _block(
+        "p1_fig_caption",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=230, x1=320, y1=252),
+        source_text="Fig. 1. Tall figure.",
+        reading_order=1,
+    )
+    figure = Asset(
+        asset_id="fig_tall",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=50, y0=60, x1=150, y1=280),
+        path="/api/documents/doc_1/assets/fig_tall.png",
+        alt_text="Tall figure",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_fig_caption",
+            translated_text="Fig. 1. Tall figure caption.",
+            role=BlockRole.CAPTION,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 220.0,
+                    "height_pt": 130.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([caption], [figure]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    group_trace = render_document.layout_trace["figure_groups"][0]
+
+    assert 0.72 <= group_trace["scale"] < 1.0
+    assert "figure_group_scaled" in group_trace["quality_flags"]
+    assert "figure_group_split" not in group_trace["quality_flags"]
+
+
+def test_continuous_reflow_splits_impossible_figure_caption() -> None:
+    caption = _block(
+        "p1_fig_caption",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=150, x1=320, y1=180),
+        source_text="Fig. 1. Long caption.",
+        reading_order=1,
+    )
+    figure = Asset(
+        asset_id="fig_caption_split",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=50, y0=50, x1=170, y1=140),
+        path="/api/documents/doc_1/assets/fig_caption_split.png",
+        alt_text="Caption split figure",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_fig_caption",
+            translated_text="Fig. 1. " + "Long caption text " * 80,
+            role=BlockRole.CAPTION,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 240.0,
+                    "height_pt": 180.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([caption], [figure]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    group_trace = render_document.layout_trace["figure_groups"][0]
+    caption_blocks = [
+        block
+        for page in render_document.pages
+        for block in page.blocks
+        if block.source_block_id == "p1_fig_caption"
+    ]
+    caption_flags = {
+        flag
+        for block in caption_blocks
+        for flag in block.quality_flags
+    }
+
+    assert len(caption_blocks) > 1
+    assert group_trace["asset_id"] == "fig_caption_split"
+    assert "figure_group_split" in group_trace["quality_flags"]
+    assert "figure_caption_continued" in caption_flags
+    assert "reflow_split" in caption_flags
+    assert "reflow_continued" in caption_flags
+    assert "overflow_clipped" not in caption_flags
 
 
 def test_continuous_reflow_allocates_display_formula_height() -> None:

@@ -41,13 +41,17 @@ class Storage:
         stem = f"{doc_id}.{_upload_role_stem(role)}" if role else doc_id
         path = self.uploads / f"{stem}{suffix}"
         total_bytes = 0
+        too_large = False
         with path.open("wb") as out:
             while chunk := await upload.read(1024 * 1024):
                 total_bytes += len(chunk)
                 if total_bytes > max_bytes:
-                    path.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail="PDF upload is too large")
+                    too_large = True
+                    break
                 out.write(chunk)
+        if too_large:
+            path.unlink(missing_ok=True)
+            raise HTTPException(status_code=413, detail="PDF upload is too large")
         return path
 
     async def save_upload_file(
@@ -60,13 +64,17 @@ class Storage:
         suffix = Path(upload.filename or f"upload{default_suffix}").suffix or default_suffix
         path = self.uploads / f"{doc_id}{suffix}"
         total_bytes = 0
+        too_large = False
         with path.open("wb") as out:
             while chunk := await upload.read(1024 * 1024):
                 total_bytes += len(chunk)
                 if total_bytes > max_bytes:
-                    path.unlink(missing_ok=True)
-                    raise HTTPException(status_code=413, detail="Upload is too large")
+                    too_large = True
+                    break
                 out.write(chunk)
+        if too_large:
+            path.unlink(missing_ok=True)
+            raise HTTPException(status_code=413, detail="Upload is too large")
         return path
 
     def find_upload(self, doc_id: str, role: str | None = None) -> Path | None:

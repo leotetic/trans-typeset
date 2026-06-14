@@ -187,6 +187,7 @@ function App() {
   const [artifacts, setArtifacts] = useState<ArtifactSummary[]>([]);
   const [artifactIssue, setArtifactIssue] = useState<string | null>(null);
   const [selectedArtifact, setSelectedArtifact] = useState("renderer-diagnostics");
+  const [renderEvaluationWarning, setRenderEvaluationWarning] = useState<string | null>(null);
   const [inspectorState, setInspectorState] = useState<InspectorState>("idle");
   const [inspectorPayload, setInspectorPayload] = useState<string>("");
   const [inspectorIssue, setInspectorIssue] = useState<string | null>(null);
@@ -487,6 +488,28 @@ function App() {
 
     return () => controller.abort();
   }, [activeDocId, artifacts, isComplete, selectedArtifact]);
+
+  useEffect(() => {
+    if (!activeDocId || !isComplete) {
+      setRenderEvaluationWarning(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    void getDocumentArtifact(activeDocId, "render-evaluation", { signal: controller.signal })
+      .then((payload) => {
+        if (!controller.signal.aborted) {
+          setRenderEvaluationWarning(renderEvaluationMessage(payload));
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setRenderEvaluationWarning(null);
+        }
+      });
+
+    return () => controller.abort();
+  }, [activeDocId, isComplete]);
 
   function resetFileInput() {
     if (inputRef.current) {
@@ -1060,6 +1083,12 @@ function App() {
               </div>
             ) : null}
           </div>
+          {renderEvaluationWarning ? (
+            <div className="render-warning" role="status">
+              <AlertCircle size={16} />
+              <span>{renderEvaluationWarning}</span>
+            </div>
+          ) : null}
           <div className="preview-frame">
             {isComplete && previewUrl ? (
               <>
@@ -2091,6 +2120,22 @@ function isPrivateOrLocalHost(hostname: string) {
     (first === 192 && second === 168) ||
     (first === 169 && second === 254)
   );
+}
+
+function renderEvaluationMessage(payload: unknown) {
+  if (!isRecord(payload) || payload.accepted !== false) {
+    return null;
+  }
+  if (payload.browser_validation_unavailable === true) {
+    return "Preview and PDF are available, but browser layout validation could not run. Check Playwright/Chromium before accepting this output.";
+  }
+  const blockingFlags = isRecord(payload.blocking_flags) ? Object.keys(payload.blocking_flags) : [];
+  const details = blockingFlags.length ? ` Blocking flags: ${blockingFlags.join(", ")}.` : "";
+  return `Preview and PDF are available, but render QA did not pass.${details}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function apiMessage(reason: unknown, fallback: string) {

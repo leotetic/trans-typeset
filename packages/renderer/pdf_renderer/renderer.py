@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, PackageLoader
+from pdf_translator_schema import DocumentIR, LayoutIntentPlan, TranslationLayoutPlan
+from pdf_translator_schema.models import RenderDefaults
 
 from .models import RenderDocument
 
@@ -19,6 +21,8 @@ _API_ASSET_SRC_PATTERN = re.compile(
     r'(?P<prefix>\bsrc=)(?P<quote>["\'])(?P<src>/api/documents/[^"\']+/assets/(?P<filename>[^/"\']+))(?P=quote)'
 )
 _KATEX_FONT_URL_PATTERN = re.compile(r"url\((?:'|\")?fonts/(?P<filename>KaTeX_[^'\"\)]+)(?:'|\")?\)")
+_PT_PER_CSS_PX = 72.0 / 96.0
+_BROWSER_REFLOW_SAFETY_PT = 2.0
 
 
 def _css_class(value: object) -> str:
@@ -84,6 +88,90 @@ def render_to_html(document: RenderDocument) -> str:
     return template.render(document=document)
 
 
+async def render_preview_with_browser_layout(
+    document: DocumentIR,
+    plans: list[TranslationLayoutPlan],
+    target_lang: str,
+    *,
+    render_defaults: RenderDefaults | None = None,
+    layout_intent_plan: LayoutIntentPlan | None = None,
+    asset_base_path: Path | None = None,
+    max_iterations: int = 3,
+) -> tuple[str, RenderDocument, dict[str, Any]]:
+    measured_min_heights: dict[str, float] = {}
+    layout_iterations: list[dict[str, Any]] = []
+    render_document: RenderDocument | None = None
+    html = ""
+    page_diagnostics: dict[str, Any] | None = None
+
+    for iteration in range(1, max(1, max_iterations) + 1):
+        render_document = RenderDocument.from_ir_and_plans(
+            document,
+            plans,
+            target_lang,
+            render_defaults=render_defaults,
+            layout_intent_plan=layout_intent_plan,
+            measured_min_heights=measured_min_heights,
+        )
+        html = render_to_html(render_document)
+        try:
+            measurement = await _measure_html_layout(html, asset_base_path=asset_base_path)
+        except Exception as exc:
+            diagnostics = render_document.diagnostics()
+            return (
+                html,
+                render_document,
+                _merge_browser_diagnostics(
+                    diagnostics,
+                    page_diagnostics=None,
+                    layout_iterations=layout_iterations,
+                    unavailable_error=_friendly_playwright_error(exc),
+                ),
+            )
+
+        page_diagnostics = measurement.get("page") if isinstance(measurement, dict) else {}
+        if not isinstance(page_diagnostics, dict):
+            page_diagnostics = {}
+        overflows = _page_block_overflows(page_diagnostics)
+        layout_iterations.append(
+            {
+                "iteration": iteration,
+                "browser_block_overflow_count": len(overflows),
+                "measured_height_override_count": len(measured_min_heights),
+            }
+        )
+        if not overflows:
+            break
+        overrides = _height_overrides_from_browser_overflows(render_document, overflows)
+        changed = False
+        for signature, height_pt in overrides.items():
+            if height_pt > measured_min_heights.get(signature, 0.0) + 0.01:
+                measured_min_heights[signature] = height_pt
+                changed = True
+        if not changed:
+            break
+
+    if render_document is None:
+        render_document = RenderDocument.from_ir_and_plans(
+            document,
+            plans,
+            target_lang,
+            render_defaults=render_defaults,
+            layout_intent_plan=layout_intent_plan,
+        )
+        html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    return (
+        html,
+        render_document,
+        _merge_browser_diagnostics(
+            diagnostics,
+            page_diagnostics=page_diagnostics,
+            layout_iterations=layout_iterations,
+        ),
+    )
+
+
 async def render_to_pdf(
     html: str,
     output_path: Path,
@@ -135,6 +223,9 @@ async def render_to_pdf(
 
             await page.set_content(html_for_pdf, wait_until="load")
             diagnostics["page"] = await _collect_page_diagnostics(page)
+            diagnostics["browser_validation"] = _browser_validation_from_page(
+                diagnostics["page"]
+            )
             await page.pdf(
                 path=str(output_path),
                 print_background=True,
@@ -147,6 +238,11 @@ async def render_to_pdf(
     except Exception as exc:
         diagnostics["status"] = "fallback_pdf"
         diagnostics["error"] = _friendly_playwright_error(exc)
+        diagnostics["browser_validation"] = {
+            "status": "unavailable",
+            "error": diagnostics["error"],
+        }
+        diagnostics["browser_validation_unavailable"] = True
         _render_fallback_pdf(html, output_path, exc)
     finally:
         if browser is not None:
@@ -163,6 +259,165 @@ async def render_to_pdf(
                 encoding="utf-8",
             )
     return output_path
+
+
+async def _measure_html_layout(
+    html: str,
+    *,
+    asset_base_path: Path | None = None,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "kind": "browser_layout_measurement",
+        "status": "running",
+        "browser_launched": False,
+        "asset_rewrites": {"inlined": 0, "missing": []},
+    }
+    html_for_browser = (
+        _inline_api_asset_sources(html, asset_base_path, diagnostics)
+        if asset_base_path is not None
+        else html
+    )
+    browser = None
+    _select_playwright_nodejs_path(diagnostics)
+    from playwright.async_api import async_playwright
+
+    async with async_playwright() as playwright:
+        try:
+            browser = await playwright.chromium.launch()
+            diagnostics["browser_launched"] = True
+            page = await browser.new_page()
+            await page.set_content(html_for_browser, wait_until="load")
+            diagnostics["page"] = await _collect_page_diagnostics(page)
+            diagnostics["browser_validation"] = _browser_validation_from_page(
+                diagnostics["page"]
+            )
+            diagnostics["status"] = "completed"
+            return diagnostics
+        finally:
+            if browser is not None:
+                await browser.close()
+
+
+def _merge_browser_diagnostics(
+    renderer_diagnostics: dict[str, Any],
+    *,
+    page_diagnostics: dict[str, Any] | None,
+    layout_iterations: list[dict[str, Any]],
+    unavailable_error: str | None = None,
+) -> dict[str, Any]:
+    diagnostics = dict(renderer_diagnostics)
+    quality_counts = dict(diagnostics.get("quality_flag_counts") or {})
+    diagnostics["layout_iterations"] = layout_iterations
+    if unavailable_error is not None:
+        quality_counts["browser_validation_unavailable"] = (
+            quality_counts.get("browser_validation_unavailable", 0) + 1
+        )
+        diagnostics["quality_flag_counts"] = quality_counts
+        diagnostics["browser_validation"] = {
+            "status": "unavailable",
+            "error": unavailable_error,
+        }
+        diagnostics["browser_validation_unavailable"] = True
+        diagnostics["browser_block_overflow_count"] = 0
+        diagnostics["browser_overflows"] = []
+        diagnostics["browser_figure_group_issue_count"] = 0
+        diagnostics["browser_figure_group_issues"] = []
+        return diagnostics
+
+    page_diagnostics = page_diagnostics or {}
+    overflows = _annotated_browser_overflows(_page_block_overflows(page_diagnostics))
+    figure_group_issues = page_diagnostics.get("figure_group_issues")
+    if not isinstance(figure_group_issues, list):
+        figure_group_issues = []
+    if overflows:
+        quality_counts["browser_overflow"] = quality_counts.get("browser_overflow", 0) + len(
+            overflows
+        )
+    diagnostics["quality_flag_counts"] = quality_counts
+    diagnostics["browser_validation"] = _browser_validation_from_page(page_diagnostics)
+    diagnostics["browser_validation_unavailable"] = False
+    diagnostics["browser_block_overflow_count"] = len(overflows)
+    diagnostics["browser_overflows"] = overflows
+    diagnostics["browser_figure_group_issue_count"] = len(figure_group_issues)
+    diagnostics["browser_figure_group_issues"] = figure_group_issues
+    return diagnostics
+
+
+def _browser_validation_from_page(page_diagnostics: dict[str, Any]) -> dict[str, Any]:
+    block_count = int(page_diagnostics.get("block_overflow_count") or 0)
+    figure_count = int(page_diagnostics.get("figure_group_issue_count") or 0)
+    status = "passed" if block_count == 0 and figure_count == 0 else "failed"
+    return {
+        "status": status,
+        "block_overflow_count": block_count,
+        "figure_group_issue_count": figure_count,
+    }
+
+
+def _page_block_overflows(page_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    overflows = page_diagnostics.get("block_overflows")
+    if not isinstance(overflows, list):
+        return []
+    return [overflow for overflow in overflows if isinstance(overflow, dict)]
+
+
+def _height_overrides_from_browser_overflows(
+    render_document: RenderDocument,
+    overflows: list[dict[str, Any]],
+) -> dict[str, float]:
+    blocks_by_id = {
+        block.block_id: block
+        for page in render_document.pages
+        for block in page.blocks
+    }
+    blocks_by_signature = {
+        block.layout_signature: block
+        for page in render_document.pages
+        for block in page.blocks
+        if block.layout_signature
+    }
+    overrides: dict[str, float] = {}
+    for overflow in overflows:
+        signature = overflow.get("layout_signature")
+        block = blocks_by_signature.get(signature) if isinstance(signature, str) else None
+        if block is None:
+            block_id = overflow.get("block_id")
+            block = blocks_by_id.get(block_id) if isinstance(block_id, str) else None
+        if block is None or not block.layout_signature:
+            continue
+        scroll_height = _as_float(overflow.get("scroll_height"))
+        client_height = _as_float(overflow.get("client_height"))
+        delta_pt = max(0.0, scroll_height - client_height) * _PT_PER_CSS_PX
+        height_pt = (
+            block.bbox.y1
+            - block.bbox.y0
+            + delta_pt
+            + _BROWSER_REFLOW_SAFETY_PT
+        )
+        overrides[block.layout_signature] = max(
+            overrides.get(block.layout_signature, 0.0),
+            height_pt,
+        )
+    return overrides
+
+
+def _annotated_browser_overflows(overflows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for overflow in overflows:
+        item = dict(overflow)
+        scroll_height = _as_float(item.get("scroll_height"))
+        client_height = _as_float(item.get("client_height"))
+        item["height_delta_px"] = round(max(0.0, scroll_height - client_height), 4)
+        item["height_delta_pt"] = round(item["height_delta_px"] * _PT_PER_CSS_PX, 4)
+        annotated.append(item)
+    return annotated
+
+
+def _as_float(value: object) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _initial_pdf_diagnostics(
@@ -260,11 +515,15 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
               }
               return {
                 block_id: block.getAttribute('data-block-id'),
+                source_block_id: block.getAttribute('data-source-block-id'),
+                layout_signature: block.getAttribute('data-layout-signature'),
                 page_id: block.closest('.page')?.getAttribute('data-page-id') || null,
                 scroll_height: scrollHeight,
                 client_height: clientHeight,
                 scroll_width: scrollWidth,
-                client_width: clientWidth
+                client_width: clientWidth,
+                height_delta: Math.max(0, scrollHeight - clientHeight),
+                width_delta: Math.max(0, scrollWidth - clientWidth)
               };
             })
             .filter(Boolean);

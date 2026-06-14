@@ -5,7 +5,12 @@ import inspect
 from pathlib import Path
 from typing import Any
 
-from pdf_renderer import RenderDocument, render_to_html, render_to_pdf
+from pdf_renderer import (
+    RenderDocument,
+    render_preview_with_browser_layout,
+    render_to_html,
+    render_to_pdf,
+)
 from pdf_translator_schema import (
     DocumentIR,
     InputKind,
@@ -564,7 +569,7 @@ async def _run_workflow_from_document(
         chunks=status_chunks,
     )
     storage.write_json(doc_id, "translation-plans.json", [plan.model_dump() for plan in plans])
-    html, renderer_diagnostics = _render_preview_artifacts(
+    html, renderer_diagnostics = await _render_preview_artifacts(
         doc_id,
         document,
         plans,
@@ -624,7 +629,7 @@ async def _run_workflow_from_document(
             "validation-and-repair.json",
             {"layout_intent_plan": {"status": "valid"}, "repairs": repairs},
         )
-        html, renderer_diagnostics = _render_preview_artifacts(
+        html, renderer_diagnostics = await _render_preview_artifacts(
             doc_id,
             document,
             plans,
@@ -860,7 +865,7 @@ async def _render_pdf_with_optional_diagnostics(
     return await render_to_pdf(html, output_path)
 
 
-def _render_preview_artifacts(
+async def _render_preview_artifacts(
     doc_id: str,
     document: DocumentIR,
     plans: list[TranslationLayoutPlan],
@@ -868,16 +873,15 @@ def _render_preview_artifacts(
     render_defaults: Any,
     layout_plan: Any,
 ) -> tuple[str, dict[str, Any]]:
-    render_document = RenderDocument.from_ir_and_plans(
+    html, render_document, renderer_diagnostics = await render_preview_with_browser_layout(
         document,
         plans,
         target_lang,
         render_defaults=render_defaults,
         layout_intent_plan=layout_plan,
+        asset_base_path=storage.asset_dir(doc_id),
     )
-    html = render_to_html(render_document)
     storage.save_preview_html(doc_id, html)
-    renderer_diagnostics = render_document.diagnostics()
     storage.write_json(doc_id, "renderer-diagnostics.json", renderer_diagnostics)
     storage.write_json(doc_id, "layout-trace.json", render_document.layout_trace)
     return html, renderer_diagnostics

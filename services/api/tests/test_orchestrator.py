@@ -9,7 +9,7 @@ from app import runtime_config
 from app.config import Settings
 from app.models import JobState
 from app.pipeline import orchestrator
-from app.pipeline.workflow import coerce_user_intent
+from app.pipeline.workflow import coerce_user_intent, render_evaluation_summary
 from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
 from pdf_renderer import RenderDocument
@@ -31,6 +31,38 @@ from pdf_translator_schema.models import (
     OCRRecognitionResult,
     RenderDefaults,
 )
+
+
+def test_render_evaluation_blocks_browser_overflow() -> None:
+    evaluation = render_evaluation_summary(
+        {
+            "quality_flag_counts": {},
+            "layout_issues": [],
+            "browser_block_overflow_count": 2,
+            "browser_validation_unavailable": False,
+        }
+    )
+
+    assert evaluation["accepted"] is False
+    assert evaluation["blocking_flags"] == {"browser_overflow": 2}
+    assert evaluation["repair_recommended"] is True
+    assert evaluation["manual_action_required"] is False
+
+
+def test_render_evaluation_marks_browser_unavailable_without_repair_loop() -> None:
+    evaluation = render_evaluation_summary(
+        {
+            "quality_flag_counts": {"browser_validation_unavailable": 1},
+            "layout_issues": [],
+            "browser_block_overflow_count": 0,
+            "browser_validation_unavailable": True,
+        }
+    )
+
+    assert evaluation["accepted"] is False
+    assert evaluation["blocking_flags"] == {}
+    assert evaluation["repair_recommended"] is False
+    assert evaluation["manual_action_required"] is True
 
 
 def test_process_document_job_persists_frontend_visible_error(
@@ -205,11 +237,34 @@ def test_process_document_job_persists_chunk_progress_artifact(
         captured["renderer_render_defaults"] = kwargs["render_defaults"]
         return real_from_ir_and_plans(*args, **kwargs)
 
+    async def fake_render_preview_with_browser_layout(
+        document_arg,
+        plans_arg,
+        target_lang_arg,
+        *,
+        render_defaults=None,
+        layout_intent_plan=None,
+        asset_base_path=None,
+        max_iterations=3,
+    ):
+        render_document = orchestrator.RenderDocument.from_ir_and_plans(
+            document_arg,
+            plans_arg,
+            target_lang_arg,
+            render_defaults=render_defaults,
+            layout_intent_plan=layout_intent_plan,
+        )
+        return "<html></html>", render_document, render_document.diagnostics()
+
     monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
     monkeypatch.setattr(orchestrator, "build_chunks", fake_build_chunks)
     monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
     monkeypatch.setattr(orchestrator.RenderDocument, "from_ir_and_plans", fake_from_ir_and_plans)
-    monkeypatch.setattr(orchestrator, "render_to_html", lambda _document: "<html></html>")
+    monkeypatch.setattr(
+        orchestrator,
+        "render_preview_with_browser_layout",
+        fake_render_preview_with_browser_layout,
+    )
     monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
 
     asyncio.run(
@@ -323,11 +378,34 @@ def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
         captured["renderer_render_defaults"] = kwargs["render_defaults"]
         return RenderDocument(doc_id="doc_1", target_lang="zh-CN", pages=[])
 
+    async def fake_render_preview_with_browser_layout(
+        document_arg,
+        plans_arg,
+        target_lang_arg,
+        *,
+        render_defaults=None,
+        layout_intent_plan=None,
+        asset_base_path=None,
+        max_iterations=3,
+    ):
+        render_document = orchestrator.RenderDocument.from_ir_and_plans(
+            document_arg,
+            plans_arg,
+            target_lang_arg,
+            render_defaults=render_defaults,
+            layout_intent_plan=layout_intent_plan,
+        )
+        return "<html></html>", render_document, render_document.diagnostics()
+
     monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
     monkeypatch.setattr(orchestrator, "build_chunks", fake_build_chunks)
     monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
     monkeypatch.setattr(orchestrator.RenderDocument, "from_ir_and_plans", fake_from_ir_and_plans)
-    monkeypatch.setattr(orchestrator, "render_to_html", lambda _document: "<html></html>")
+    monkeypatch.setattr(
+        orchestrator,
+        "render_preview_with_browser_layout",
+        fake_render_preview_with_browser_layout,
+    )
     monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
 
     asyncio.run(
@@ -833,11 +911,31 @@ def test_process_document_job_rerenders_preview_after_repair(
     render_calls = 0
     real_render_to_html = orchestrator.render_to_html
 
-    def fake_render_to_html(render_document):
+    async def fake_render_preview_with_browser_layout(
+        document_arg,
+        plans_arg,
+        target_lang_arg,
+        *,
+        render_defaults=None,
+        layout_intent_plan=None,
+        asset_base_path=None,
+        max_iterations=3,
+    ):
         nonlocal render_calls
         render_calls += 1
         suffix = "repaired" if render_calls == 2 else "initial"
-        return f"{real_render_to_html(render_document)}<!-- {suffix} -->"
+        render_document = orchestrator.RenderDocument.from_ir_and_plans(
+            document_arg,
+            plans_arg,
+            target_lang_arg,
+            render_defaults=render_defaults,
+            layout_intent_plan=layout_intent_plan,
+        )
+        return (
+            f"{real_render_to_html(render_document)}<!-- {suffix} -->",
+            render_document,
+            render_document.diagnostics(),
+        )
 
     async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
         assert "<!-- repaired -->" in html
@@ -847,7 +945,11 @@ def test_process_document_job_rerenders_preview_after_repair(
     monkeypatch.setattr(orchestrator, "parse_pdf", lambda _path, _doc_id, _asset_dir: document)
     monkeypatch.setattr(orchestrator, "build_chunks", lambda *_args, **_kwargs: chunks)
     monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: FakeTranslator())
-    monkeypatch.setattr(orchestrator, "render_to_html", fake_render_to_html)
+    monkeypatch.setattr(
+        orchestrator,
+        "render_preview_with_browser_layout",
+        fake_render_preview_with_browser_layout,
+    )
     monkeypatch.setattr(orchestrator, "render_to_pdf", fake_render_to_pdf)
     monkeypatch.setattr(
         orchestrator,
