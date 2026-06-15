@@ -1,6 +1,7 @@
 .DS_Store
 .env
 .env.*
+.tmp/
 .venv/
 !.env.example
 __pycache__/

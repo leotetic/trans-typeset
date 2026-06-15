@@ -1,9 +1,0 @@
-{
-  "openai_api_key": "",
-  "translation_concurrency": 2,
-  "translator_max_attempts": 2,
-  "agent_enable_vision_analysis": false,
-  "ocr_provider_order": [
-    "deterministic"
-  ]
-}
