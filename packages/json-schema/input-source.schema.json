@@ -4,7 +4,8 @@
       "enum": [
         "text",
         "image",
-        "pdf"
+        "pdf",
+        "docx"
       ],
       "title": "InputKind",
       "type": "string"
@@ -103,5 +104,5 @@
   "title": "InputSource",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }

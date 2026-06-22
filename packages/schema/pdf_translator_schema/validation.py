@@ -138,4 +138,73 @@ def validate_layout_intent_plan(
             + ", ".join(sorted(unknown_asset_ids))
         )
 
+    section_ids = {section.section_id for section in plan.structure_plan.sections}
+    unknown_section_block_ids = _unknown_structure_block_ids(plan, expected_ids)
+    if unknown_section_block_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan structure references unknown source_block_id values: "
+            + ", ".join(sorted(unknown_section_block_ids))
+        )
+
+    duplicate_body_block_ids = _duplicate_body_section_block_ids(plan)
+    if duplicate_body_block_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan structure assigns source blocks to multiple body sections: "
+            + ", ".join(sorted(duplicate_body_block_ids))
+        )
+
+    unknown_rule_section_ids = _unknown_rule_section_ids(plan, section_ids)
+    if unknown_rule_section_ids:
+        raise LayoutIntentPlanValidationError(
+            "layout intent plan references unknown section_id values: "
+            + ", ".join(sorted(unknown_rule_section_ids))
+        )
+
     return plan
+
+
+def _unknown_structure_block_ids(
+    plan: LayoutIntentPlan,
+    expected_ids: set[str],
+) -> set[str]:
+    unknown_ids: set[str] = set()
+    for section in plan.structure_plan.sections:
+        for block_id in section.source_block_ids:
+            if block_id not in expected_ids:
+                unknown_ids.add(block_id)
+    return unknown_ids
+
+
+def _duplicate_body_section_block_ids(plan: LayoutIntentPlan) -> set[str]:
+    assigned: dict[str, str] = {}
+    duplicate_ids: set[str] = set()
+    for section in plan.structure_plan.sections:
+        if not section.source_block_ids:
+            continue
+        if section.kind in {"figure", "table", "formula"}:
+            continue
+        for block_id in section.source_block_ids:
+            previous = assigned.get(block_id)
+            if previous is not None and previous != section.section_id:
+                duplicate_ids.add(block_id)
+            assigned[block_id] = section.section_id
+    return duplicate_ids
+
+
+def _unknown_rule_section_ids(
+    plan: LayoutIntentPlan,
+    section_ids: set[str],
+) -> set[str]:
+    referenced: set[str] = set()
+    numbering = plan.numbering_plan
+    for rule in (
+        numbering.heading_numbering,
+        numbering.figure_numbering,
+        numbering.table_numbering,
+        numbering.formula_numbering,
+        numbering.reference_numbering,
+    ):
+        referenced.update(rule.section_ids)
+    referenced.update(numbering.toc_generation.section_ids)
+    referenced.update(plan.bibliography_plan.section_ids)
+    return {section_id for section_id in referenced if section_id not in section_ids}

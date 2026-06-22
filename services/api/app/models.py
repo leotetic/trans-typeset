@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field
-from pdf_translator_schema import RenderDefaults
+from pdf_translator_schema import EditScope, RenderDefaults, StyleIntent, UserConstraints
 
 
 class JobState(StrEnum):
@@ -39,6 +40,27 @@ class JobStatus(BaseModel):
     chunks: list[ChunkProgress] = Field(default_factory=list)
 
 
+class JobLogEvent(BaseModel):
+    id: str
+    sequence: int
+    source: Literal["job", "workflow", "chunk", "artifact"]
+    level: Literal["info", "success", "warning", "error"]
+    phase: str
+    title: str
+    message: str
+    progress: float | None = Field(default=None, ge=0, le=1)
+    details: list[str] = Field(default_factory=list)
+
+
+class JobLogResponse(BaseModel):
+    job_id: str
+    doc_id: str | None = None
+    status: JobState
+    progress: float = Field(ge=0, le=1)
+    message: str
+    events: list[JobLogEvent] = Field(default_factory=list)
+
+
 class CreateDocumentResponse(BaseModel):
     job_id: str
     doc_id: str
@@ -46,6 +68,14 @@ class CreateDocumentResponse(BaseModel):
 
 class BatchCreateDocumentResponse(BaseModel):
     jobs: list[CreateDocumentResponse]
+
+
+class RetypesetJobRequest(BaseModel):
+    instruction: str = ""
+    style_intent: StyleIntent | None = None
+    target_lang: str | None = None
+    constraints: UserConstraints | None = None
+    scope: EditScope = Field(default_factory=EditScope)
 
 
 class RuntimeConfig(BaseModel):

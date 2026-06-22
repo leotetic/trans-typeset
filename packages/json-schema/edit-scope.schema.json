@@ -1,0 +1,38 @@
+{
+  "$defs": {
+    "EditScopeMode": {
+      "enum": [
+        "all",
+        "pages",
+        "blocks"
+      ],
+      "title": "EditScopeMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "$ref": "#/$defs/EditScopeMode",
+      "default": "all"
+    },
+    "page_numbers": {
+      "items": {
+        "type": "integer"
+      },
+      "title": "Page Numbers",
+      "type": "array"
+    },
+    "block_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Block Ids",
+      "type": "array"
+    }
+  },
+  "title": "EditScope",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.2"
+}

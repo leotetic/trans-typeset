@@ -25,11 +25,13 @@ from .formulas.validation import (
 
 FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 FORMULA_REF_PATTERN = re.compile(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}")
+MALFORMED_FORMULA_REF_PATTERN = re.compile(r"(?<!\{)\{formula:([A-Za-z0-9_.:-]+)\}\}")
 
 _GREEK_TO_LATEX = GREEK_TO_LATEX
 _SYMBOL_TO_LATEX = SYMBOL_TO_LATEX
 _FORMULA_CLUSTER_CACHE_ATTR = "_formula_fragment_cluster_diagnostics"
 _FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR = "_formula_ocr_provider_diagnostics"
+_FORMULA_PLACEHOLDER_REPAIR_ATTR = "_formula_placeholder_repair_count"
 _CLUSTER_MERGED_FROM_PREFIX = "formula_cluster_merged_from:"
 _CLUSTER_PRIMARY_FLAG = "formula_fragment_cluster_primary"
 _CLUSTER_SUPPRESSED_FLAG = "formula_fragment_cluster_suppressed"
@@ -118,6 +120,9 @@ def normalize_document_formulas(document: DocumentIR) -> DocumentIR:
     normalized_document = DocumentIR.model_validate(
         normalized_document.model_dump(mode="json")
     )
+    normalized_document, placeholder_repair_count = _repair_document_formula_placeholders(
+        normalized_document
+    )
     setattr(
         normalized_document,
         _FORMULA_CLUSTER_CACHE_ATTR,
@@ -139,6 +144,11 @@ def normalize_document_formulas(document: DocumentIR) -> DocumentIR:
                 for cluster in clusters
             ],
         },
+    )
+    setattr(
+        normalized_document,
+        _FORMULA_PLACEHOLDER_REPAIR_ATTR,
+        placeholder_repair_count,
     )
     return normalized_document
 
@@ -188,6 +198,12 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
         if isinstance(ocr_provider_diagnostics, dict)
         else None
     )
+    placeholder_repair_count = int(
+        getattr(document, _FORMULA_PLACEHOLDER_REPAIR_ATTR, 0) or 0
+    )
+    quality_flag_counts = _formula_flag_counts(formulas)
+    if placeholder_repair_count:
+        quality_flag_counts["formula_placeholder_syntax_repaired"] = placeholder_repair_count
     return {
         "kind": "formula_diagnostics",
         "formula_count": len(formulas),
@@ -197,10 +213,52 @@ def build_formula_diagnostics(document: DocumentIR) -> dict:
         "fallback_count": fallback_count,
         "low_confidence_formula_ids": low_confidence,
         "unresolved_placeholders": unresolved,
-        "quality_flag_counts": _formula_flag_counts(formulas),
+        "malformed_placeholder_repaired_count": placeholder_repair_count,
+        "quality_flag_counts": quality_flag_counts,
         "ocr_provider": _formula_ocr_provider_status(active_provider_order),
         **cluster_diagnostics,
     }
+
+
+def repair_formula_placeholders(
+    text: str,
+    known_formula_ids: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, int]:
+    if not text:
+        return text, 0
+    known_ids = set(known_formula_ids or [])
+    repaired_count = 0
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal repaired_count
+        formula_id = match.group(1)
+        if known_ids and formula_id not in known_ids:
+            return match.group(0)
+        repaired_count += 1
+        return formula_ref(formula_id)
+
+    return MALFORMED_FORMULA_REF_PATTERN.sub(replace, text), repaired_count
+
+
+def _repair_document_formula_placeholders(document: DocumentIR) -> tuple[DocumentIR, int]:
+    known_formula_ids = set(document.formulas_by_id())
+    repaired_count = 0
+    pages = []
+    for page in document.pages:
+        blocks = []
+        for block in page.blocks:
+            updates: dict[str, str] = {}
+            for field in ("source_text", "text_for_translation"):
+                value = getattr(block, field)
+                repaired, count = repair_formula_placeholders(value, known_formula_ids)
+                if count:
+                    updates[field] = repaired
+                    repaired_count += count
+            blocks.append(block.model_copy(update=updates, deep=True) if updates else block)
+        pages.append(page.model_copy(update={"blocks": blocks}, deep=True))
+    if not repaired_count:
+        return document, 0
+    return document.model_copy(update={"pages": pages}, deep=True), repaired_count
 
 
 def formula_placeholders_for_block(block: DocumentBlock) -> list[str]:

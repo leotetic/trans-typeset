@@ -1,5 +1,154 @@
 {
   "$defs": {
+    "AcademicRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": {
+          "minLength": 1,
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "category": {
+          "default": "structure",
+          "enum": [
+            "structure",
+            "style",
+            "metadata",
+            "numbering",
+            "bibliography",
+            "length",
+            "tone",
+            "asset"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "section_kinds": {
+          "items": {
+            "$ref": "#/$defs/SectionKind"
+          },
+          "title": "Section Kinds",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "requirement_id"
+      ],
+      "title": "AcademicRequirement",
+      "type": "object"
+    },
+    "BibliographyPreference": {
+      "additionalProperties": false,
+      "properties": {
+        "citation_style": {
+          "$ref": "#/$defs/CitationStyle",
+          "default": "auto"
+        },
+        "default_reason": {
+          "default": "No explicit citation style was requested.",
+          "title": "Default Reason",
+          "type": "string"
+        }
+      },
+      "title": "BibliographyPreference",
+      "type": "object"
+    },
+    "CitationStyle": {
+      "enum": [
+        "auto",
+        "gb_t_7714",
+        "apa",
+        "mla",
+        "ieee",
+        "chicago"
+      ],
+      "title": "CitationStyle",
+      "type": "string"
+    },
+    "ColumnLayoutDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "column_count": {
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Column Count",
+          "type": "integer"
+        },
+        "column_gap_pt": {
+          "default": 18.0,
+          "minimum": 0,
+          "title": "Column Gap Pt",
+          "type": "number"
+        },
+        "scope": {
+          "default": "body",
+          "enum": [
+            "document",
+            "body"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "balance_columns": {
+          "default": false,
+          "title": "Balance Columns",
+          "type": "boolean"
+        }
+      },
+      "title": "ColumnLayoutDefaults",
+      "type": "object"
+    },
+    "DocumentKind": {
+      "enum": [
+        "course_paper",
+        "undergraduate_thesis",
+        "lab_report",
+        "proposal_report",
+        "book_report",
+        "social_practice_report",
+        "group_assignment",
+        "homework",
+        "generic_academic"
+      ],
+      "title": "DocumentKind",
+      "type": "string"
+    },
+    "OutputFormat": {
+      "enum": [
+        "html_preview",
+        "pdf",
+        "docx"
+      ],
+      "title": "OutputFormat",
+      "type": "string"
+    },
     "OutputKind": {
       "enum": [
         "translation",
@@ -8,6 +157,60 @@
         "summary_layout"
       ],
       "title": "OutputKind",
+      "type": "string"
+    },
+    "OutputTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/OutputFormat",
+          "default": "pdf"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "artifact_name": {
+          "default": "",
+          "title": "Artifact Name",
+          "type": "string"
+        }
+      },
+      "title": "OutputTarget",
+      "type": "object"
+    },
+    "SectionKind": {
+      "enum": [
+        "cover",
+        "title",
+        "abstract",
+        "keywords",
+        "toc",
+        "list_of_figures",
+        "list_of_tables",
+        "body",
+        "heading",
+        "figure",
+        "table",
+        "formula",
+        "references",
+        "appendix",
+        "acknowledgements",
+        "author_info",
+        "department",
+        "course_info",
+        "experiment_metadata",
+        "experiment_purpose",
+        "experiment_theory",
+        "experiment_steps",
+        "experiment_results",
+        "experiment_analysis",
+        "result_analysis",
+        "conclusion",
+        "unknown"
+      ],
+      "title": "SectionKind",
       "type": "string"
     },
     "StyleIntent": {
@@ -19,6 +222,89 @@
         "plain"
       ],
       "title": "StyleIntent",
+      "type": "string"
+    },
+    "TaskIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": {
+          "$ref": "#/$defs/DocumentKind",
+          "default": "generic_academic"
+        },
+        "audience": {
+          "default": "",
+          "title": "Audience",
+          "type": "string"
+        },
+        "language": {
+          "default": "zh-CN",
+          "title": "Language",
+          "type": "string"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "title": "TaskIntent",
+      "type": "object"
+    },
+    "TemplateProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/TemplateSource",
+          "default": "default_academic"
+        },
+        "standard": {
+          "default": "none",
+          "title": "Standard",
+          "type": "string"
+        },
+        "institution": {
+          "default": "",
+          "title": "Institution",
+          "type": "string"
+        },
+        "department": {
+          "default": "",
+          "title": "Department",
+          "type": "string"
+        },
+        "template_asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Template Asset Ids",
+          "type": "array"
+        },
+        "fallback_used": {
+          "default": true,
+          "title": "Fallback Used",
+          "type": "boolean"
+        }
+      },
+      "title": "TemplateProfile",
+      "type": "object"
+    },
+    "TemplateSource": {
+      "enum": [
+        "school_template",
+        "course_requirement",
+        "user_specified",
+        "default_academic"
+      ],
+      "title": "TemplateSource",
       "type": "string"
     },
     "TypesettingStandard": {
@@ -63,14 +349,36 @@
       },
       "title": "UserConstraints",
       "type": "object"
+    },
+    "WorkflowMode": {
+      "enum": [
+        "translate_only",
+        "typeset_only",
+        "translate_and_typeset"
+      ],
+      "title": "WorkflowMode",
+      "type": "string"
     }
   },
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "default": "0.2",
+      "enum": [
+        "0.1",
+        "0.2"
+      ],
+      "title": "Schema Version",
+      "type": "string"
+    },
     "target_lang": {
       "default": "zh-CN",
       "title": "Target Lang",
       "type": "string"
+    },
+    "workflow_mode": {
+      "$ref": "#/$defs/WorkflowMode",
+      "default": "translate_and_typeset"
     },
     "output_kind": {
       "$ref": "#/$defs/OutputKind",
@@ -112,10 +420,36 @@
     },
     "constraints": {
       "$ref": "#/$defs/UserConstraints"
+    },
+    "column_layout": {
+      "$ref": "#/$defs/ColumnLayoutDefaults"
+    },
+    "task_intent": {
+      "$ref": "#/$defs/TaskIntent"
+    },
+    "output_targets": {
+      "items": {
+        "$ref": "#/$defs/OutputTarget"
+      },
+      "title": "Output Targets",
+      "type": "array"
+    },
+    "template_profile": {
+      "$ref": "#/$defs/TemplateProfile"
+    },
+    "bibliography_preference": {
+      "$ref": "#/$defs/BibliographyPreference"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/AcademicRequirement"
+      },
+      "title": "Requirements",
+      "type": "array"
     }
   },
   "title": "UserIntent",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }

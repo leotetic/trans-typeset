@@ -9,7 +9,13 @@ from types import SimpleNamespace
 import pdf_renderer.models as renderer_models
 import pdf_renderer.renderer as renderer_module
 import pytest
-from pdf_renderer import RenderDocument, render_to_html, render_to_pdf
+from pdf_renderer import (
+    RenderBlock,
+    RenderDocument,
+    RenderPage,
+    render_to_html,
+    render_to_pdf,
+)
 from pdf_translator_schema import (
     Asset,
     BlockRole,
@@ -292,6 +298,19 @@ def test_pdf_export_page_diagnostics_collects_overflow_and_figure_checks() -> No
                         "client_width": 100,
                     }
                 ],
+                "block_visual_slack_count": 1,
+                "block_visual_slacks": [
+                    {
+                        "block_id": "p1_b2",
+                        "source_block_id": "p1_b2",
+                        "layout_signature": "p1_b2:1:abc",
+                        "page_id": "r0001",
+                        "client_height": 120,
+                        "visible_height": 52,
+                        "slack_bottom": 60,
+                        "slack_ratio": 0.5,
+                    }
+                ],
                 "figure_group_issue_count": 1,
                 "figure_group_issues": [
                     {
@@ -310,8 +329,12 @@ def test_pdf_export_page_diagnostics_collects_overflow_and_figure_checks() -> No
     diagnostics = asyncio.run(renderer_module._collect_page_diagnostics(page))
 
     assert diagnostics["block_overflow_count"] == 1
+    assert diagnostics["block_visual_slack_count"] == 1
+    assert diagnostics["block_visual_slacks"][0]["slack_bottom"] == 60
     assert diagnostics["figure_group_issue_count"] == 1
     assert "scrollHeight > clientHeight" in page.script
+    assert "visibleTextRects" in page.script
+    assert ".katex-mathml" in page.script
     assert "data-figure-group-id" in page.script
     assert "asset_caption_mismatch" in page.script
 
@@ -387,6 +410,82 @@ def test_browser_layout_iterations_apply_measured_height_override(
     assert render_document.pages[0].blocks[0].layout_signature is not None
 
 
+def test_browser_layout_iterations_apply_measured_preferred_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=130),
+        source_text="Source paragraph.",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="天地玄黄宇宙洪荒" * 20,
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    calls: list[str] = []
+
+    def first_block_height(html: str) -> float:
+        return float(html.split("--h-pt:", 1)[1].split("pt", 1)[0].strip())
+
+    async def fake_measure(html: str, *, asset_base_path=None) -> dict[str, object]:
+        calls.append(html)
+        signature = html.split('data-layout-signature="', 1)[1].split('"', 1)[0]
+        if len(calls) == 1:
+            return {
+                "page": {
+                    "block_overflow_count": 0,
+                    "block_overflows": [],
+                    "block_visual_slack_count": 1,
+                    "block_visual_slacks": [
+                        {
+                            "block_id": "p1_body",
+                            "source_block_id": "p1_body",
+                            "layout_signature": signature,
+                            "page_id": "r0001",
+                            "client_height": 240,
+                            "visible_height": 52,
+                            "slack_bottom": 180,
+                            "slack_ratio": 0.75,
+                        }
+                    ],
+                    "figure_group_issue_count": 0,
+                    "figure_group_issues": [],
+                }
+            }
+        return {
+            "page": {
+                "block_overflow_count": 0,
+                "block_overflows": [],
+                "block_visual_slack_count": 0,
+                "block_visual_slacks": [],
+                "figure_group_issue_count": 0,
+                "figure_group_issues": [],
+            }
+        }
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure)
+
+    _html, _render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([paragraph]),
+            [plan],
+            "zh-CN",
+            render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+        )
+    )
+
+    assert len(calls) == 2
+    assert first_block_height(calls[1]) < first_block_height(calls[0])
+    assert diagnostics["layout_iterations"][1]["measured_preferred_height_count"] == 1
+    assert diagnostics["block_visual_slack_count"] == 0
+
+
 def test_browser_layout_unavailable_marks_renderer_diagnostics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -436,6 +535,426 @@ def test_render_to_html_includes_translated_text_and_block_id() -> None:
 
     assert "一篇论文" in html
     assert 'data-block-id="p1_b1"' in html
+
+
+def test_source_preserving_plan_does_not_report_missing_translation() -> None:
+    block = _block(
+        "p1_b1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Source-only text [1].",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_b1",
+            translated_text="Source-only text [1].",
+            role=BlockRole.PARAGRAPH,
+            quality_flags=["translation_skipped", "source_text_preserved"],
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(_document([block]), [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "Source-only text [1]." in html
+    assert "quality-translation-skipped" in html
+    assert "quality-source-text-preserved" in html
+    assert diagnostics["quality_flag_counts"].get("missing_translation", 0) == 0
+    assert diagnostics["quality_flag_counts"]["translation_skipped"] == 1
+
+
+def test_continuous_reflow_two_columns_places_body_in_distinct_x_positions() -> None:
+    title = _block(
+        "p1_title",
+        BlockRole.TITLE,
+        BoundingBox(x0=50, y0=40, x1=550, y1=70),
+        source_text="Two Column Paper",
+        reading_order=0,
+    )
+    body_blocks = [
+        _block(
+            f"p1_body_{index}",
+            BlockRole.PARAGRAPH,
+            BoundingBox(x0=50, y0=90 + index * 40, x1=550, y1=120 + index * 40),
+            source_text=(
+                "This paragraph is long enough to occupy multiple estimated lines "
+                "inside a narrow academic column."
+            ),
+            reading_order=index,
+        )
+        for index in range(1, 10)
+    ]
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 24.0},
+        page_layout={
+            "width_pt": 360.0,
+            "height_pt": 360.0,
+            "margin_top_pt": 36.0,
+            "margin_right_pt": 36.0,
+            "margin_bottom_pt": 36.0,
+            "margin_left_pt": 36.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([title, *body_blocks]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    first_page = render_document.pages[0]
+    title_block = next(block for block in first_page.blocks if block.source_block_id == "p1_title")
+    body_page_blocks = [
+        block
+        for block in first_page.blocks
+        if block.source_block_id and block.source_block_id.startswith("p1_body_")
+    ]
+    body_x_positions = sorted({round(block.bbox.x0, 2) for block in body_page_blocks})
+
+    assert render_document.layout_trace["column_layout"]["column_count"] == 2
+    assert title_block.bbox.x0 == pytest.approx(36.0)
+    assert title_block.bbox.x1 == pytest.approx(324.0)
+    assert len(body_x_positions) == 2
+    assert render_document.layout_issues() == []
+    assert {trace["span"] for trace in render_document.layout_trace["blocks"]} >= {
+        "full_width",
+        "column",
+    }
+    assert {
+        trace["column_index"]
+        for trace in render_document.layout_trace["blocks"]
+        if trace["span"] == "column"
+    } == {0, 1}
+
+
+def test_continuous_reflow_two_columns_ignores_source_column_hints_for_output() -> None:
+    title = _block(
+        "p1_title",
+        BlockRole.TITLE,
+        BoundingBox(x0=50, y0=40, x1=550, y1=70),
+        source_text="Two Column Paper",
+        reading_order=0,
+    )
+    left_body = _block(
+        "p1_left_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=130),
+        source_text="Left column body.",
+        reading_order=1,
+    )
+    right_body = _block(
+        "p1_right_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=310, y0=90, x1=550, y1=130),
+        source_text="Right source-column body follows the left body in output flow.",
+        reading_order=2,
+    ).model_copy(update={"column": 1}, deep=True)
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 24.0},
+        page_layout={
+            "width_pt": 360.0,
+            "height_pt": 360.0,
+            "margin_top_pt": 36.0,
+            "margin_right_pt": 36.0,
+            "margin_bottom_pt": 36.0,
+            "margin_left_pt": 36.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([title, left_body, right_body]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    first_page_blocks = {
+        block.source_block_id: block
+        for block in render_document.pages[0].blocks
+        if block.source_block_id
+    }
+    body_traces = {
+        trace["source_block_id"]: trace
+        for trace in render_document.layout_trace["blocks"]
+        if trace["source_block_id"].endswith("_body")
+    }
+
+    assert first_page_blocks["p1_left_body"].bbox.x0 == pytest.approx(36.0)
+    assert first_page_blocks["p1_right_body"].bbox.x0 == pytest.approx(36.0)
+    assert first_page_blocks["p1_right_body"].bbox.y0 > first_page_blocks["p1_left_body"].bbox.y0
+    assert body_traces["p1_left_body"]["column_index"] == 0
+    assert body_traces["p1_right_body"]["column_index"] == 0
+    assert render_document.layout_issues() == []
+
+
+def test_continuous_reflow_two_columns_keeps_narrow_formula_in_current_column() -> None:
+    title = _block(
+        "p1_title",
+        BlockRole.TITLE,
+        BoundingBox(x0=50, y0=40, x1=550, y1=70),
+        source_text="Two Column Paper",
+        reading_order=0,
+    )
+    left_body = _block(
+        "p1_left_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=150),
+        source_text="Left column body before the equation. " * 3,
+        reading_order=1,
+    )
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=160, x1=250, y1=190),
+        source_text="E = mc^2",
+        reading_order=2,
+    )
+    right_body = _block(
+        "p1_right_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=310, y0=90, x1=550, y1=130),
+        source_text="Right source-column body should continue after the formula.",
+        reading_order=3,
+    ).model_copy(update={"column": 1}, deep=True)
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 24.0},
+        page_layout={
+            "width_pt": 360.0,
+            "height_pt": 360.0,
+            "margin_top_pt": 36.0,
+            "margin_right_pt": 36.0,
+            "margin_bottom_pt": 36.0,
+            "margin_left_pt": 36.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([title, left_body, formula, right_body]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    traces = {
+        trace["source_block_id"]: trace
+        for trace in render_document.layout_trace["blocks"]
+    }
+
+    assert traces["p1_formula"]["span"] == "column"
+    assert traces["p1_formula"]["column_index"] == 0
+    assert (
+        traces["p1_formula"]["bbox"]["x1"] - traces["p1_formula"]["bbox"]["x0"]
+    ) == pytest.approx(132.0)
+    assert traces["p1_right_body"]["column_index"] == 0
+    assert traces["p1_right_body"]["bbox"]["y0"] > traces["p1_formula"]["bbox"]["y0"]
+
+
+def test_continuous_reflow_right_source_paragraph_continues_on_left_after_page_break() -> None:
+    paragraph = _block(
+        "p1_right_para",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=310, y0=90, x1=550, y1=720),
+        source_text="Right source column paragraph.",
+        reading_order=0,
+    ).model_copy(update={"column": 1}, deep=True)
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_right_para",
+            translated_text=" ".join(["这是一段跨页重排文本"] * 90),
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 20.0},
+        page_layout={
+            "width_pt": 300.0,
+            "height_pt": 220.0,
+            "margin_top_pt": 18.0,
+            "margin_right_pt": 18.0,
+            "margin_bottom_pt": 18.0,
+            "margin_left_pt": 18.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([paragraph]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    traces = [
+        trace
+        for trace in render_document.layout_trace["blocks"]
+        if trace["source_block_id"] == "p1_right_para"
+    ]
+    continuation_pages = {
+        trace["output_page_id"]
+        for trace in traces
+        if trace["fragment_index"] > 2
+    }
+
+    assert continuation_pages
+    for page_id in continuation_pages:
+        first_trace = min(
+            [trace for trace in traces if trace["output_page_id"] == page_id],
+            key=lambda trace: trace["fragment_index"],
+        )
+        assert first_trace["column_index"] == 0
+        assert first_trace["bbox"]["x0"] == pytest.approx(18.0)
+
+
+def test_continuous_reflow_right_source_formula_after_repagination_starts_left() -> None:
+    body = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=700),
+        source_text="Body before formula.",
+        reading_order=0,
+    )
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=330, y0=710, x1=550, y1=742),
+        source_text="E = mc^2",
+        reading_order=1,
+    ).model_copy(update={"column": 1}, deep=True)
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=" ".join(["正文填充两栏并触发分页"] * 70),
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 20.0},
+        page_layout={
+            "width_pt": 300.0,
+            "height_pt": 220.0,
+            "margin_top_pt": 18.0,
+            "margin_right_pt": 18.0,
+            "margin_bottom_pt": 18.0,
+            "margin_left_pt": 18.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([body, formula]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    formula_trace = next(
+        trace
+        for trace in render_document.layout_trace["blocks"]
+        if trace["source_block_id"] == "p1_formula"
+    )
+
+    assert formula_trace["output_page_id"] != "r0001"
+    assert formula_trace["column_index"] == 0
+    assert formula_trace["bbox"]["x0"] == pytest.approx(18.0)
+
+
+def test_continuous_reflow_two_columns_keeps_wide_formula_full_width() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=40, y0=90, x1=580, y1=130),
+        source_text="E = mc^2",
+        reading_order=0,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 24.0},
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([formula]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    trace = render_document.layout_trace["blocks"][0]
+
+    assert trace["span"] == "full_width"
+    assert trace["column_index"] is None
+
+
+def test_browser_width_overflow_promotes_formula_to_full_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=160, x1=250, y1=190),
+        source_text="E = mc^2",
+        reading_order=0,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        column_layout={"column_count": 2, "column_gap_pt": 24.0},
+    )
+    calls: list[str] = []
+
+    async def fake_measure(html: str, *, asset_base_path=None) -> dict[str, object]:
+        calls.append(html)
+        signature = html.split('data-layout-signature="', 1)[1].split('"', 1)[0]
+        if len(calls) == 1:
+            return {
+                "page": {
+                    "block_overflow_count": 1,
+                    "block_overflows": [
+                        {
+                            "block_id": "p1_formula",
+                            "source_block_id": "p1_formula",
+                            "layout_signature": signature,
+                            "page_id": "r0001",
+                            "scroll_height": 24,
+                            "client_height": 24,
+                            "scroll_width": 220,
+                            "client_width": 120,
+                        }
+                    ],
+                    "figure_group_issue_count": 0,
+                    "figure_group_issues": [],
+                }
+            }
+        return {
+            "page": {
+                "block_overflow_count": 0,
+                "block_overflows": [],
+                "figure_group_issue_count": 0,
+                "figure_group_issues": [],
+            }
+        }
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure)
+
+    _html, render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([formula]),
+            [],
+            "zh-CN",
+            render_defaults=defaults,
+        )
+    )
+
+    assert len(calls) == 2
+    assert render_document.layout_trace["blocks"][0]["span"] == "full_width"
+    assert diagnostics["layout_iterations"][1]["forced_full_width_block_count"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_promoted_full_width"] == 1
 
 
 def test_missing_translation_falls_back_to_source_text_and_quality_flag() -> None:
@@ -641,6 +1160,217 @@ def test_inline_formula_ref_renders_inside_paragraph() -> None:
     assert 'class="katex-display"' not in html
     assert "Energy " in html
     assert "{{formula:formula_inline}}" not in html
+
+
+def test_malformed_inline_formula_ref_is_repaired_before_rendering() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Energy {formula:formula_inline}} is preserved.",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="能量 {formula:formula_inline}} 被保留。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+
+    assert "{formula:formula_inline}}" not in html
+    assert 'data-formula-id="formula_inline"' in html
+    assert render_document.diagnostics()["quality_flag_counts"][
+        "formula_placeholder_syntax_repaired"
+    ] == 1
+
+
+def test_formula_aware_height_estimates_inline_formula_visual_width() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=220, y1=180),
+        source_text=(
+            "Alpha {{formula:formula_a}} beta {{formula:formula_b}} gamma "
+            "{{formula:formula_c}} delta."
+        ),
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_a",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"f_s",
+                source_text="f_s",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+            FormulaIR(
+                formula_id="formula_b",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"\alpha [E] = \alpha [B]",
+                source_text="α[E] = α[B]",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+            FormulaIR(
+                formula_id="formula_c",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"k = p_k / p_1 = d_1 / d_k",
+                source_text="k = p_k / p_1 = d_1 / d_k",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+        ],
+    )
+    width = 120.0
+    raw_lines = renderer_models._estimated_line_count(
+        paragraph.source_text,
+        width,
+        12.0,
+    )
+    visual_text = renderer_models._formula_visual_estimation_text(
+        paragraph.source_text,
+        document,
+        paragraph,
+    )
+    visual_lines = renderer_models._estimated_line_count(visual_text, width, 12.0)
+    estimated_height = renderer_models._estimated_formula_aware_height(
+        paragraph.source_text,
+        width,
+        12.0,
+        1.5,
+        document=document,
+        block=paragraph,
+    )
+
+    assert "{{formula:" not in visual_text
+    assert visual_lines < raw_lines
+    assert estimated_height == pytest.approx(visual_lines * 12.0 * 1.5)
+
+
+def test_continuous_reflow_uses_visual_formula_height_for_inline_formula_paragraph() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=160),
+        source_text=(
+            "We compare {{formula:formula_a}} with {{formula:formula_b}} and "
+            "{{formula:formula_c}} in one dense paragraph."
+        ),
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_a",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"f_s",
+                source_text="f_s",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+            FormulaIR(
+                formula_id="formula_b",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"\alpha [E] = \alpha [B]",
+                source_text="α[E] = α[B]",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+            FormulaIR(
+                formula_id="formula_c",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex=r"k = p_k / p_1 = d_1 / d_k",
+                source_text="k = p_k / p_1 = d_1 / d_k",
+                display_mode="inline",
+                source_kind="inline_text",
+            ),
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=paragraph.source_text,
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        page_layout={
+            "width_pt": 180.0,
+            "height_pt": 240.0,
+            "margin_top_pt": 18.0,
+            "margin_right_pt": 18.0,
+            "margin_bottom_pt": 18.0,
+            "margin_left_pt": 18.0,
+        },
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    render_block = render_document.pages[0].blocks[0]
+    raw_height = renderer_models._estimated_text_height(
+        paragraph.source_text,
+        render_block.bbox,
+        render_block.font_size_pt,
+        render_block.line_height or 1.5,
+    )
+
+    assert render_block.bbox.y1 - render_block.bbox.y0 < raw_height
+    assert "{{formula:" in render_block.text
+    assert "{{formula:" not in (render_block.html or "")
 
 
 def test_invalid_formula_latex_falls_back_with_quality_flag() -> None:
@@ -1603,6 +2333,41 @@ def test_continuous_reflow_keeps_figure_images_with_captions() -> None:
     assert "asset_caption_mismatch" not in diagnostics["quality_flag_counts"]
 
 
+def test_continuous_reflow_does_not_group_narrative_figure_reference_as_caption() -> None:
+    narrative = _block(
+        "p1_narrative",
+        BlockRole.CAPTION,
+        BoundingBox(x0=50, y0=230, x1=320, y1=270),
+        source_text="图 4 展示了有效传播速度的变化趋势。",
+        reading_order=1,
+    )
+    figure = Asset(
+        asset_id="fig4_image",
+        page_id="p1",
+        kind="image",
+        bbox=BoundingBox(x0=52, y0=140, x1=318, y1=220),
+        path="/api/documents/doc_1/assets/fig4_image.png",
+        alt_text="Figure 4",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_narrative",
+            translated_text="图 4 展示了有效传播速度的变化趋势。",
+            role=BlockRole.CAPTION,
+        )
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([narrative], [figure]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+
+    assert render_document.layout_trace["figure_groups"] == []
+
+
 def test_continuous_reflow_defers_figure_group_and_backfills_text() -> None:
     lead = _block(
         "p1_lead",
@@ -2448,6 +3213,88 @@ def test_renderer_converts_bare_script_markers_without_base() -> None:
     assert "_{tail}" not in html
 
 
+def test_continuous_reflow_splits_script_marker_paragraphs_to_avoid_underfill() -> None:
+    intro_1 = _block(
+        "intro_1",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=80),
+        source_text="Opening context for the section.",
+        reading_order=0,
+    )
+    intro_2 = _block(
+        "intro_2",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=320, y1=130),
+        source_text="A short paragraph should leave usable room below it.",
+        reading_order=1,
+    )
+    citation_paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=140, x1=320, y1=200),
+        source_text=(
+            "Subsequent research linked electron current disturbances,32 "
+            "temperature perturbations,33^{,34} and boundary conditions,35 with "
+            "the discharge current form,21^{,36}. These models explain breathing "
+            "oscillations but often miss richer experimental dynamics."
+        ),
+        reading_order=2,
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        page_layout={
+            "width_pt": 260.0,
+            "height_pt": 220.0,
+            "margin_top_pt": 18.0,
+            "margin_right_pt": 18.0,
+            "margin_bottom_pt": 18.0,
+            "margin_left_pt": 18.0,
+        },
+    )
+    fresh_page_document = RenderDocument.from_ir_and_plans(
+        _document([citation_paragraph]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([intro_1, intro_2, citation_paragraph]),
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+    body_blocks = [
+        block
+        for page in render_document.pages
+        for block in page.blocks
+        if block.source_block_id == "p1_body"
+    ]
+    fresh_page_body_blocks = [
+        block
+        for page in fresh_page_document.pages
+        for block in page.blocks
+        if block.source_block_id == "p1_body"
+    ]
+    first_page_body_blocks = [
+        block for block in render_document.pages[0].blocks if block.source_block_id == "p1_body"
+    ]
+
+    assert len(fresh_page_body_blocks) == 1
+    assert len(body_blocks) > 1
+    assert first_page_body_blocks
+    assert first_page_body_blocks[0].block_id == "p1_body__reflow_01"
+    assert "reflow_split" in first_page_body_blocks[0].quality_flags
+    assert "text_script_marker_rendered" in first_page_body_blocks[0].quality_flags
+    assert any("reflow_continued" in block.quality_flags for block in body_blocks[1:])
+    assert "33<sup>,34</sup>" in html
+    assert "21<sup>,36</sup>" in html
+    assert "33^{" not in html
+    assert "21^{" not in html
+
+
 def test_continuous_reflow_formula_numbering_defaults_to_none() -> None:
     document = _display_formula_document([("p1_f1", "formula_1", "E = mc^2")])
     defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
@@ -2557,6 +3404,110 @@ def test_continuous_reflow_safely_splits_formula_bearing_paragraphs() -> None:
     assert sum(1 for block in formula_blocks if block.html is not None) >= 2
     assert html.count('data-formula-id="formula_1"') >= 1
     assert html.count('data-formula-id="formula_2"') >= 1
+
+
+def test_continuous_reflow_resplits_formula_paragraph_after_height_override() -> None:
+    intro = _block(
+        "intro",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=40, x1=320, y1=80),
+        source_text="Prelude text. Prelude text.",
+        reading_order=0,
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=320, y1=160),
+        source_text=(
+            "Measured browser layout keeps {{formula:formula_inline}} with the "
+            "nearby explanation on the partly used page instead of moving the "
+            "whole paragraph to a fresh page with avoidable whitespace."
+        ),
+        reading_order=1,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[intro, paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                anchor_block_id="p1_body",
+                latex="E = mc^2",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+    defaults = RenderDefaults(
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+    ).model_copy(
+        update={
+            "page_layout": RenderDefaults(
+                target_lang="zh-CN",
+                layout_mode="continuous_reflow",
+            ).page_layout.model_copy(
+                update={
+                    "width_pt": 240.0,
+                    "height_pt": 220.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            )
+        },
+        deep=True,
+    )
+
+    first_pass = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    first_body_blocks = [
+        block
+        for page in first_pass.pages
+        for block in page.blocks
+        if block.source_block_id == "p1_body"
+    ]
+    assert len(first_body_blocks) == 1
+
+    body_block = first_body_blocks[0]
+    assert body_block.layout_signature is not None
+    repaired = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=defaults,
+        measured_min_heights={body_block.layout_signature: 220.0},
+    )
+    repaired_body_blocks = [
+        block
+        for page in repaired.pages
+        for block in page.blocks
+        if block.source_block_id == "p1_body"
+    ]
+    first_page_body_blocks = [
+        block
+        for block in repaired.pages[0].blocks
+        if block.source_block_id == "p1_body"
+    ]
+
+    assert len(repaired_body_blocks) > 1
+    assert first_page_body_blocks
+    assert first_page_body_blocks[0].block_id == "p1_body__reflow_01"
+    assert "reflow_split" in first_page_body_blocks[0].quality_flags
+    assert any("reflow_continued" in block.quality_flags for block in repaired_body_blocks[1:])
+    assert "{{formula:formula_inline}}" in " ".join(block.text for block in repaired_body_blocks)
 
 
 def test_continuous_reflow_formula_paragraph_keeps_number_only_on_first_fragment() -> None:
@@ -2689,18 +3640,25 @@ def test_render_to_html_escapes_raw_block_text() -> None:
     assert "&amp;" in html
 
 
-def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:
-    artifact = _block(
+def test_continuous_reflow_suppresses_publication_boilerplate_artifacts() -> None:
+    timestamp = _block(
         "p1_timestamp",
         BlockRole.HEADING,
         BoundingBox(x0=562, y0=390, x1=568, y1=453),
         source_text="25 April 2025 00:08:47",
         reading_order=0,
     )
+    copyright = _block(
+        "p1_copyright",
+        BlockRole.FOOTNOTE,
+        BoundingBox(x0=39, y0=754, x1=90, y1=763),
+        source_text="© Author(s) 2025",
+        reading_order=1,
+    )
     defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
 
     render_document = RenderDocument.from_ir_and_plans(
-        _document([artifact]),
+        _document([timestamp, copyright]),
         [],
         "zh-CN",
         render_defaults=defaults,
@@ -2708,10 +3666,17 @@ def test_continuous_reflow_suppresses_vertical_timestamp_artifacts() -> None:
     html = render_to_html(render_document)
 
     assert "25 April 2025" not in html
+    assert "Author(s) 2025" not in html
     assert render_document.layout_trace["suppressed_artifacts"] == [
         {
             "kind": "source_block_suppressed",
             "source_block_id": "p1_timestamp",
+            "source_page_id": "p1",
+            "reason": "running_header_footer_or_pdf_artifact",
+        },
+        {
+            "kind": "source_block_suppressed",
+            "source_block_id": "p1_copyright",
             "source_page_id": "p1",
             "reason": "running_header_footer_or_pdf_artifact",
         }
@@ -2734,6 +3699,107 @@ def test_render_document_diagnostics_reports_quality_flags() -> None:
     assert diagnostics["block_count"] == 1
     assert diagnostics["quality_flag_counts"]["missing_translation"] == 1
     assert diagnostics["pages"][0]["flagged_blocks"][0]["block_id"] == "p1_b1"
+
+
+def test_render_document_diagnostics_flags_underfilled_non_final_reflow_pages() -> None:
+    page_size = PageSize(width=240, height=200)
+    small_block = RenderBlock(
+        block_id="r1_b1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=18, y0=18, x1=203, y1=70),
+        text="Short but visually underfilled.",
+        style_seed=StyleSeed(),
+        font_size_pt=10.0,
+        source_block_id="p1_b1",
+    )
+    final_block = RenderBlock(
+        block_id="r2_b1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=18, y0=18, x1=82, y1=38),
+        text="Short final page",
+        style_seed=StyleSeed(),
+        font_size_pt=10.0,
+        source_block_id="p1_b2",
+    )
+    render_document = RenderDocument(
+        doc_id="doc_1",
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        pages=[
+            RenderPage(page_id="r0001", size=page_size, blocks=[small_block]),
+            RenderPage(page_id="r0002", size=page_size, blocks=[final_block]),
+        ],
+    )
+
+    diagnostics = render_document.diagnostics()
+
+    assert diagnostics["underfilled_reflow_pages"] == ["r0001"]
+    assert diagnostics["quality_flag_counts"]["underfilled_reflow_page"] == 1
+    assert diagnostics["page_utilization"][0]["combined_area_ratio"] == pytest.approx(0.2004)
+    assert diagnostics["page_utilization"][0]["bottom_whitespace_ratio"] == pytest.approx(0.65)
+    assert diagnostics["page_utilization"][1]["page_id"] == "r0002"
+
+
+def test_render_document_diagnostics_flags_right_column_page_start() -> None:
+    page_size = PageSize(width=300, height=220)
+    render_document = RenderDocument(
+        doc_id="doc_1",
+        target_lang="zh-CN",
+        layout_mode="continuous_reflow",
+        pages=[
+            RenderPage(
+                page_id="r0001",
+                size=page_size,
+                blocks=[
+                    RenderBlock(
+                        block_id="r1_right",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=160, y0=18, x1=282, y1=180),
+                        text="Right column starts first.",
+                        style_seed=StyleSeed(),
+                        font_size_pt=10.0,
+                        source_block_id="p1_right",
+                    )
+                ],
+            )
+        ],
+        layout_trace={
+            "layout_mode": "continuous_reflow",
+            "column_layout": {"column_count": 2, "column_gap_pt": 20.0},
+            "render_defaults": {
+                "page_layout": {
+                    "width_pt": 300.0,
+                    "height_pt": 220.0,
+                    "margin_top_pt": 18.0,
+                    "margin_right_pt": 18.0,
+                    "margin_bottom_pt": 18.0,
+                    "margin_left_pt": 18.0,
+                }
+            },
+            "blocks": [
+                {
+                    "source_block_id": "p1_right",
+                    "render_block_id": "r1_right",
+                    "output_page_id": "r0001",
+                    "span": "column",
+                    "column_index": 1,
+                    "bbox": {"x0": 160.0, "y0": 18.0, "x1": 282.0, "y1": 180.0},
+                }
+            ],
+        },
+    )
+
+    diagnostics = render_document.diagnostics()
+
+    assert diagnostics["right_column_start_pages"] == ["r0001"]
+    assert diagnostics["left_column_underfilled_pages"] == ["r0001"]
+    assert diagnostics["quality_flag_counts"]["right_column_page_start"] == 1
+    assert (
+        diagnostics["quality_flag_counts"][
+            "left_column_underfilled_before_right_column"
+        ]
+        == 1
+    )
 
 
 def test_render_to_html_preserves_image_assets_at_document_bbox() -> None:

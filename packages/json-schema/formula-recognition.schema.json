@@ -1,4 +1,19 @@
 {
+  "$defs": {
+    "FormulaSourceKind": {
+      "enum": [
+        "text_layer",
+        "inline_text",
+        "vector_candidate",
+        "image_candidate",
+        "ocr",
+        "mock",
+        "unknown"
+      ],
+      "title": "FormulaSourceKind",
+      "type": "string"
+    }
+  },
   "additionalProperties": false,
   "properties": {
     "latex": {
@@ -21,6 +36,60 @@
       "title": "Confidence",
       "type": "number"
     },
+    "accepted_provider": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Accepted Provider"
+    },
+    "accepted_confidence": {
+      "anyOf": [
+        {
+          "maximum": 1,
+          "minimum": 0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Accepted Confidence"
+    },
+    "validator_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Validator Status"
+    },
+    "fallback_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fallback Reason"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/FormulaSourceKind",
+      "default": "unknown"
+    },
     "quality_flags": {
       "items": {
         "type": "string"
@@ -35,5 +104,5 @@
   "title": "FormulaRecognitionResult",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }

@@ -240,6 +240,31 @@ def test_build_chunks_marks_document_ir_formula_refs_as_not_translatable() -> No
     assert source.requires_translation is False
 
 
+def test_build_chunks_repairs_malformed_formula_refs_for_preserve_tokens() -> None:
+    block = make_block(
+        "p1_b1",
+        "The transport term {formula:p1_formula_a}} remains inline.",
+        role=BlockRole.PARAGRAPH,
+    )
+    formula = FormulaIR(
+        formula_id="p1_formula_a",
+        page_id="p1",
+        anchor_block_id="p1_b1",
+        latex=r"\nabla \cdot \Gamma_\epsilon",
+        source_text="∇ · Γε",
+        display_mode="inline",
+        source_kind="inline_text",
+    )
+
+    chunks = build_chunks(make_document([block], formulas=[formula]), target_lang="zh-CN")
+
+    source = chunks[0].source_blocks[0]
+    assert source.source_text == (
+        "The transport term {{formula:p1_formula_a}} remains inline."
+    )
+    assert "{{formula:p1_formula_a}}" in source.preserve_tokens
+
+
 def test_build_chunks_marks_formula_like_paragraph_cluster_as_not_translatable() -> None:
     token_a = "{{formula:F1}}"
     token_b = "{{formula:F2}}"

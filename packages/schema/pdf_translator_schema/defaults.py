@@ -25,6 +25,12 @@ DEFAULT_RENDER_DEFAULTS = {
     "paragraph_spacing_em": 0.45,
     "layout_mode": "continuous_reflow",
     "formula_numbering": "none",
+    "column_layout": {
+        "column_count": 1,
+        "column_gap_pt": 18.0,
+        "scope": "body",
+        "balance_columns": False,
+    },
     "page_layout": {
         "width_pt": 595.28,
         "height_pt": 841.89,

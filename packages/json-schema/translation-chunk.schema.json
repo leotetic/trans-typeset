@@ -145,6 +145,42 @@
       "title": "BlockRole",
       "type": "string"
     },
+    "ColumnLayoutDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "column_count": {
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Column Count",
+          "type": "integer"
+        },
+        "column_gap_pt": {
+          "default": 18.0,
+          "minimum": 0,
+          "title": "Column Gap Pt",
+          "type": "number"
+        },
+        "scope": {
+          "default": "body",
+          "enum": [
+            "document",
+            "body"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "balance_columns": {
+          "default": false,
+          "title": "Balance Columns",
+          "type": "boolean"
+        }
+      },
+      "title": "ColumnLayoutDefaults",
+      "type": "object"
+    },
     "LayoutMode": {
       "enum": [
         "source_bbox",
@@ -325,6 +361,9 @@
           ],
           "title": "Formula Numbering",
           "type": "string"
+        },
+        "column_layout": {
+          "$ref": "#/$defs/ColumnLayoutDefaults"
         },
         "page_layout": {
           "$ref": "#/$defs/PageLayoutDefaults"
@@ -574,5 +613,5 @@
   "title": "TranslationChunk",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }

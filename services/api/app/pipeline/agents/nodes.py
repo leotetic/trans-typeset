@@ -7,11 +7,14 @@ from typing import Any
 
 from pdf_translator_schema import (
     DocumentIR,
+    EditScope,
     InputKind,
     LayoutIntentPlan,
+    OutputKind,
     SemanticLayoutAnalysis,
     TranslationLayoutPlan,
     UserIntent,
+    WorkflowMode,
     WorkflowRun,
     WorkflowStatus,
     WorkflowStepName,
@@ -20,8 +23,10 @@ from pdf_translator_schema import (
 )
 
 from ...models import JobState
-from ...runtime_config import effective_runtime_config, render_defaults_for_intent
+from ...runtime_config import effective_runtime_config, render_defaults_for_document
+from ..image_ocr import extract_image_text
 from ..parser import UnsupportedPdfError
+from ..scanned_pdf import build_scanned_pdf_document
 from .llm import build_layout_intelligence_client
 from .state import TypesettingGraphContext, TypesettingGraphState
 
@@ -30,8 +35,8 @@ def make_nodes(context: TypesettingGraphContext) -> dict[str, Any]:
     async def read_input(state: TypesettingGraphState) -> TypesettingGraphState:
         return await _read_input(state, context)
 
-    def analyze_intent(state: TypesettingGraphState) -> TypesettingGraphState:
-        return _analyze_intent(state, context)
+    async def analyze_intent(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _analyze_intent(state, context)
 
     async def semantic_recognize(state: TypesettingGraphState) -> TypesettingGraphState:
         return await _semantic_recognize(state, context)
@@ -44,6 +49,9 @@ def make_nodes(context: TypesettingGraphContext) -> dict[str, Any]:
 
     async def translate_chunks(state: TypesettingGraphState) -> TypesettingGraphState:
         return await _translate_chunks_node(state, context)
+
+    async def build_source_plans(state: TypesettingGraphState) -> TypesettingGraphState:
+        return await _build_source_plans_node(state, context)
 
     async def render_preview(state: TypesettingGraphState) -> TypesettingGraphState:
         return await _render_preview(state, context)
@@ -70,6 +78,7 @@ def make_nodes(context: TypesettingGraphContext) -> dict[str, Any]:
         "build_layout_plan": build_layout_plan,
         "validate_layout_plan": validate_layout_plan,
         "translate_chunks": translate_chunks,
+        "build_source_plans": build_source_plans,
         "render_preview": render_preview,
         "evaluate_render": evaluate_render,
         "repair_layout_plan": repair_layout_plan,
@@ -114,7 +123,8 @@ async def _read_input(
             _read_status_message(input_kind),
             doc_id,
         )
-        if input_kind == InputKind.PDF:
+        if input_kind in {InputKind.PDF, InputKind.DOCX}:
+            original_source_path = Path(state["source_path"])
             source_path = Path(state.get("content_source_path") or state["source_path"])
             layout_source_path = (
                 Path(state["layout_source_path"])
@@ -124,11 +134,15 @@ async def _read_input(
             layout_source_fallback = layout_source_path == source_path
             input_source = helpers["build_input_source"](
                 source_id="content_source",
-                input_type=InputKind.PDF,
+                input_type=input_kind,
                 source_role="content",
                 filename=filename,
-                mime_type="application/pdf",
-                path=source_path,
+                mime_type=(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    if input_kind == InputKind.DOCX
+                    else "application/pdf"
+                ),
+                path=original_source_path if input_kind == InputKind.DOCX else source_path,
             )
             layout_input_source = helpers["build_input_source"](
                 source_id="layout_source",
@@ -141,6 +155,8 @@ async def _read_input(
                 if not layout_source_fallback
                 else ["layout_source_fallback_to_content"],
             )
+            used_scanned_ocr = False
+            assets = []
             try:
                 parse_started = time.perf_counter()
                 document = await asyncio.to_thread(
@@ -151,24 +167,61 @@ async def _read_input(
                 )
                 pdf_parse_ms = round((time.perf_counter() - parse_started) * 1000, 2)
             except UnsupportedPdfError as exc:
-                context.storage.write_json(doc_id, "parser-diagnostics.json", exc.diagnostics)
-                workflow = helpers["append_workflow_step"](
-                    workflow,
-                    helpers["make_workflow_step"](
-                        WorkflowStepName.READ_INPUT,
-                        WorkflowStepStatus.FAILED,
-                        progress=1,
-                        message="PDF adapter failed",
-                        diagnostics=exc.diagnostics,
-                        error=str(exc),
-                    ),
-                    status=WorkflowStatus.FAILED,
+                if not exc.diagnostics.get("recoverable"):
+                    context.storage.write_json(doc_id, "parser-diagnostics.json", exc.diagnostics)
+                    workflow = helpers["append_workflow_step"](
+                        workflow,
+                        helpers["make_workflow_step"](
+                            WorkflowStepName.READ_INPUT,
+                            WorkflowStepStatus.FAILED,
+                            progress=1,
+                            message="PDF adapter failed",
+                            diagnostics=exc.diagnostics,
+                            error=str(exc),
+                        ),
+                        status=WorkflowStatus.FAILED,
+                    )
+                    context.save_workflow(doc_id, workflow)
+                    raise
+                context.update_status(
+                    job_id,
+                    filename,
+                    target_lang,
+                    JobState.PARSING,
+                    0.17,
+                    "Extracting scanned PDF text",
+                    doc_id,
                 )
-                context.save_workflow(doc_id, workflow)
-                raise
-            assets = []
+                runtime_config = effective_runtime_config(context.storage)
+                document, assets, scanned_ocr_diagnostics = await build_scanned_pdf_document(
+                    pdf_path=source_path,
+                    doc_id=doc_id,
+                    storage=context.storage,
+                    filename=filename,
+                    intent=intent,
+                    runtime_config=runtime_config,
+                )
+                used_scanned_ocr = True
+                pdf_parse_ms = 0
+                context.storage.write_json(
+                    doc_id,
+                    "asset-ir.json",
+                    [asset.model_dump(mode="json") for asset in assets],
+                )
+                context.storage.write_json(doc_id, "ocr-diagnostics.json", scanned_ocr_diagnostics)
+                context.storage.write_json(
+                    doc_id,
+                    "ocr-recognition.json",
+                    {
+                        "kind": "scanned_pdf_ocr_recognition",
+                        "quality_flags": scanned_ocr_diagnostics.get("quality_flags", []),
+                    },
+                )
             parser_diagnostics = context.build_parser_diagnostics(document)
             parser_diagnostics["pdf_parse_ms"] = pdf_parse_ms
+            if used_scanned_ocr:
+                parser_diagnostics["kind"] = "scanned_pdf_ocr_parser_diagnostics"
+                parser_diagnostics["ocr_fallback_used"] = True
             context.update_status(
                 job_id,
                 filename,
@@ -348,6 +401,10 @@ async def _read_input(
                 "formula-recognition",
                 "formula-diagnostics",
             ]
+            if used_scanned_ocr:
+                output_artifacts.extend(["asset-ir", "ocr-recognition", "ocr-diagnostics"])
+            if input_kind == InputKind.DOCX:
+                output_artifacts.append("docx-conversion")
         elif input_kind == InputKind.TEXT:
             text = state.get("input_text", "")
             input_source = helpers["build_input_source"](
@@ -381,6 +438,22 @@ async def _read_input(
             ]
         else:
             source_path = Path(state["source_path"])
+            runtime_config = effective_runtime_config(context.storage)
+            context.update_status(
+                job_id,
+                filename,
+                target_lang,
+                JobState.PARSING,
+                0.17,
+                "Extracting image text",
+                doc_id,
+            )
+            ocr_result = await extract_image_text(
+                image_path=source_path,
+                filename=filename,
+                mime_type=state.get("mime_type"),
+                runtime_config=runtime_config,
+            )
             input_source = helpers["build_input_source"](
                 source_id="source_1",
                 input_type=InputKind.IMAGE,
@@ -388,7 +461,7 @@ async def _read_input(
                 filename=filename,
                 mime_type=state.get("mime_type"),
                 path=source_path,
-                quality_flags=["deterministic_ocr_mock"],
+                quality_flags=ocr_result.quality_flags,
             )
             document, assets = helpers["build_image_document"](
                 doc_id=doc_id,
@@ -397,7 +470,22 @@ async def _read_input(
                 intent=intent,
                 filename=filename,
                 mime_type=state.get("mime_type"),
+                ocr_result=ocr_result,
             )
+            context.storage.write_json(
+                doc_id,
+                "ocr-recognition.json",
+                {
+                    "kind": "image_ocr_recognition",
+                    "provider": ocr_result.provider,
+                    "blocks": [
+                        {"text": block.text, "role": block.role}
+                        for block in ocr_result.blocks
+                    ],
+                    "quality_flags": ocr_result.quality_flags,
+                },
+            )
+            context.storage.write_json(doc_id, "ocr-diagnostics.json", ocr_result.diagnostics)
             context.storage.write_json(
                 doc_id,
                 "asset-ir.json",
@@ -407,7 +495,8 @@ async def _read_input(
                 "kind": "image_adapter_diagnostics",
                 "text_block_count": sum(len(page.blocks) for page in document.pages),
                 "asset_count": len(assets),
-                "quality_flags": ["deterministic_ocr_mock", "ocr_uncertain"],
+                "ocr_provider": ocr_result.provider,
+                "quality_flags": ocr_result.quality_flags,
             }
             formula_diagnostics = context.build_formula_diagnostics(document)
             normalized = helpers["normalized_input_payload"](
@@ -419,6 +508,8 @@ async def _read_input(
                 "normalized-input",
                 "document-ir",
                 "asset-ir",
+                "ocr-recognition",
+                "ocr-diagnostics",
                 "parser-diagnostics",
                 "formula-diagnostics",
             ]
@@ -468,17 +559,67 @@ async def _read_input(
         return {**state, "workflow": workflow.model_dump(mode="json"), "error": str(exc)}
 
 
-def _analyze_intent(
+async def _analyze_intent(
     state: TypesettingGraphState,
     context: TypesettingGraphContext,
 ) -> TypesettingGraphState:
     if state.get("error"):
         return state
     workflow = _workflow(state)
-    intent = _intent(state)
+    deterministic_intent = _intent(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
+    runtime_config = effective_runtime_config(context.storage)
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.PARSING,
+        0.22,
+        "Analyzing user intent",
+        doc_id,
+    )
+    client = build_layout_intelligence_client(runtime_config)
+    model_intent = await client.analyze_intent(
+        target_lang=target_lang,
+        output_kind=_enum_value(deterministic_intent.output_kind),
+        style_intent=_enum_value(deterministic_intent.style_intent),
+        instruction=deterministic_intent.instruction,
+        deterministic_intent=deterministic_intent,
+    )
+    intent_diagnostics = client.intent_diagnostics()
+    intent = model_intent or deterministic_intent
     context.storage.write_json(doc_id, "user-intent.json", intent.model_dump(mode="json"))
+    step_diagnostics = {
+        "output_kind": intent.output_kind,
+        "style_intent": intent.style_intent,
+        "has_instruction": bool(intent.instruction.strip()),
+        "typesetting_standard": intent.typesetting_standard,
+        "column_count": intent.column_layout.column_count,
+        "column_gap_pt": intent.column_layout.column_gap_pt,
+        "column_scope": intent.column_layout.scope,
+        "intent_model_used": intent_diagnostics.get(
+            "intent_model_used",
+            model_intent is not None,
+        ),
+        "intent_model_provider": intent_diagnostics.get(
+            "intent_model_provider",
+            "none",
+        ),
+    }
+    if intent_diagnostics.get("intent_model"):
+        step_diagnostics["intent_model"] = intent_diagnostics["intent_model"]
+    if intent_diagnostics.get("intent_model_error"):
+        step_diagnostics["intent_model_error"] = intent_diagnostics[
+            "intent_model_error"
+        ]
+    if intent_diagnostics.get("intent_model_skip_reason"):
+        step_diagnostics["intent_model_skip_reason"] = intent_diagnostics[
+            "intent_model_skip_reason"
+        ]
     workflow = helpers["append_workflow_step"](
         workflow,
         helpers["make_workflow_step"](
@@ -488,16 +629,16 @@ def _analyze_intent(
             message="User intent normalized",
             input_artifacts=["normalized-input"],
             output_artifacts=["user-intent"],
-            diagnostics={
-                "output_kind": intent.output_kind,
-                "style_intent": intent.style_intent,
-                "has_instruction": bool(intent.instruction.strip()),
-                "typesetting_standard": intent.typesetting_standard,
-            },
+            diagnostics=step_diagnostics,
         ),
     )
     context.save_workflow(doc_id, workflow)
-    return {**state, "workflow": workflow.model_dump(mode="json")}
+    return {
+        **state,
+        "workflow": workflow.model_dump(mode="json"),
+        "user_intent": intent.model_dump(mode="json"),
+        "runtime_config": _runtime_config_for_state(runtime_config),
+    }
 
 
 async def _semantic_recognize(
@@ -510,14 +651,65 @@ async def _semantic_recognize(
     document = _document(state)
     intent = _intent(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
     runtime_config = effective_runtime_config(context.storage)
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.PARSING,
+        0.26,
+        "Recognizing document semantics",
+        doc_id,
+    )
     deterministic = helpers["build_semantic_layout_analysis"](
         document,
         intent,
         input_kind=InputKind(state["input_kind"]),
     )
-    if state["input_kind"] == InputKind.PDF:
+    if intent.workflow_mode == WorkflowMode.TRANSLATE_ONLY:
+        analysis = deterministic.model_copy(
+            update={
+                "quality_flags": _unique(
+                    [
+                        *deterministic.quality_flags,
+                        "translation_only_minimal_layout",
+                    ]
+                )
+            },
+            deep=True,
+        )
+        context.storage.write_json(
+            doc_id,
+            "semantic-analysis.json",
+            analysis.model_dump(mode="json"),
+        )
+        workflow = helpers["append_workflow_step"](
+            workflow,
+            helpers["make_workflow_step"](
+                WorkflowStepName.SEMANTIC_RECOGNIZE,
+                WorkflowStepStatus.SKIPPED,
+                progress=0.28,
+                message="Semantic layout model skipped for translate-only mode",
+                input_artifacts=["document-ir", "user-intent"],
+                output_artifacts=["semantic-analysis"],
+                diagnostics={
+                    "quality_flags": analysis.quality_flags,
+                    "model_used": False,
+                },
+            ),
+        )
+        context.save_workflow(doc_id, workflow)
+        return {
+            **state,
+            "workflow": workflow.model_dump(mode="json"),
+            "semantic_analysis": analysis.model_dump(mode="json"),
+            "runtime_config": _runtime_config_for_state(runtime_config),
+        }
+    if InputKind(state["input_kind"]) in {InputKind.PDF, InputKind.DOCX}:
         deterministic = deterministic.model_copy(
             update={
                 "quality_flags": _unique(
@@ -592,13 +784,65 @@ async def _build_layout_plan(
     intent = _intent(state)
     analysis = _semantic_analysis(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
     runtime_config = effective_runtime_config(context.storage)
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.PARSING,
+        0.29,
+        "Building layout plan",
+        doc_id,
+    )
     deterministic = helpers["build_layout_intent_plan"](
         document,
         intent,
         semantic_analysis=analysis,
     )
+    if intent.workflow_mode == WorkflowMode.TRANSLATE_ONLY:
+        layout_plan = deterministic.model_copy(
+            update={
+                "quality_flags": _unique(
+                    [
+                        *deterministic.quality_flags,
+                        "translation_only_minimal_layout",
+                    ]
+                )
+            },
+            deep=True,
+        )
+        context.storage.write_json(
+            doc_id,
+            "layout-intent-plan.json",
+            layout_plan.model_dump(mode="json"),
+        )
+        workflow = helpers["append_workflow_step"](
+            workflow,
+            helpers["make_workflow_step"](
+                WorkflowStepName.BUILD_PLAN,
+                WorkflowStepStatus.SKIPPED,
+                progress=0.3,
+                message="Intelligent layout planning skipped for translate-only mode",
+                input_artifacts=["document-ir", "user-intent", "semantic-analysis"],
+                output_artifacts=["layout-intent-plan"],
+                diagnostics={
+                    "quality_flags": layout_plan.quality_flags,
+                    "planner_fallback": True,
+                    "workflow_mode": intent.workflow_mode,
+                },
+            ),
+        )
+        context.save_workflow(doc_id, workflow)
+        return {
+            **state,
+            "workflow": workflow.model_dump(mode="json"),
+            "layout_plan": layout_plan.model_dump(mode="json"),
+            "runtime_config": _runtime_config_for_state(runtime_config),
+        }
     client = build_layout_intelligence_client(runtime_config)
     model_plan = await client.build_layout_plan(
         document=document,
@@ -610,6 +854,10 @@ async def _build_layout_plan(
     if model_plan is not None:
         try:
             layout_plan = validate_layout_intent_plan(document, model_plan)
+            layout_plan = layout_plan.model_copy(
+                update={"column_layout": intent.column_layout},
+                deep=True,
+            )
         except Exception:
             layout_plan = deterministic
             planner_fallback = True
@@ -625,6 +873,10 @@ async def _build_layout_plan(
             },
             deep=True,
         )
+    layout_plan = layout_plan.model_copy(
+        update={"column_layout": intent.column_layout},
+        deep=True,
+    )
     context.storage.write_json(
         doc_id,
         "layout-intent-plan.json",
@@ -642,6 +894,9 @@ async def _build_layout_plan(
             diagnostics={
                 "quality_flags": layout_plan.quality_flags,
                 "planner_fallback": planner_fallback,
+                "column_count": layout_plan.column_layout.column_count,
+                "column_gap_pt": layout_plan.column_layout.column_gap_pt,
+                "column_scope": layout_plan.column_layout.scope,
             },
         ),
     )
@@ -664,8 +919,24 @@ def _validate_layout_plan(
     document = _document(state)
     layout_plan = _layout_plan(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
     repairs = list(state.get("repairs", []))
+    has_translation_plans = bool(state.get("translation_plans"))
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.RENDERING if has_translation_plans else JobState.PARSING,
+        0.91 if has_translation_plans else 0.32,
+        "Validating repaired layout plan"
+        if has_translation_plans
+        else "Validating layout plan",
+        doc_id,
+        chunks=_chunk_progress(state) if has_translation_plans else None,
+    )
     validated, validation = helpers["safe_validate_layout_intent_plan"](
         document,
         layout_plan,
@@ -716,7 +987,12 @@ async def _translate_chunks_node(
     target_lang = state["target_lang"]
     helpers = context.workflow_helpers
     runtime_config = effective_runtime_config(context.storage)
-    render_defaults = render_defaults_for_intent(context.storage, target_lang, intent)
+    render_defaults = render_defaults_for_document(
+        context.storage,
+        target_lang,
+        intent,
+        document,
+    )
     chunks = context.build_chunks(
         document,
         target_lang=target_lang,
@@ -800,6 +1076,114 @@ async def _translate_chunks_node(
     }
 
 
+async def _build_source_plans_node(
+    state: TypesettingGraphState,
+    context: TypesettingGraphContext,
+) -> TypesettingGraphState:
+    if state.get("error"):
+        return state
+    workflow = _workflow(state)
+    document = _document(state)
+    layout_plan = _layout_plan(state)
+    intent = _intent(state)
+    job_id = state["job_id"]
+    doc_id = state["doc_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
+    helpers = context.workflow_helpers
+    runtime_config = effective_runtime_config(context.storage)
+    context.ensure_not_canceled(job_id)
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.PARSING,
+        0.36,
+        "Preparing source text for typesetting",
+        doc_id,
+    )
+    render_defaults = render_defaults_for_document(
+        context.storage,
+        target_lang,
+        intent,
+        document,
+    )
+    chunks = context.build_chunks(
+        document,
+        target_lang=target_lang,
+        max_chars=runtime_config["translation_chunk_max_chars"],
+        render_defaults=render_defaults,
+    )
+    plans = helpers["build_source_preserving_layout_plans"](
+        document=document,
+        chunks=chunks,
+        layout_plan=layout_plan,
+        edit_scope=EditScope(),
+    )
+    status_chunks = helpers["initial_chunk_progress"](chunks)
+    for progress in status_chunks:
+        progress.status = "skipped"
+        progress.progress = 1
+        progress.message = "Translation skipped"
+        progress.quality_flags = ["translation_skipped", "source_text_preserved"]
+    context.storage.write_json(
+        doc_id,
+        "translation-chunks.json",
+        [chunk.model_dump(mode="json") for chunk in chunks],
+    )
+    context.storage.write_json(
+        doc_id,
+        "translation-plans.json",
+        [plan.model_dump(mode="json") for plan in plans],
+    )
+    context.storage.write_json(
+        doc_id,
+        "translation-progress.json",
+        [progress.model_dump(mode="json") for progress in status_chunks],
+    )
+    context.storage.write_json(doc_id, "edit-scope.json", EditScope().model_dump(mode="json"))
+    context.storage.write_json(
+        doc_id,
+        "retypeset-source.json",
+        helpers["source_preserving_summary"](
+            document=document,
+            edit_scope=EditScope(),
+            chunks=chunks,
+            plans=plans,
+            reused_existing_plans=False,
+        ),
+    )
+    workflow = helpers["append_workflow_step"](
+        workflow,
+        helpers["make_workflow_step"](
+            WorkflowStepName.TRANSLATE,
+            WorkflowStepStatus.SKIPPED,
+            progress=0.78,
+            message="Translation skipped for source-only typesetting",
+            input_artifacts=["translation-chunks"],
+            output_artifacts=[
+                "translation-plans",
+                "translation-progress",
+                "edit-scope",
+                "retypeset-source",
+            ],
+            diagnostics={
+                "quality_flags": ["translation_skipped", "source_text_preserved"],
+                "chunk_count": len(chunks),
+                "block_count": sum(len(chunk.source_blocks) for chunk in chunks),
+            },
+        ),
+    )
+    context.save_workflow(doc_id, workflow)
+    return {
+        **state,
+        "workflow": workflow.model_dump(mode="json"),
+        "translation_plans": [plan.model_dump(mode="json") for plan in plans],
+        "chunk_progress": [progress.model_dump(mode="json") for progress in status_chunks],
+        "runtime_config": _runtime_config_for_state(runtime_config),
+    }
+
+
 async def _render_preview(
     state: TypesettingGraphState,
     context: TypesettingGraphContext,
@@ -828,7 +1212,12 @@ async def _render_preview(
         doc_id,
         chunks=status_chunks,
     )
-    render_defaults = render_defaults_for_intent(context.storage, target_lang, intent)
+    render_defaults = render_defaults_for_document(
+        context.storage,
+        target_lang,
+        intent,
+        document,
+    )
     html, renderer_diagnostics = await context.render_preview_artifacts(
         doc_id,
         document,
@@ -871,7 +1260,20 @@ def _evaluate_render(
         return state
     workflow = _workflow(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.RENDERING,
+        0.88,
+        "Evaluating rendered layout",
+        doc_id,
+        chunks=_chunk_progress(state),
+    )
     evaluation = helpers["render_evaluation_summary"](
         state.get("renderer_diagnostics", {})
     )
@@ -908,8 +1310,21 @@ def _repair_layout_plan(
     before = _layout_plan(state)
     analysis = _semantic_analysis(state)
     doc_id = state["doc_id"]
+    job_id = state["job_id"]
+    filename = state["filename"]
+    target_lang = state["target_lang"]
     helpers = context.workflow_helpers
     attempt = int(state.get("repair_attempt", 0)) + 1
+    context.update_status(
+        job_id,
+        filename,
+        target_lang,
+        JobState.RENDERING,
+        0.9,
+        "Repairing semantic layout intent",
+        doc_id,
+        chunks=_chunk_progress(state),
+    )
     repaired = helpers["build_layout_intent_plan"](
         document,
         intent,
@@ -1103,6 +1518,12 @@ def route_after_validation(state: TypesettingGraphState) -> str:
         return "fail"
     if state.get("translation_plans"):
         return "render_preview"
+    intent = _intent(state)
+    if (
+        intent.workflow_mode == WorkflowMode.TYPESET_ONLY
+        or intent.output_kind == OutputKind.TYPESET_DOCUMENT
+    ):
+        return "build_source_plans"
     return "translate_chunks"
 
 
@@ -1133,6 +1554,12 @@ def _translation_plans(state: TypesettingGraphState) -> list[TranslationLayoutPl
     ]
 
 
+def _enum_value(value: object) -> str:
+    if hasattr(value, "value"):
+        return str(value.value)
+    return str(value)
+
+
 def _chunk_progress(state: TypesettingGraphState) -> list[Any]:
     from .state import chunk_progress_from_state
 
@@ -1142,6 +1569,8 @@ def _chunk_progress(state: TypesettingGraphState) -> list[Any]:
 def _read_status_message(input_kind: InputKind) -> str:
     if input_kind == InputKind.PDF:
         return "Parsing PDF"
+    if input_kind == InputKind.DOCX:
+        return "Parsing converted DOCX"
     if input_kind == InputKind.TEXT:
         return "Reading text input"
     return "Reading image input"

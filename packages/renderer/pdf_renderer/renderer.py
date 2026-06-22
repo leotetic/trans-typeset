@@ -99,6 +99,8 @@ async def render_preview_with_browser_layout(
     max_iterations: int = 3,
 ) -> tuple[str, RenderDocument, dict[str, Any]]:
     measured_min_heights: dict[str, float] = {}
+    measured_preferred_heights: dict[str, float] = {}
+    forced_full_width_block_ids: set[str] = set()
     layout_iterations: list[dict[str, Any]] = []
     render_document: RenderDocument | None = None
     html = ""
@@ -112,6 +114,8 @@ async def render_preview_with_browser_layout(
             render_defaults=render_defaults,
             layout_intent_plan=layout_intent_plan,
             measured_min_heights=measured_min_heights,
+            measured_preferred_heights=measured_preferred_heights,
+            forced_full_width_block_ids=forced_full_width_block_ids,
         )
         html = render_to_html(render_document)
         try:
@@ -133,20 +137,41 @@ async def render_preview_with_browser_layout(
         if not isinstance(page_diagnostics, dict):
             page_diagnostics = {}
         overflows = _page_block_overflows(page_diagnostics)
+        visual_slacks = _page_block_visual_slacks(page_diagnostics)
         layout_iterations.append(
             {
                 "iteration": iteration,
                 "browser_block_overflow_count": len(overflows),
+                "browser_block_visual_slack_count": len(visual_slacks),
                 "measured_height_override_count": len(measured_min_heights),
+                "measured_preferred_height_count": len(measured_preferred_heights),
+                "forced_full_width_block_count": len(forced_full_width_block_ids),
             }
         )
-        if not overflows:
+        if not overflows and not visual_slacks:
             break
         overrides = _height_overrides_from_browser_overflows(render_document, overflows)
+        preferred_overrides = _height_preferences_from_browser_visual_slacks(
+            render_document,
+            visual_slacks,
+        )
+        full_width_overrides = _full_width_block_overrides_from_browser_overflows(
+            render_document,
+            overflows,
+        )
         changed = False
         for signature, height_pt in overrides.items():
             if height_pt > measured_min_heights.get(signature, 0.0) + 0.01:
                 measured_min_heights[signature] = height_pt
+                changed = True
+        for signature, height_pt in preferred_overrides.items():
+            existing = measured_preferred_heights.get(signature)
+            if existing is None or height_pt < existing - 0.01:
+                measured_preferred_heights[signature] = height_pt
+                changed = True
+        for block_id in full_width_overrides:
+            if block_id not in forced_full_width_block_ids:
+                forced_full_width_block_ids.add(block_id)
                 changed = True
         if not changed:
             break
@@ -158,6 +183,8 @@ async def render_preview_with_browser_layout(
             target_lang,
             render_defaults=render_defaults,
             layout_intent_plan=layout_intent_plan,
+            measured_preferred_heights=measured_preferred_heights,
+            forced_full_width_block_ids=forced_full_width_block_ids,
         )
         html = render_to_html(render_document)
     diagnostics = render_document.diagnostics()
@@ -320,12 +347,17 @@ def _merge_browser_diagnostics(
         diagnostics["browser_validation_unavailable"] = True
         diagnostics["browser_block_overflow_count"] = 0
         diagnostics["browser_overflows"] = []
+        diagnostics["block_visual_slack_count"] = 0
+        diagnostics["block_visual_slacks"] = []
         diagnostics["browser_figure_group_issue_count"] = 0
         diagnostics["browser_figure_group_issues"] = []
         return diagnostics
 
     page_diagnostics = page_diagnostics or {}
     overflows = _annotated_browser_overflows(_page_block_overflows(page_diagnostics))
+    visual_slacks = _annotated_browser_visual_slacks(
+        _page_block_visual_slacks(page_diagnostics)
+    )
     figure_group_issues = page_diagnostics.get("figure_group_issues")
     if not isinstance(figure_group_issues, list):
         figure_group_issues = []
@@ -333,11 +365,17 @@ def _merge_browser_diagnostics(
         quality_counts["browser_overflow"] = quality_counts.get("browser_overflow", 0) + len(
             overflows
         )
+    if visual_slacks:
+        quality_counts["visual_slack"] = quality_counts.get("visual_slack", 0) + len(
+            visual_slacks
+        )
     diagnostics["quality_flag_counts"] = quality_counts
     diagnostics["browser_validation"] = _browser_validation_from_page(page_diagnostics)
     diagnostics["browser_validation_unavailable"] = False
     diagnostics["browser_block_overflow_count"] = len(overflows)
     diagnostics["browser_overflows"] = overflows
+    diagnostics["block_visual_slack_count"] = len(visual_slacks)
+    diagnostics["block_visual_slacks"] = visual_slacks
     diagnostics["browser_figure_group_issue_count"] = len(figure_group_issues)
     diagnostics["browser_figure_group_issues"] = figure_group_issues
     return diagnostics
@@ -359,6 +397,13 @@ def _page_block_overflows(page_diagnostics: dict[str, Any]) -> list[dict[str, An
     if not isinstance(overflows, list):
         return []
     return [overflow for overflow in overflows if isinstance(overflow, dict)]
+
+
+def _page_block_visual_slacks(page_diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    visual_slacks = page_diagnostics.get("block_visual_slacks")
+    if not isinstance(visual_slacks, list):
+        return []
+    return [slack for slack in visual_slacks if isinstance(slack, dict)]
 
 
 def _height_overrides_from_browser_overflows(
@@ -401,6 +446,84 @@ def _height_overrides_from_browser_overflows(
     return overrides
 
 
+def _height_preferences_from_browser_visual_slacks(
+    render_document: RenderDocument,
+    visual_slacks: list[dict[str, Any]],
+) -> dict[str, float]:
+    blocks_by_id = {
+        block.block_id: block
+        for page in render_document.pages
+        for block in page.blocks
+    }
+    blocks_by_signature = {
+        block.layout_signature: block
+        for page in render_document.pages
+        for block in page.blocks
+        if block.layout_signature
+    }
+    preferences: dict[str, float] = {}
+    for slack in visual_slacks:
+        signature = slack.get("layout_signature")
+        block = blocks_by_signature.get(signature) if isinstance(signature, str) else None
+        if block is None:
+            block_id = slack.get("block_id")
+            block = blocks_by_id.get(block_id) if isinstance(block_id, str) else None
+        if block is None or not block.layout_signature:
+            continue
+        client_height = _as_float(slack.get("client_height"))
+        slack_bottom = _as_float(slack.get("slack_bottom"))
+        if client_height <= 0 or slack_bottom <= 0:
+            continue
+        visible_height_pt = max(0.0, client_height - slack_bottom) * _PT_PER_CSS_PX
+        line_height = block.line_height or 1.2
+        min_height_pt = max(block.font_size_pt * line_height, 1.0)
+        height_pt = max(
+            min_height_pt,
+            visible_height_pt + _BROWSER_REFLOW_SAFETY_PT,
+        )
+        preferences[block.layout_signature] = min(
+            preferences.get(block.layout_signature, float("inf")),
+            height_pt,
+        )
+    return preferences
+
+
+def _full_width_block_overrides_from_browser_overflows(
+    render_document: RenderDocument,
+    overflows: list[dict[str, Any]],
+) -> set[str]:
+    blocks_by_id = {
+        block.block_id: block
+        for page in render_document.pages
+        for block in page.blocks
+    }
+    blocks_by_signature = {
+        block.layout_signature: block
+        for page in render_document.pages
+        for block in page.blocks
+        if block.layout_signature
+    }
+    block_ids: set[str] = set()
+    for overflow in overflows:
+        scroll_width = _as_float(overflow.get("scroll_width"))
+        client_width = _as_float(overflow.get("client_width"))
+        if scroll_width <= client_width + 1:
+            continue
+        signature = overflow.get("layout_signature")
+        block = blocks_by_signature.get(signature) if isinstance(signature, str) else None
+        if block is None:
+            block_id = overflow.get("block_id")
+            block = blocks_by_id.get(block_id) if isinstance(block_id, str) else None
+        if block is None:
+            continue
+        role = getattr(block.role, "value", block.role)
+        if str(role) != "formula":
+            continue
+        if block.source_block_id:
+            block_ids.add(block.source_block_id)
+    return block_ids
+
+
 def _annotated_browser_overflows(overflows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     annotated: list[dict[str, Any]] = []
     for overflow in overflows:
@@ -409,6 +532,16 @@ def _annotated_browser_overflows(overflows: list[dict[str, Any]]) -> list[dict[s
         client_height = _as_float(item.get("client_height"))
         item["height_delta_px"] = round(max(0.0, scroll_height - client_height), 4)
         item["height_delta_pt"] = round(item["height_delta_px"] * _PT_PER_CSS_PX, 4)
+        annotated.append(item)
+    return annotated
+
+
+def _annotated_browser_visual_slacks(slacks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for slack in slacks:
+        item = dict(slack)
+        slack_bottom = _as_float(item.get("slack_bottom"))
+        item["slack_bottom_pt"] = round(slack_bottom * _PT_PER_CSS_PX, 4)
         annotated.append(item)
     return annotated
 
@@ -502,6 +635,44 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
           const blocks = [...document.querySelectorAll('.block')];
           const assets = [...document.querySelectorAll('.asset')];
           const images = [...document.images];
+          const visibleTextRects = (block) => {
+            const walker = document.createTreeWalker(
+              block,
+              NodeFilter.SHOW_TEXT,
+              {
+                acceptNode(node) {
+                  if (!node.nodeValue || !node.nodeValue.trim()) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  const parent = node.parentElement;
+                  if (!parent || parent.closest('.katex-mathml')) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  const style = getComputedStyle(parent);
+                  if (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    Number.parseFloat(style.opacity || '1') === 0
+                  ) {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+              }
+            );
+            const rects = [];
+            while (walker.nextNode()) {
+              const range = document.createRange();
+              range.selectNodeContents(walker.currentNode);
+              for (const rect of range.getClientRects()) {
+                if (rect.width > 0 && rect.height > 0) {
+                  rects.push(rect);
+                }
+              }
+              range.detach();
+            }
+            return rects;
+          };
           const blockOverflows = blocks
             .map((block) => {
               const scrollHeight = block.scrollHeight;
@@ -524,6 +695,37 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
                 client_width: clientWidth,
                 height_delta: Math.max(0, scrollHeight - clientHeight),
                 width_delta: Math.max(0, scrollWidth - clientWidth)
+              };
+            })
+            .filter(Boolean);
+          const blockVisualSlacks = blocks
+            .map((block) => {
+              const clientHeight = block.clientHeight;
+              if (!clientHeight) {
+                return null;
+              }
+              const blockRect = block.getBoundingClientRect();
+              const rects = visibleTextRects(block);
+              if (!rects.length) {
+                return null;
+              }
+              const textTop = Math.min(...rects.map((rect) => rect.top));
+              const textBottom = Math.max(...rects.map((rect) => rect.bottom));
+              const visibleHeight = Math.max(0, textBottom - textTop);
+              const slackBottom = Math.max(0, blockRect.bottom - textBottom);
+              const slackRatio = slackBottom / clientHeight;
+              if (slackBottom <= Math.max(8, clientHeight * 0.22)) {
+                return null;
+              }
+              return {
+                block_id: block.getAttribute('data-block-id'),
+                source_block_id: block.getAttribute('data-source-block-id'),
+                layout_signature: block.getAttribute('data-layout-signature'),
+                page_id: block.closest('.page')?.getAttribute('data-page-id') || null,
+                client_height: clientHeight,
+                visible_height: visibleHeight,
+                slack_bottom: slackBottom,
+                slack_ratio: slackRatio
               };
             })
             .filter(Boolean);
@@ -604,6 +806,8 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
               : null,
             block_overflows: blockOverflows,
             block_overflow_count: blockOverflows.length,
+            block_visual_slacks: blockVisualSlacks,
+            block_visual_slack_count: blockVisualSlacks.length,
             figure_group_issues: figureGroupIssues,
             figure_group_issue_count: figureGroupIssues.length
           };

@@ -17,6 +17,7 @@ from .formula_processing import (
     is_formula_like_block,
     is_formula_like_text,
     is_formula_only_block,
+    repair_formula_placeholders,
 )
 from .formulas.validation import FORMULA_REF_PATTERN
 
@@ -42,6 +43,7 @@ def extract_preserve_tokens(text: str) -> list[str]:
 
 
 def _preserve_tokens_for_block(block: DocumentBlock, source_text: str) -> list[str]:
+    source_text, _repair_count = repair_formula_placeholders(source_text)
     tokens = extract_preserve_tokens(source_text)
     for placeholder in formula_placeholders_for_block(block):
         if placeholder not in tokens:
@@ -180,6 +182,8 @@ def build_chunks(
     current_blocks: list[SourceBlock] = []
     previous_chunk_blocks: list[SourceBlock] = []
     current_chars = 0
+    formulas = document.formulas_by_id()
+    formula_ids = set(formulas)
     ordered_document_blocks = [
         block
         for page in document.pages
@@ -190,6 +194,10 @@ def build_chunks(
         page_blocks = sorted(page.blocks, key=lambda block: block.reading_order)
         for block in page_blocks:
             chunk_text = block.text_for_translation.strip() or block.source_text.strip()
+            chunk_text, _repair_count = repair_formula_placeholders(
+                chunk_text,
+                formula_ids,
+            )
             if not chunk_text:
                 continue
             source_block = SourceBlock(

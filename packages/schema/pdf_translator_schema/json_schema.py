@@ -7,6 +7,7 @@ from typing import Any
 from .models import (
     AssetIR,
     DocumentIR,
+    EditScope,
     FormulaRecognitionResult,
     InputSource,
     LayoutIntentPlan,
@@ -20,12 +21,13 @@ from .models import (
 
 
 SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 
 SCHEMA_MODELS = {
     "document-ir": DocumentIR,
     "input-source": InputSource,
     "asset-ir": AssetIR,
+    "edit-scope": EditScope,
     "formula-recognition": FormulaRecognitionResult,
     "ocr-recognition": OCRRecognitionResult,
     "user-intent": UserIntent,

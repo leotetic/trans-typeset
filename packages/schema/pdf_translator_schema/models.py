@@ -44,8 +44,7 @@ class NoLayoutCoordinatesModel(StrictBaseModel):
             forbidden = sorted(FORBIDDEN_LAYOUT_KEYS.intersection(data))
             if forbidden:
                 raise ValueError(
-                    "LLM layout plans must not include coordinate fields: "
-                    + ", ".join(forbidden)
+                    "LLM layout plans must not include coordinate fields: " + ", ".join(forbidden)
                 )
         return data
 
@@ -68,6 +67,7 @@ class InputKind(StrEnum):
     TEXT = "text"
     IMAGE = "image"
     PDF = "pdf"
+    DOCX = "docx"
 
 
 class InputSourceRole(StrEnum):
@@ -80,6 +80,24 @@ class OutputKind(StrEnum):
     TYPESET_DOCUMENT = "typeset_document"
     LAYOUT_REFERENCE = "layout_reference"
     SUMMARY_LAYOUT = "summary_layout"
+
+
+class WorkflowMode(StrEnum):
+    TRANSLATE_ONLY = "translate_only"
+    TYPESET_ONLY = "typeset_only"
+    TRANSLATE_AND_TYPESET = "translate_and_typeset"
+
+
+class EditScopeMode(StrEnum):
+    ALL = "all"
+    PAGES = "pages"
+    BLOCKS = "blocks"
+
+
+class OutputFormat(StrEnum):
+    HTML_PREVIEW = "html_preview"
+    PDF = "pdf"
+    DOCX = "docx"
 
 
 class StyleIntent(StrEnum):
@@ -127,6 +145,83 @@ class TypesettingStandard(StrEnum):
     GB_T_7713_1_2025 = "gb_t_7713_1_2025"
 
 
+class DocumentKind(StrEnum):
+    COURSE_PAPER = "course_paper"
+    UNDERGRADUATE_THESIS = "undergraduate_thesis"
+    LAB_REPORT = "lab_report"
+    PROPOSAL_REPORT = "proposal_report"
+    BOOK_REPORT = "book_report"
+    SOCIAL_PRACTICE_REPORT = "social_practice_report"
+    GROUP_ASSIGNMENT = "group_assignment"
+    HOMEWORK = "homework"
+    GENERIC_ACADEMIC = "generic_academic"
+
+
+class TemplateSource(StrEnum):
+    SCHOOL_TEMPLATE = "school_template"
+    COURSE_REQUIREMENT = "course_requirement"
+    USER_SPECIFIED = "user_specified"
+    DEFAULT_ACADEMIC = "default_academic"
+
+
+class CitationStyle(StrEnum):
+    AUTO = "auto"
+    GB_T_7714 = "gb_t_7714"
+    APA = "apa"
+    MLA = "mla"
+    IEEE = "ieee"
+    CHICAGO = "chicago"
+
+
+class SectionKind(StrEnum):
+    COVER = "cover"
+    TITLE = "title"
+    ABSTRACT = "abstract"
+    KEYWORDS = "keywords"
+    TOC = "toc"
+    LIST_OF_FIGURES = "list_of_figures"
+    LIST_OF_TABLES = "list_of_tables"
+    BODY = "body"
+    HEADING = "heading"
+    FIGURE = "figure"
+    TABLE = "table"
+    FORMULA = "formula"
+    REFERENCES = "references"
+    APPENDIX = "appendix"
+    ACKNOWLEDGEMENTS = "acknowledgements"
+    AUTHOR_INFO = "author_info"
+    DEPARTMENT = "department"
+    COURSE_INFO = "course_info"
+    EXPERIMENT_METADATA = "experiment_metadata"
+    EXPERIMENT_PURPOSE = "experiment_purpose"
+    EXPERIMENT_THEORY = "experiment_theory"
+    EXPERIMENT_STEPS = "experiment_steps"
+    EXPERIMENT_RESULTS = "experiment_results"
+    EXPERIMENT_ANALYSIS = "experiment_analysis"
+    RESULT_ANALYSIS = "result_analysis"
+    CONCLUSION = "conclusion"
+    UNKNOWN = "unknown"
+
+
+class PaperSize(StrEnum):
+    A4 = "a4"
+    LETTER = "letter"
+    SOURCE = "source"
+
+
+class PageOrientation(StrEnum):
+    PORTRAIT = "portrait"
+    LANDSCAPE = "landscape"
+
+
+class NumberingStyle(StrEnum):
+    NONE = "none"
+    ARABIC = "arabic"
+    CHINESE = "chinese"
+    ROMAN = "roman"
+    PARENTHESIZED = "parenthesized"
+
+
 class LayoutMode(StrEnum):
     SOURCE_BBOX = "source_bbox"
     CONTINUOUS_REFLOW = "continuous_reflow"
@@ -144,6 +239,7 @@ class FormulaSourceKind(StrEnum):
 
 FormulaDisplayMode = Literal["inline", "display"]
 OCRRegionKind = Literal["formula", "text", "page"]
+ColumnLayoutScope = Literal["document", "body"]
 
 
 class InputSource(StrictBaseModel):
@@ -179,8 +275,113 @@ class UserConstraints(StrictBaseModel):
     preserve_images: bool = True
 
 
-class UserIntent(StrictBaseModel):
+class EditScope(StrictBaseModel):
+    mode: EditScopeMode = EditScopeMode.ALL
+    page_numbers: list[int] = Field(default_factory=list)
+    block_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_scope_values(self) -> EditScope:
+        if self.mode == EditScopeMode.ALL:
+            return self
+        if self.mode == EditScopeMode.PAGES:
+            if not self.page_numbers:
+                raise ValueError("page_numbers are required when scope mode is pages")
+            if self.block_ids:
+                raise ValueError("block_ids are only valid when scope mode is blocks")
+        if self.mode == EditScopeMode.BLOCKS:
+            if not self.block_ids:
+                raise ValueError("block_ids are required when scope mode is blocks")
+            if self.page_numbers:
+                raise ValueError("page_numbers are only valid when scope mode is pages")
+        return self
+
+    @field_validator("page_numbers")
+    @classmethod
+    def validate_page_numbers(cls, values: list[int]) -> list[int]:
+        seen: set[int] = set()
+        for value in values:
+            if value < 1:
+                raise ValueError("page_numbers must be 1-based positive integers")
+            if value in seen:
+                raise ValueError(f"duplicate page number: {value}")
+            seen.add(value)
+        return values
+
+    @field_validator("block_ids")
+    @classmethod
+    def validate_block_ids(cls, values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for value in values:
+            if not value.strip():
+                raise ValueError("block_ids must not contain blank values")
+            if value in seen:
+                raise ValueError(f"duplicate block id: {value}")
+            seen.add(value)
+        return values
+
+
+class ColumnLayoutDefaults(NoLayoutCoordinatesModel):
+    column_count: Literal[1, 2] = DEFAULT_RENDER_DEFAULTS["column_layout"]["column_count"]
+    column_gap_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["column_layout"]["column_gap_pt"],
+        ge=0,
+    )
+    scope: ColumnLayoutScope = DEFAULT_RENDER_DEFAULTS["column_layout"]["scope"]
+    balance_columns: bool = DEFAULT_RENDER_DEFAULTS["column_layout"]["balance_columns"]
+
+
+class TaskIntent(NoLayoutCoordinatesModel):
+    document_kind: DocumentKind = DocumentKind.GENERIC_ACADEMIC
+    audience: str = ""
+    language: str = "zh-CN"
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list)
+
+
+class OutputTarget(NoLayoutCoordinatesModel):
+    format: OutputFormat = OutputFormat.PDF
+    required: bool = True
+    artifact_name: str = ""
+
+
+class TemplateProfile(NoLayoutCoordinatesModel):
+    source: TemplateSource = TemplateSource.DEFAULT_ACADEMIC
+    standard: str = TypesettingStandard.NONE.value
+    institution: str = ""
+    department: str = ""
+    template_asset_ids: list[str] = Field(default_factory=list)
+    fallback_used: bool = True
+
+
+class BibliographyPreference(NoLayoutCoordinatesModel):
+    citation_style: CitationStyle = CitationStyle.AUTO
+    default_reason: str = "No explicit citation style was requested."
+
+
+class AcademicRequirement(NoLayoutCoordinatesModel):
+    requirement_id: str = Field(min_length=1)
+    label: str = ""
+    category: Literal[
+        "structure",
+        "style",
+        "metadata",
+        "numbering",
+        "bibliography",
+        "length",
+        "tone",
+        "asset",
+    ] = "structure"
+    required: bool = True
+    section_kinds: list[SectionKind] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class UserIntent(NoLayoutCoordinatesModel):
+    schema_version: Literal["0.1", "0.2"] = "0.2"
     target_lang: str = "zh-CN"
+    workflow_mode: WorkflowMode = WorkflowMode.TRANSLATE_AND_TYPESET
     output_kind: OutputKind = OutputKind.TRANSLATION
     style_intent: StyleIntent = StyleIntent.ACADEMIC
     typesetting_standard: TypesettingStandard = TypesettingStandard.NONE
@@ -198,6 +399,32 @@ class UserIntent(StrictBaseModel):
     )
     reference_assets: list[str] = Field(default_factory=list)
     constraints: UserConstraints = Field(default_factory=UserConstraints)
+    column_layout: ColumnLayoutDefaults = Field(default_factory=ColumnLayoutDefaults)
+    task_intent: TaskIntent = Field(default_factory=TaskIntent)
+    output_targets: list[OutputTarget] = Field(
+        default_factory=lambda: [
+            OutputTarget(
+                format=OutputFormat.HTML_PREVIEW,
+                artifact_name="preview.html",
+            ),
+            OutputTarget(format=OutputFormat.PDF, artifact_name="translated.pdf"),
+        ]
+    )
+    template_profile: TemplateProfile = Field(default_factory=TemplateProfile)
+    bibliography_preference: BibliographyPreference = Field(default_factory=BibliographyPreference)
+    requirements: list[AcademicRequirement] = Field(default_factory=list)
+
+    @field_validator("output_targets")
+    @classmethod
+    def validate_no_duplicate_output_targets(
+        cls, targets: list[OutputTarget]
+    ) -> list[OutputTarget]:
+        seen: set[OutputFormat] = set()
+        for target in targets:
+            if target.format in seen:
+                raise ValueError(f"duplicate output target format: {target.format}")
+            seen.add(target.format)
+        return targets
 
 
 class WorkflowStep(StrictBaseModel):
@@ -250,14 +477,38 @@ class SemanticAssetSignal(NoLayoutCoordinatesModel):
     quality_flags: list[str] = Field(default_factory=list)
 
 
+class DocumentStructureCandidate(NoLayoutCoordinatesModel):
+    section_id: str = Field(min_length=1)
+    kind: SectionKind = SectionKind.UNKNOWN
+    title: str = ""
+    level: int = Field(default=1, ge=1, le=6)
+    source_block_ids: list[str] = Field(default_factory=list)
+    required: bool = False
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class BlockSectionMapping(NoLayoutCoordinatesModel):
+    source_block_id: str = Field(min_length=1)
+    section_id: str = Field(min_length=1)
+    section_kind: SectionKind = SectionKind.UNKNOWN
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
 class SemanticLayoutAnalysis(NoLayoutCoordinatesModel):
-    schema_version: Literal["0.1"] = "0.1"
+    schema_version: Literal["0.1", "0.2"] = "0.2"
     analysis_id: str = Field(min_length=1)
     doc_id: str = Field(min_length=1)
     target_lang: str = "zh-CN"
     block_signals: list[SemanticBlockSignal] = Field(default_factory=list)
     asset_signals: list[SemanticAssetSignal] = Field(default_factory=list)
     section_hints: list[str] = Field(default_factory=list)
+    structure_candidates: list[DocumentStructureCandidate] = Field(default_factory=list)
+    block_section_mappings: list[BlockSectionMapping] = Field(default_factory=list)
+    recognized_requirements: list[AcademicRequirement] = Field(default_factory=list)
+    missing_sections: list[SectionKind] = Field(default_factory=list)
+    uncertain_sections: list[str] = Field(default_factory=list)
     confidence: float = Field(default=0.5, ge=0, le=1)
     quality_flags: list[str] = Field(default_factory=list)
 
@@ -304,19 +555,133 @@ class LayoutIntentBlock(NoLayoutCoordinatesModel):
 
 class LayoutIntentAsset(NoLayoutCoordinatesModel):
     asset_id: str = Field(min_length=1)
-    usage: Literal["preserve", "inline_reference", "background_reference", "ignore"] = (
-        "preserve"
-    )
+    usage: Literal["preserve", "inline_reference", "background_reference", "ignore"] = "preserve"
     quality_flags: list[str] = Field(default_factory=list)
 
 
+class DocumentProfile(NoLayoutCoordinatesModel):
+    document_kind: DocumentKind = DocumentKind.GENERIC_ACADEMIC
+    target_lang: str = "zh-CN"
+    style_intent: StyleIntent = StyleIntent.ACADEMIC
+    template_profile: TemplateProfile = Field(default_factory=TemplateProfile)
+    citation_style: CitationStyle = CitationStyle.AUTO
+
+
+class DocumentStructureSection(NoLayoutCoordinatesModel):
+    section_id: str = Field(min_length=1)
+    kind: SectionKind = SectionKind.UNKNOWN
+    title: str = ""
+    level: int = Field(default=1, ge=1, le=6)
+    source_block_ids: list[str] = Field(default_factory=list)
+    required: bool = False
+    quality_flags: list[str] = Field(default_factory=list)
+
+
+class DocumentStructurePlan(NoLayoutCoordinatesModel):
+    sections: list[DocumentStructureSection] = Field(default_factory=list)
+    missing_sections: list[SectionKind] = Field(default_factory=list)
+    uncertain_sections: list[str] = Field(default_factory=list)
+
+    @field_validator("sections")
+    @classmethod
+    def validate_no_duplicate_sections(
+        cls, sections: list[DocumentStructureSection]
+    ) -> list[DocumentStructureSection]:
+        seen: set[str] = set()
+        for section in sections:
+            if section.section_id in seen:
+                raise ValueError(f"duplicate section_id: {section.section_id}")
+            seen.add(section.section_id)
+        return sections
+
+
+class HeaderFooterPlan(NoLayoutCoordinatesModel):
+    header_text: str = ""
+    footer_text: str = ""
+    enabled: bool = False
+
+
+class PageNumberingPlan(NoLayoutCoordinatesModel):
+    enabled: bool = True
+    style: NumberingStyle = NumberingStyle.ARABIC
+    start_at: int = Field(default=1, ge=1)
+
+
+class PageSetup(NoLayoutCoordinatesModel):
+    paper_size: PaperSize = PaperSize.A4
+    orientation: PageOrientation = PageOrientation.PORTRAIT
+    margin_top_pt: float = Field(default=70.87, ge=0)
+    margin_right_pt: float = Field(default=56.69, ge=0)
+    margin_bottom_pt: float = Field(default=56.69, ge=0)
+    margin_left_pt: float = Field(default=70.87, ge=0)
+    header_footer: HeaderFooterPlan = Field(default_factory=HeaderFooterPlan)
+    page_numbering: PageNumberingPlan = Field(default_factory=PageNumberingPlan)
+    section_breaks: list[str] = Field(default_factory=list)
+    page_breaks: list[str] = Field(default_factory=list)
+
+
+class NamedStyle(NoLayoutCoordinatesModel):
+    font_size_pt: float = Field(default=12.0, gt=0)
+    bold: bool = False
+    italic: bool = False
+    alignment: Literal["left", "center", "right", "justify"] = "left"
+    line_height: float = Field(default=1.5, gt=0)
+    first_line_indent_em: float = Field(default=0.0, ge=0)
+    space_before_pt: float = Field(default=0.0, ge=0)
+    space_after_pt: float = Field(default=0.0, ge=0)
+    font_stack: list[str] | None = Field(default=None, min_length=1)
+
+
+class StyleSystem(NoLayoutCoordinatesModel):
+    named_styles: dict[str, NamedStyle] = Field(default_factory=dict)
+
+
+class NumberingRule(NoLayoutCoordinatesModel):
+    enabled: bool = False
+    style: NumberingStyle = NumberingStyle.NONE
+    section_ids: list[str] = Field(default_factory=list)
+
+
+class TocGenerationPlan(NoLayoutCoordinatesModel):
+    enabled: bool = False
+    max_level: int = Field(default=3, ge=1, le=6)
+    section_ids: list[str] = Field(default_factory=list)
+
+
+class NumberingPlan(NoLayoutCoordinatesModel):
+    heading_numbering: NumberingRule = Field(default_factory=NumberingRule)
+    figure_numbering: NumberingRule = Field(default_factory=NumberingRule)
+    table_numbering: NumberingRule = Field(default_factory=NumberingRule)
+    formula_numbering: NumberingRule = Field(default_factory=NumberingRule)
+    reference_numbering: NumberingRule = Field(default_factory=NumberingRule)
+    toc_generation: TocGenerationPlan = Field(default_factory=TocGenerationPlan)
+
+
+class BibliographyPlan(NoLayoutCoordinatesModel):
+    citation_style: CitationStyle = CitationStyle.AUTO
+    default_reason: str = "No explicit citation style was requested."
+    in_text_citation_policy: str = "preserve_source_markers"
+    bibliography_sorting: str = "source_order"
+    hanging_indent: bool = True
+    section_ids: list[str] = Field(default_factory=list)
+
+
 class LayoutIntentPlan(NoLayoutCoordinatesModel):
-    schema_version: Literal["0.1"] = "0.1"
+    schema_version: Literal["0.1", "0.2"] = "0.2"
     plan_id: str = Field(min_length=1)
     doc_id: str = Field(min_length=1)
     target_lang: str = "zh-CN"
+    workflow_mode: WorkflowMode = WorkflowMode.TRANSLATE_AND_TYPESET
     output_kind: OutputKind = OutputKind.TRANSLATION
     style_intent: StyleIntent = StyleIntent.ACADEMIC
+    column_layout: ColumnLayoutDefaults = Field(default_factory=ColumnLayoutDefaults)
+    document_profile: DocumentProfile = Field(default_factory=DocumentProfile)
+    structure_plan: DocumentStructurePlan = Field(default_factory=DocumentStructurePlan)
+    page_setup: PageSetup = Field(default_factory=PageSetup)
+    style_system: StyleSystem = Field(default_factory=StyleSystem)
+    numbering_plan: NumberingPlan = Field(default_factory=NumberingPlan)
+    bibliography_plan: BibliographyPlan = Field(default_factory=BibliographyPlan)
+    requirements: list[AcademicRequirement] = Field(default_factory=list)
     blocks: list[LayoutIntentBlock] = Field(default_factory=list)
     assets: list[LayoutIntentAsset] = Field(default_factory=list)
     quality_flags: list[str] = Field(default_factory=list)
@@ -556,13 +921,9 @@ class DocumentIR(StrictBaseModel):
             if formula.page_id not in page_ids:
                 raise ValueError(f"formula {formula.formula_id} points to another page")
             if formula.source_block_id and formula.source_block_id not in block_ids:
-                raise ValueError(
-                    f"formula {formula.formula_id} points to unknown source block"
-                )
+                raise ValueError(f"formula {formula.formula_id} points to unknown source block")
             if formula.anchor_block_id and formula.anchor_block_id not in block_ids:
-                raise ValueError(
-                    f"formula {formula.formula_id} points to unknown anchor block"
-                )
+                raise ValueError(f"formula {formula.formula_id} points to unknown anchor block")
             if formula.asset_id and formula.asset_id not in asset_ids:
                 raise ValueError(f"formula {formula.formula_id} points to unknown asset")
         for page in self.pages:
@@ -607,9 +968,7 @@ class OverflowPolicy(StrictBaseModel):
         default=DEFAULT_RENDER_DEFAULTS["overflow_policy"]["max_font_scale"],
         ge=1,
     )
-    allow_box_expansion: bool = DEFAULT_RENDER_DEFAULTS["overflow_policy"][
-        "allow_box_expansion"
-    ]
+    allow_box_expansion: bool = DEFAULT_RENDER_DEFAULTS["overflow_policy"]["allow_box_expansion"]
     allow_continuation_page: bool = DEFAULT_RENDER_DEFAULTS["overflow_policy"][
         "allow_continuation_page"
     ]
@@ -630,12 +989,12 @@ class PreservePolicy(StrictBaseModel):
     figure_table_assets: Literal["preserve"] = DEFAULT_RENDER_DEFAULTS["preserve_policy"][
         "figure_table_assets"
     ]
-    whitespace: Literal["allow_reflow", "preserve"] = DEFAULT_RENDER_DEFAULTS[
-        "preserve_policy"
-    ]["whitespace"]
-    line_breaks: Literal["allow_reflow", "preserve"] = DEFAULT_RENDER_DEFAULTS[
-        "preserve_policy"
-    ]["line_breaks"]
+    whitespace: Literal["allow_reflow", "preserve"] = DEFAULT_RENDER_DEFAULTS["preserve_policy"][
+        "whitespace"
+    ]
+    line_breaks: Literal["allow_reflow", "preserve"] = DEFAULT_RENDER_DEFAULTS["preserve_policy"][
+        "line_breaks"
+    ]
 
 
 class PageLayoutDefaults(StrictBaseModel):
@@ -711,6 +1070,7 @@ class RenderDefaults(StrictBaseModel):
     formula_numbering: Literal["none", "parenthesized"] = DEFAULT_RENDER_DEFAULTS[
         "formula_numbering"
     ]
+    column_layout: ColumnLayoutDefaults = Field(default_factory=ColumnLayoutDefaults)
     page_layout: PageLayoutDefaults = Field(default_factory=PageLayoutDefaults)
     role_styles: RoleStyles = Field(default_factory=RoleStyles)
     alignment: AlignmentDefaults = Field(default_factory=AlignmentDefaults)

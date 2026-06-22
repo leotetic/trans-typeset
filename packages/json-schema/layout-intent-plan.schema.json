@@ -1,5 +1,104 @@
 {
   "$defs": {
+    "AcademicRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": {
+          "minLength": 1,
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "category": {
+          "default": "structure",
+          "enum": [
+            "structure",
+            "style",
+            "metadata",
+            "numbering",
+            "bibliography",
+            "length",
+            "tone",
+            "asset"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "section_kinds": {
+          "items": {
+            "$ref": "#/$defs/SectionKind"
+          },
+          "title": "Section Kinds",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "requirement_id"
+      ],
+      "title": "AcademicRequirement",
+      "type": "object"
+    },
+    "BibliographyPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "citation_style": {
+          "$ref": "#/$defs/CitationStyle",
+          "default": "auto"
+        },
+        "default_reason": {
+          "default": "No explicit citation style was requested.",
+          "title": "Default Reason",
+          "type": "string"
+        },
+        "in_text_citation_policy": {
+          "default": "preserve_source_markers",
+          "title": "In Text Citation Policy",
+          "type": "string"
+        },
+        "bibliography_sorting": {
+          "default": "source_order",
+          "title": "Bibliography Sorting",
+          "type": "string"
+        },
+        "hanging_indent": {
+          "default": true,
+          "title": "Hanging Indent",
+          "type": "boolean"
+        },
+        "section_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Ids",
+          "type": "array"
+        }
+      },
+      "title": "BibliographyPlan",
+      "type": "object"
+    },
     "BlockRole": {
       "enum": [
         "title",
@@ -16,6 +115,196 @@
       ],
       "title": "BlockRole",
       "type": "string"
+    },
+    "CitationStyle": {
+      "enum": [
+        "auto",
+        "gb_t_7714",
+        "apa",
+        "mla",
+        "ieee",
+        "chicago"
+      ],
+      "title": "CitationStyle",
+      "type": "string"
+    },
+    "ColumnLayoutDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "column_count": {
+          "default": 1,
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Column Count",
+          "type": "integer"
+        },
+        "column_gap_pt": {
+          "default": 18.0,
+          "minimum": 0,
+          "title": "Column Gap Pt",
+          "type": "number"
+        },
+        "scope": {
+          "default": "body",
+          "enum": [
+            "document",
+            "body"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "balance_columns": {
+          "default": false,
+          "title": "Balance Columns",
+          "type": "boolean"
+        }
+      },
+      "title": "ColumnLayoutDefaults",
+      "type": "object"
+    },
+    "DocumentKind": {
+      "enum": [
+        "course_paper",
+        "undergraduate_thesis",
+        "lab_report",
+        "proposal_report",
+        "book_report",
+        "social_practice_report",
+        "group_assignment",
+        "homework",
+        "generic_academic"
+      ],
+      "title": "DocumentKind",
+      "type": "string"
+    },
+    "DocumentProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "document_kind": {
+          "$ref": "#/$defs/DocumentKind",
+          "default": "generic_academic"
+        },
+        "target_lang": {
+          "default": "zh-CN",
+          "title": "Target Lang",
+          "type": "string"
+        },
+        "style_intent": {
+          "$ref": "#/$defs/StyleIntent",
+          "default": "academic"
+        },
+        "template_profile": {
+          "$ref": "#/$defs/TemplateProfile"
+        },
+        "citation_style": {
+          "$ref": "#/$defs/CitationStyle",
+          "default": "auto"
+        }
+      },
+      "title": "DocumentProfile",
+      "type": "object"
+    },
+    "DocumentStructurePlan": {
+      "additionalProperties": false,
+      "properties": {
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/DocumentStructureSection"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "missing_sections": {
+          "items": {
+            "$ref": "#/$defs/SectionKind"
+          },
+          "title": "Missing Sections",
+          "type": "array"
+        },
+        "uncertain_sections": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Uncertain Sections",
+          "type": "array"
+        }
+      },
+      "title": "DocumentStructurePlan",
+      "type": "object"
+    },
+    "DocumentStructureSection": {
+      "additionalProperties": false,
+      "properties": {
+        "section_id": {
+          "minLength": 1,
+          "title": "Section Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SectionKind",
+          "default": "unknown"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "level": {
+          "default": 1,
+          "maximum": 6,
+          "minimum": 1,
+          "title": "Level",
+          "type": "integer"
+        },
+        "source_block_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Block Ids",
+          "type": "array"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "section_id"
+      ],
+      "title": "DocumentStructureSection",
+      "type": "object"
+    },
+    "HeaderFooterPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "header_text": {
+          "default": "",
+          "title": "Header Text",
+          "type": "string"
+        },
+        "footer_text": {
+          "default": "",
+          "title": "Footer Text",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "HeaderFooterPlan",
+      "type": "object"
     },
     "LayoutIntentAsset": {
       "additionalProperties": false,
@@ -103,6 +392,139 @@
       "title": "LayoutIntentBlock",
       "type": "object"
     },
+    "NamedStyle": {
+      "additionalProperties": false,
+      "properties": {
+        "font_size_pt": {
+          "default": 12.0,
+          "exclusiveMinimum": 0,
+          "title": "Font Size Pt",
+          "type": "number"
+        },
+        "bold": {
+          "default": false,
+          "title": "Bold",
+          "type": "boolean"
+        },
+        "italic": {
+          "default": false,
+          "title": "Italic",
+          "type": "boolean"
+        },
+        "alignment": {
+          "default": "left",
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify"
+          ],
+          "title": "Alignment",
+          "type": "string"
+        },
+        "line_height": {
+          "default": 1.5,
+          "exclusiveMinimum": 0,
+          "title": "Line Height",
+          "type": "number"
+        },
+        "first_line_indent_em": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "First Line Indent Em",
+          "type": "number"
+        },
+        "space_before_pt": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Space Before Pt",
+          "type": "number"
+        },
+        "space_after_pt": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Space After Pt",
+          "type": "number"
+        },
+        "font_stack": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Stack"
+        }
+      },
+      "title": "NamedStyle",
+      "type": "object"
+    },
+    "NumberingPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "heading_numbering": {
+          "$ref": "#/$defs/NumberingRule"
+        },
+        "figure_numbering": {
+          "$ref": "#/$defs/NumberingRule"
+        },
+        "table_numbering": {
+          "$ref": "#/$defs/NumberingRule"
+        },
+        "formula_numbering": {
+          "$ref": "#/$defs/NumberingRule"
+        },
+        "reference_numbering": {
+          "$ref": "#/$defs/NumberingRule"
+        },
+        "toc_generation": {
+          "$ref": "#/$defs/TocGenerationPlan"
+        }
+      },
+      "title": "NumberingPlan",
+      "type": "object"
+    },
+    "NumberingRule": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "style": {
+          "$ref": "#/$defs/NumberingStyle",
+          "default": "none"
+        },
+        "section_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Ids",
+          "type": "array"
+        }
+      },
+      "title": "NumberingRule",
+      "type": "object"
+    },
+    "NumberingStyle": {
+      "enum": [
+        "none",
+        "arabic",
+        "chinese",
+        "roman",
+        "parenthesized"
+      ],
+      "title": "NumberingStyle",
+      "type": "string"
+    },
     "OutputKind": {
       "enum": [
         "translation",
@@ -111,6 +533,137 @@
         "summary_layout"
       ],
       "title": "OutputKind",
+      "type": "string"
+    },
+    "PageNumberingPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "style": {
+          "$ref": "#/$defs/NumberingStyle",
+          "default": "arabic"
+        },
+        "start_at": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Start At",
+          "type": "integer"
+        }
+      },
+      "title": "PageNumberingPlan",
+      "type": "object"
+    },
+    "PageOrientation": {
+      "enum": [
+        "portrait",
+        "landscape"
+      ],
+      "title": "PageOrientation",
+      "type": "string"
+    },
+    "PageSetup": {
+      "additionalProperties": false,
+      "properties": {
+        "paper_size": {
+          "$ref": "#/$defs/PaperSize",
+          "default": "a4"
+        },
+        "orientation": {
+          "$ref": "#/$defs/PageOrientation",
+          "default": "portrait"
+        },
+        "margin_top_pt": {
+          "default": 70.87,
+          "minimum": 0,
+          "title": "Margin Top Pt",
+          "type": "number"
+        },
+        "margin_right_pt": {
+          "default": 56.69,
+          "minimum": 0,
+          "title": "Margin Right Pt",
+          "type": "number"
+        },
+        "margin_bottom_pt": {
+          "default": 56.69,
+          "minimum": 0,
+          "title": "Margin Bottom Pt",
+          "type": "number"
+        },
+        "margin_left_pt": {
+          "default": 70.87,
+          "minimum": 0,
+          "title": "Margin Left Pt",
+          "type": "number"
+        },
+        "header_footer": {
+          "$ref": "#/$defs/HeaderFooterPlan"
+        },
+        "page_numbering": {
+          "$ref": "#/$defs/PageNumberingPlan"
+        },
+        "section_breaks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Breaks",
+          "type": "array"
+        },
+        "page_breaks": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Page Breaks",
+          "type": "array"
+        }
+      },
+      "title": "PageSetup",
+      "type": "object"
+    },
+    "PaperSize": {
+      "enum": [
+        "a4",
+        "letter",
+        "source"
+      ],
+      "title": "PaperSize",
+      "type": "string"
+    },
+    "SectionKind": {
+      "enum": [
+        "cover",
+        "title",
+        "abstract",
+        "keywords",
+        "toc",
+        "list_of_figures",
+        "list_of_tables",
+        "body",
+        "heading",
+        "figure",
+        "table",
+        "formula",
+        "references",
+        "appendix",
+        "acknowledgements",
+        "author_info",
+        "department",
+        "course_info",
+        "experiment_metadata",
+        "experiment_purpose",
+        "experiment_theory",
+        "experiment_steps",
+        "experiment_results",
+        "experiment_analysis",
+        "result_analysis",
+        "conclusion",
+        "unknown"
+      ],
+      "title": "SectionKind",
       "type": "string"
     },
     "StyleIntent": {
@@ -123,13 +676,113 @@
       ],
       "title": "StyleIntent",
       "type": "string"
+    },
+    "StyleSystem": {
+      "additionalProperties": false,
+      "properties": {
+        "named_styles": {
+          "additionalProperties": {
+            "$ref": "#/$defs/NamedStyle"
+          },
+          "title": "Named Styles",
+          "type": "object"
+        }
+      },
+      "title": "StyleSystem",
+      "type": "object"
+    },
+    "TemplateProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/TemplateSource",
+          "default": "default_academic"
+        },
+        "standard": {
+          "default": "none",
+          "title": "Standard",
+          "type": "string"
+        },
+        "institution": {
+          "default": "",
+          "title": "Institution",
+          "type": "string"
+        },
+        "department": {
+          "default": "",
+          "title": "Department",
+          "type": "string"
+        },
+        "template_asset_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Template Asset Ids",
+          "type": "array"
+        },
+        "fallback_used": {
+          "default": true,
+          "title": "Fallback Used",
+          "type": "boolean"
+        }
+      },
+      "title": "TemplateProfile",
+      "type": "object"
+    },
+    "TemplateSource": {
+      "enum": [
+        "school_template",
+        "course_requirement",
+        "user_specified",
+        "default_academic"
+      ],
+      "title": "TemplateSource",
+      "type": "string"
+    },
+    "TocGenerationPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_level": {
+          "default": 3,
+          "maximum": 6,
+          "minimum": 1,
+          "title": "Max Level",
+          "type": "integer"
+        },
+        "section_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Ids",
+          "type": "array"
+        }
+      },
+      "title": "TocGenerationPlan",
+      "type": "object"
+    },
+    "WorkflowMode": {
+      "enum": [
+        "translate_only",
+        "typeset_only",
+        "translate_and_typeset"
+      ],
+      "title": "WorkflowMode",
+      "type": "string"
     }
   },
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "0.1",
-      "default": "0.1",
+      "default": "0.2",
+      "enum": [
+        "0.1",
+        "0.2"
+      ],
       "title": "Schema Version",
       "type": "string"
     },
@@ -148,6 +801,10 @@
       "title": "Target Lang",
       "type": "string"
     },
+    "workflow_mode": {
+      "$ref": "#/$defs/WorkflowMode",
+      "default": "translate_and_typeset"
+    },
     "output_kind": {
       "$ref": "#/$defs/OutputKind",
       "default": "translation"
@@ -155,6 +812,34 @@
     "style_intent": {
       "$ref": "#/$defs/StyleIntent",
       "default": "academic"
+    },
+    "column_layout": {
+      "$ref": "#/$defs/ColumnLayoutDefaults"
+    },
+    "document_profile": {
+      "$ref": "#/$defs/DocumentProfile"
+    },
+    "structure_plan": {
+      "$ref": "#/$defs/DocumentStructurePlan"
+    },
+    "page_setup": {
+      "$ref": "#/$defs/PageSetup"
+    },
+    "style_system": {
+      "$ref": "#/$defs/StyleSystem"
+    },
+    "numbering_plan": {
+      "$ref": "#/$defs/NumberingPlan"
+    },
+    "bibliography_plan": {
+      "$ref": "#/$defs/BibliographyPlan"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/AcademicRequirement"
+      },
+      "title": "Requirements",
+      "type": "array"
     },
     "blocks": {
       "items": {
@@ -185,5 +870,5 @@
   "title": "LayoutIntentPlan",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }

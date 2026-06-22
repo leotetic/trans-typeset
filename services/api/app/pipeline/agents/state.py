@@ -14,7 +14,7 @@ class TypesettingGraphState(TypedDict, total=False):
     doc_id: str
     filename: str
     target_lang: str
-    input_kind: Literal["pdf", "text", "image"]
+    input_kind: Literal["pdf", "text", "image", "docx"]
     source_path: str
     content_source_path: str
     layout_source_path: str

@@ -11,7 +11,7 @@ export type BlockRole =
   | "reference"
   | "unknown";
 
-export type InputKind = "text" | "image" | "pdf";
+export type InputKind = "text" | "image" | "pdf" | "docx";
 
 export type InputSourceRole = "content" | "layout_reference";
 
@@ -20,6 +20,15 @@ export type OutputKind =
   | "typeset_document"
   | "layout_reference"
   | "summary_layout";
+
+export type WorkflowMode =
+  | "translate_only"
+  | "typeset_only"
+  | "translate_and_typeset";
+
+export type EditScopeMode = "all" | "pages" | "blocks";
+
+export type OutputFormat = "html_preview" | "pdf" | "docx";
 
 export type StyleIntent = "academic" | "report" | "handout" | "slide_like" | "plain";
 
@@ -49,6 +58,58 @@ export type WorkflowStepName =
 
 export type TypesettingStandard = "none" | "gb_t_7713_1_2025";
 
+export type DocumentKind =
+  | "course_paper"
+  | "undergraduate_thesis"
+  | "lab_report"
+  | "proposal_report"
+  | "book_report"
+  | "social_practice_report"
+  | "group_assignment"
+  | "homework"
+  | "generic_academic";
+
+export type TemplateSource =
+  | "school_template"
+  | "course_requirement"
+  | "user_specified"
+  | "default_academic";
+
+export type CitationStyle = "auto" | "gb_t_7714" | "apa" | "mla" | "ieee" | "chicago";
+
+export type SectionKind =
+  | "cover"
+  | "title"
+  | "abstract"
+  | "keywords"
+  | "toc"
+  | "list_of_figures"
+  | "list_of_tables"
+  | "body"
+  | "heading"
+  | "figure"
+  | "table"
+  | "formula"
+  | "references"
+  | "appendix"
+  | "acknowledgements"
+  | "author_info"
+  | "department"
+  | "course_info"
+  | "experiment_metadata"
+  | "experiment_purpose"
+  | "experiment_theory"
+  | "experiment_steps"
+  | "experiment_results"
+  | "experiment_analysis"
+  | "result_analysis"
+  | "conclusion"
+  | "unknown";
+
+export type PaperSize = "a4" | "letter" | "source";
+export type PageOrientation = "portrait" | "landscape";
+export type NumberingStyle = "none" | "arabic" | "chinese" | "roman" | "parenthesized";
+
 export type LayoutMode = "source_bbox" | "continuous_reflow";
 
 export type FormulaSourceKind =
@@ -62,6 +123,14 @@ export type FormulaSourceKind =
 
 export type FormulaDisplayMode = "inline" | "display";
 export type OCRRegionKind = "formula" | "text" | "page";
+export type ColumnLayoutScope = "document" | "body";
+
+export interface ColumnLayoutDefaults {
+  column_count?: 1 | 2;
+  column_gap_pt?: number;
+  scope?: ColumnLayoutScope;
+  balance_columns?: boolean;
+}
 
 export interface BoundingBox {
   x0: number;
@@ -231,8 +300,62 @@ export interface UserConstraints {
   preserve_images?: boolean;
 }
 
-export interface UserIntent {
+export interface EditScope {
+  mode?: EditScopeMode;
+  page_numbers?: number[];
+  block_ids?: string[];
+}
+
+export interface TaskIntent extends NoLayoutCoordinates {
+  document_kind?: DocumentKind;
+  audience?: string;
+  language?: string;
+  confidence?: number;
+  evidence?: string[];
+}
+
+export interface OutputTarget extends NoLayoutCoordinates {
+  format?: OutputFormat;
+  required?: boolean;
+  artifact_name?: string;
+}
+
+export interface TemplateProfile extends NoLayoutCoordinates {
+  source?: TemplateSource;
+  standard?: string;
+  institution?: string;
+  department?: string;
+  template_asset_ids?: string[];
+  fallback_used?: boolean;
+}
+
+export interface BibliographyPreference extends NoLayoutCoordinates {
+  citation_style?: CitationStyle;
+  default_reason?: string;
+}
+
+export interface AcademicRequirement extends NoLayoutCoordinates {
+  requirement_id: string;
+  label?: string;
+  category?:
+    | "structure"
+    | "style"
+    | "metadata"
+    | "numbering"
+    | "bibliography"
+    | "length"
+    | "tone"
+    | "asset";
+  required?: boolean;
+  section_kinds?: SectionKind[];
+  evidence?: string[];
+  quality_flags?: string[];
+}
+
+export interface UserIntent extends NoLayoutCoordinates {
+  schema_version?: "0.1" | "0.2";
   target_lang?: string;
+  workflow_mode?: WorkflowMode;
   output_kind?: OutputKind;
   style_intent?: StyleIntent;
   typesetting_standard?: TypesettingStandard;
@@ -242,6 +365,12 @@ export interface UserIntent {
   >;
   reference_assets?: string[];
   constraints?: UserConstraints;
+  column_layout?: ColumnLayoutDefaults;
+  task_intent?: TaskIntent;
+  output_targets?: OutputTarget[];
+  template_profile?: TemplateProfile;
+  bibliography_preference?: BibliographyPreference;
+  requirements?: AcademicRequirement[];
 }
 
 export interface WorkflowStep {
@@ -293,14 +422,38 @@ export interface SemanticAssetSignal extends NoLayoutCoordinates {
   quality_flags?: string[];
 }
 
+export interface DocumentStructureCandidate extends NoLayoutCoordinates {
+  section_id: string;
+  kind?: SectionKind;
+  title?: string;
+  level?: number;
+  source_block_ids?: string[];
+  required?: boolean;
+  confidence?: number;
+  quality_flags?: string[];
+}
+
+export interface BlockSectionMapping extends NoLayoutCoordinates {
+  source_block_id: string;
+  section_id: string;
+  section_kind?: SectionKind;
+  confidence?: number;
+  quality_flags?: string[];
+}
+
 export interface SemanticLayoutAnalysis extends NoLayoutCoordinates {
-  schema_version?: "0.1";
+  schema_version?: "0.1" | "0.2";
   analysis_id: string;
   doc_id: string;
   target_lang?: string;
   block_signals?: SemanticBlockSignal[];
   asset_signals?: SemanticAssetSignal[];
   section_hints?: string[];
+  structure_candidates?: DocumentStructureCandidate[];
+  block_section_mappings?: BlockSectionMapping[];
+  recognized_requirements?: AcademicRequirement[];
+  missing_sections?: SectionKind[];
+  uncertain_sections?: string[];
   confidence?: number;
   quality_flags?: string[];
 }
@@ -326,13 +479,117 @@ export interface LayoutIntentAsset extends NoLayoutCoordinates {
   quality_flags?: string[];
 }
 
+export interface DocumentProfile extends NoLayoutCoordinates {
+  document_kind?: DocumentKind;
+  target_lang?: string;
+  style_intent?: StyleIntent;
+  template_profile?: TemplateProfile;
+  citation_style?: CitationStyle;
+}
+
+export interface DocumentStructureSection extends NoLayoutCoordinates {
+  section_id: string;
+  kind?: SectionKind;
+  title?: string;
+  level?: number;
+  source_block_ids?: string[];
+  required?: boolean;
+  quality_flags?: string[];
+}
+
+export interface DocumentStructurePlan extends NoLayoutCoordinates {
+  sections?: DocumentStructureSection[];
+  missing_sections?: SectionKind[];
+  uncertain_sections?: string[];
+}
+
+export interface HeaderFooterPlan extends NoLayoutCoordinates {
+  header_text?: string;
+  footer_text?: string;
+  enabled?: boolean;
+}
+
+export interface PageNumberingPlan extends NoLayoutCoordinates {
+  enabled?: boolean;
+  style?: NumberingStyle;
+  start_at?: number;
+}
+
+export interface PageSetup extends NoLayoutCoordinates {
+  paper_size?: PaperSize;
+  orientation?: PageOrientation;
+  margin_top_pt?: number;
+  margin_right_pt?: number;
+  margin_bottom_pt?: number;
+  margin_left_pt?: number;
+  header_footer?: HeaderFooterPlan;
+  page_numbering?: PageNumberingPlan;
+  section_breaks?: string[];
+  page_breaks?: string[];
+}
+
+export interface NamedStyle extends NoLayoutCoordinates {
+  font_size_pt?: number;
+  bold?: boolean;
+  italic?: boolean;
+  alignment?: TextAlignment;
+  line_height?: number;
+  first_line_indent_em?: number;
+  space_before_pt?: number;
+  space_after_pt?: number;
+  font_stack?: string[] | null;
+}
+
+export interface StyleSystem extends NoLayoutCoordinates {
+  named_styles?: Record<string, NamedStyle>;
+}
+
+export interface NumberingRule extends NoLayoutCoordinates {
+  enabled?: boolean;
+  style?: NumberingStyle;
+  section_ids?: string[];
+}
+
+export interface TocGenerationPlan extends NoLayoutCoordinates {
+  enabled?: boolean;
+  max_level?: number;
+  section_ids?: string[];
+}
+
+export interface NumberingPlan extends NoLayoutCoordinates {
+  heading_numbering?: NumberingRule;
+  figure_numbering?: NumberingRule;
+  table_numbering?: NumberingRule;
+  formula_numbering?: NumberingRule;
+  reference_numbering?: NumberingRule;
+  toc_generation?: TocGenerationPlan;
+}
+
+export interface BibliographyPlan extends NoLayoutCoordinates {
+  citation_style?: CitationStyle;
+  default_reason?: string;
+  in_text_citation_policy?: string;
+  bibliography_sorting?: string;
+  hanging_indent?: boolean;
+  section_ids?: string[];
+}
+
 export interface LayoutIntentPlan extends NoLayoutCoordinates {
-  schema_version?: "0.1";
+  schema_version?: "0.1" | "0.2";
   plan_id: string;
   doc_id: string;
   target_lang?: string;
+  workflow_mode?: WorkflowMode;
   output_kind?: OutputKind;
   style_intent?: StyleIntent;
+  column_layout?: ColumnLayoutDefaults;
+  document_profile?: DocumentProfile;
+  structure_plan?: DocumentStructurePlan;
+  page_setup?: PageSetup;
+  style_system?: StyleSystem;
+  numbering_plan?: NumberingPlan;
+  bibliography_plan?: BibliographyPlan;
+  requirements?: AcademicRequirement[];
   blocks?: LayoutIntentBlock[];
   assets?: LayoutIntentAsset[];
   quality_flags?: string[];
@@ -420,6 +677,7 @@ export interface RenderDefaults {
   paragraph_spacing_em?: number;
   layout_mode?: LayoutMode;
   formula_numbering?: FormulaNumbering;
+  column_layout?: ColumnLayoutDefaults;
   page_layout?: PageLayoutDefaults;
   role_styles?: RoleStyles;
   alignment?: AlignmentDefaults;

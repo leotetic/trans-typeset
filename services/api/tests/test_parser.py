@@ -48,6 +48,15 @@ def test_classify_role_is_testable_for_common_pdf_blocks() -> None:
         == BlockRole.CAPTION
     )
     assert (
+        classify_role(
+            "Figure 4 shows the effective propagation velocity.",
+            page_index=1,
+            block_index=2,
+            font_size=9,
+        )
+        == BlockRole.PARAGRAPH
+    )
+    assert (
         classify_role("[1] Smith, A. 2024.", page_index=5, block_index=0, font_size=9)
         == BlockRole.REFERENCE
     )
@@ -281,6 +290,30 @@ def test_repeated_header_footer_blocks_are_filtered() -> None:
     assert [block["lines"][0]["spans"][0]["text"] for block in filtered] == ["Body one"]
 
 
+def test_publication_boilerplate_blocks_are_filtered_from_body_flow() -> None:
+    page = {
+        "height": 800,
+        "blocks": [
+            _text_block("Body one", (40, 120, 400, 150)),
+            _text_block("© Author(s) 2025", (40, 754, 130, 763)),
+            _text_block("© 作者 2025", (140, 754, 210, 763)),
+            _text_block(
+                "J. Appl. Phys. 137, 163302 (2025); doi: 10.1063/5.0260925",
+                (35, 741, 575, 750),
+            ),
+            _text_block("25 April 2025 00:08:47", (562, 390, 568, 453)),
+            _text_block("1 A short explanatory footnote.", (40, 690, 420, 710)),
+        ],
+    }
+
+    filtered = _filter_header_footer_blocks(page, set())
+
+    assert [block["lines"][0]["spans"][0]["text"] for block in filtered] == [
+        "Body one",
+        "1 A short explanatory footnote.",
+    ]
+
+
 def test_parser_diagnostics_reports_structured_content_fallbacks() -> None:
     document = DocumentIR(
         doc_id="doc_1",
@@ -379,6 +412,49 @@ def test_formula_normalization_detects_inline_and_display_formulas() -> None:
     assert diagnostics["formula_count"] == 2
     assert diagnostics["inline_count"] == 1
     assert diagnostics["display_count"] == 1
+
+
+def test_formula_normalization_repairs_malformed_placeholders_in_diagnostics() -> None:
+    block = DocumentBlock(
+        block_id="para",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=10, y0=20, x1=280, y1=60),
+        reading_order=0,
+        source_text="The transport term is preserved.",
+    ).model_copy(
+        update={"text_for_translation": "The term {formula:formula_known}} is preserved."},
+        deep=True,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            {
+                "formula_id": "formula_known",
+                "page_id": "p1",
+                "anchor_block_id": "para",
+                "latex": r"\nabla \cdot \Gamma_\epsilon",
+                "display_mode": "inline",
+                "source_kind": "inline_text",
+            }
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+    diagnostics = build_formula_diagnostics(normalized)
+
+    assert normalized.pages[0].blocks[0].text_for_translation == (
+        "The term {{formula:formula_known}} is preserved."
+    )
+    assert diagnostics["malformed_placeholder_repaired_count"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_placeholder_syntax_repaired"] == 1
 
 
 def test_formula_normalization_merges_adjacent_formula_fragments_into_cluster() -> None:

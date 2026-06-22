@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 
 import pytest
 from app.pipeline import translator as translator_module
@@ -446,36 +447,18 @@ def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(
     calls: list[dict] = []
     valid_payload = make_valid_payload(chunk)
 
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs) -> None:
+            calls.append({"chat_kwargs": kwargs})
 
-        def json(self) -> dict:
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": valid_payload,
-                        }
-                    }
-                ]
-            }
+        async def ainvoke(self, messages):
+            calls.append({"messages": messages})
+            return {"content": json.dumps(valid_payload)}
 
-    class FakeAsyncClient:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
+    class FakeLangChainOpenAI:
+        ChatOpenAI = FakeChatOpenAI
 
-        async def __aenter__(self) -> "FakeAsyncClient":
-            return self
-
-        async def __aexit__(self, *args) -> None:
-            return None
-
-        async def post(self, *args, **kwargs) -> FakeResponse:
-            calls.append(kwargs["json"])
-            return FakeResponse()
-
-    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    monkeypatch.setitem(sys.modules, "langchain_openai", FakeLangChainOpenAI)
     translator = OpenAICompatibleTranslator(
         "https://api.minimax.io/v1", "key", "MiniMax-M3"
     )
@@ -483,24 +466,29 @@ def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(
     plan = asyncio.run(translator.translate(chunk))
 
     assert [block.source_block_id for block in plan.blocks] == ["b1", "b2"]
-    assert calls == [
-        {
+    assert calls[0] == {
+        "chat_kwargs": {
+            "base_url": "https://api.minimax.io/v1",
             "model": "MiniMax-M3",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You translate academic PDF text blocks. Return only JSON matching "
-                        "TranslationLayoutPlan schema_version 0.1. Do not include coordinates. "
-                        "Return exactly one JSON object and no markdown."
-                    ),
-                },
-                {"role": "user", "content": translator._build_prompt(chunk)},
-            ],
             "temperature": 0.2,
-            "reasoning_split": True,
-            "thinking": {"type": "disabled"},
+            "api_key": "key",
+            "extra_body": {
+                "reasoning_split": True,
+                "thinking": {"type": "disabled"},
+            },
+            "disabled_params": {"parallel_tool_calls": None},
         }
+    }
+    assert calls[1]["messages"] == [
+        (
+            "system",
+            (
+                "You translate academic PDF text blocks. Return only JSON matching "
+                "TranslationLayoutPlan schema_version 0.1. Do not include coordinates. "
+                "Return exactly one JSON object and no markdown."
+            ),
+        ),
+        ("user", translator._build_prompt(chunk)),
     ]
 
 

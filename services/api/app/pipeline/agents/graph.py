@@ -120,11 +120,13 @@ def build_typesetting_graph(
         "validate_layout_plan",
         route_after_validation,
         {
+            "build_source_plans": "build_source_plans",
             "translate_chunks": "translate_chunks",
             "render_preview": "render_preview",
             "fail": "fail",
         },
     )
+    graph.add_edge("build_source_plans", "render_preview")
     graph.add_edge("translate_chunks", "render_preview")
     graph.add_edge("render_preview", "evaluate_render")
     graph.add_conditional_edges(
@@ -201,10 +203,16 @@ class _FallbackTypesettingGraph:
             "semantic_recognize",
             "build_layout_plan",
             "validate_layout_plan",
-            "translate_chunks",
-            "render_preview",
-            "evaluate_render",
         ):
+            state = await _run_node(self.nodes[name], state)
+        next_node = route_after_validation(state)
+        if next_node == "fail":
+            return await _run_node(self.nodes["fail"], state)
+        if next_node == "translate_chunks":
+            state = await _run_node(self.nodes["translate_chunks"], state)
+        elif next_node == "build_source_plans":
+            state = await _run_node(self.nodes["build_source_plans"], state)
+        for name in ("render_preview", "evaluate_render"):
             state = await _run_node(self.nodes[name], state)
         while route_after_evaluation(state) == "repair_layout_plan":
             state = await _run_node(self.nodes["repair_layout_plan"], state)
@@ -214,6 +222,8 @@ class _FallbackTypesettingGraph:
                 return await _run_node(self.nodes["fail"], state)
             if next_node == "translate_chunks":
                 state = await _run_node(self.nodes["translate_chunks"], state)
+            elif next_node == "build_source_plans":
+                state = await _run_node(self.nodes["build_source_plans"], state)
             for name in ("render_preview", "evaluate_render"):
                 state = await _run_node(self.nodes[name], state)
         if route_after_evaluation(state) == "fail":

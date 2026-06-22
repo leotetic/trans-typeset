@@ -2,27 +2,42 @@ import pytest
 from pydantic import ValidationError
 
 from pdf_translator_schema import (
+    AcademicRequirement,
     Asset,
     AssetIR,
     BlockRole,
     BoundingBox,
+    BibliographyPlan,
+    CitationStyle,
+    ColumnLayoutDefaults,
     DocumentIR,
     DocumentPage,
+    DocumentKind,
+    DocumentProfile,
+    DocumentStructurePlan,
+    DocumentStructureSection,
+    EditScope,
     Formula,
     FormulaIR,
     FormulaRecognitionResult,
+    InputKind,
     InputSource,
     OCRRecognitionResult,
     PageSize,
     LayoutIntentBlock,
     LayoutIntentPlan,
+    NumberingPlan,
+    NumberingRule,
     SemanticBlockSignal,
     SemanticLayoutAnalysis,
+    SectionKind,
     SourceBlock,
+    TaskIntent,
     TranslationBlockPlan,
     TranslationChunk,
     TranslationLayoutPlan,
     UserIntent,
+    WorkflowMode,
     WorkflowRun,
     WorkflowStep,
     TypesettingStandard,
@@ -42,9 +57,7 @@ from pdf_translator_schema.validation import (
 def test_render_defaults_are_available_on_chunk() -> None:
     chunk = TranslationChunk(
         chunk_id="chunk_1",
-        source_blocks=[
-            SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Hello")
-        ],
+        source_blocks=[SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Hello")],
     )
 
     assert chunk.target_lang == "zh-CN"
@@ -66,6 +79,10 @@ def test_render_defaults_are_available_on_chunk() -> None:
     assert chunk.render_defaults.overflow_policy.allow_continuation_page is True
     assert chunk.render_defaults.preserve_policy.whitespace == "allow_reflow"
     assert chunk.render_defaults.formula_numbering == "none"
+    assert chunk.render_defaults.column_layout.column_count == 1
+    assert chunk.render_defaults.column_layout.column_gap_pt == 18.0
+    assert chunk.render_defaults.column_layout.scope == "body"
+    assert chunk.render_defaults.column_layout.balance_columns is False
     assert chunk.render_defaults.role_styles.paragraph.font_stack is None
     assert chunk.render_defaults.role_styles.heading.font_stack is not None
     assert "SimHei" in chunk.render_defaults.role_styles.heading.font_stack
@@ -85,6 +102,13 @@ def test_render_defaults_accept_gbt_formula_numbering_and_role_fonts() -> None:
         RenderDefaults(formula_numbering="roman")
     with pytest.raises(ValidationError):
         RoleStyleDefaults(font_size_pt=14.0, font_stack=[])
+
+
+def test_column_layout_defaults_reject_unsupported_column_counts() -> None:
+    assert ColumnLayoutDefaults(column_count=2).column_count == 2
+
+    with pytest.raises(ValidationError):
+        ColumnLayoutDefaults(column_count=3)
 
 
 def test_v2_workflow_contract_defaults_are_available() -> None:
@@ -130,6 +154,20 @@ def test_v2_workflow_contract_defaults_are_available() -> None:
     assert run.steps[0].name == "read_input"
 
 
+def test_workflow_mode_and_docx_input_are_first_class() -> None:
+    intent = UserIntent(workflow_mode="typeset_only", output_kind="typeset_document")
+    source = InputSource(
+        source_id="docx_source",
+        input_type="docx",
+        filename="paper.docx",
+    )
+    plan = LayoutIntentPlan(plan_id="layout_1", doc_id="doc_1", workflow_mode="translate_only")
+
+    assert intent.workflow_mode == WorkflowMode.TYPESET_ONLY
+    assert source.input_type == InputKind.DOCX
+    assert plan.workflow_mode == WorkflowMode.TRANSLATE_ONLY
+
+
 def test_input_source_can_mark_layout_reference_role() -> None:
     source = InputSource(
         source_id="layout_source",
@@ -139,6 +177,21 @@ def test_input_source_can_mark_layout_reference_role() -> None:
     )
 
     assert source.source_role == "layout_reference"
+
+
+def test_edit_scope_validates_pages_and_blocks() -> None:
+    assert EditScope().mode == "all"
+    assert EditScope(mode="pages", page_numbers=[1, 3]).page_numbers == [1, 3]
+    assert EditScope(mode="blocks", block_ids=["b1", "b2"]).block_ids == ["b1", "b2"]
+
+    with pytest.raises(ValidationError):
+        EditScope(mode="pages")
+    with pytest.raises(ValidationError):
+        EditScope(mode="pages", page_numbers=[0])
+    with pytest.raises(ValidationError):
+        EditScope(mode="blocks", block_ids=["b1", "b1"])
+    with pytest.raises(ValidationError):
+        EditScope(mode="blocks", page_numbers=[1], block_ids=["b1"])
 
 
 def test_semantic_layout_analysis_contract_defaults_are_available() -> None:
@@ -157,13 +210,67 @@ def test_semantic_layout_analysis_contract_defaults_are_available() -> None:
         quality_flags=["deterministic_semantic_analysis"],
     )
 
-    assert analysis.schema_version == "0.1"
+    assert analysis.schema_version == "0.2"
     assert analysis.block_signals[0].source_block_id == "b1"
     assert analysis.block_signals[0].role_candidates == [
         BlockRole.TITLE,
         BlockRole.HEADING,
     ]
     assert analysis.quality_flags == ["deterministic_semantic_analysis"]
+
+
+def test_v02_user_intent_defaults_are_compatible() -> None:
+    intent = UserIntent(target_lang="zh-CN")
+
+    assert intent.schema_version == "0.2"
+    assert intent.task_intent.document_kind == DocumentKind.GENERIC_ACADEMIC
+    assert [target.format for target in intent.output_targets] == [
+        "html_preview",
+        "pdf",
+    ]
+    assert intent.template_profile.source == "default_academic"
+    assert intent.bibliography_preference.citation_style == CitationStyle.AUTO
+    assert intent.requirements == []
+
+
+def test_academic_requirements_flow_through_intent_analysis_and_plan() -> None:
+    requirement = AcademicRequirement(
+        requirement_id="cover_page",
+        label="Cover page",
+        category="structure",
+        section_kinds=[SectionKind.COVER],
+        evidence=["cover_page_keyword"],
+    )
+    intent = UserIntent(requirements=[requirement])
+    analysis = SemanticLayoutAnalysis(
+        analysis_id="analysis_1",
+        doc_id="doc_1",
+        recognized_requirements=[requirement],
+    )
+    plan = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        requirements=[requirement],
+    )
+
+    assert intent.requirements[0].requirement_id == "cover_page"
+    assert analysis.recognized_requirements[0].section_kinds == [SectionKind.COVER]
+    assert plan.requirements[0].evidence == ["cover_page_keyword"]
+
+
+def test_v01_user_intent_payload_still_validates() -> None:
+    intent = UserIntent.model_validate(
+        {
+            "schema_version": "0.1",
+            "target_lang": "zh-CN",
+            "output_kind": "translation",
+            "style_intent": "academic",
+        }
+    )
+
+    assert intent.schema_version == "0.1"
+    assert intent.task_intent.document_kind == DocumentKind.GENERIC_ACADEMIC
+    assert intent.output_targets[0].format == "html_preview"
 
 
 def test_rejects_invalid_bbox() -> None:
@@ -243,6 +350,7 @@ def test_document_rejects_duplicate_page_asset_and_reading_order_ids() -> None:
                 ),
             ],
         )
+
 
 def test_document_can_reference_formula_ir_from_block_and_asset() -> None:
     block = DocumentBlock(
@@ -422,12 +530,15 @@ def test_formula_contract_defaults_on_document_and_chunk_blocks() -> None:
     assert block.formulas[0].placeholder == "@@FORMULA_Fabc123@@"
     assert block.text_for_translation == "We use @@FORMULA_Fabc123@@."
     assert source.requires_translation is True
-    assert SourceBlock(
-        block_id="formula",
-        role=BlockRole.FORMULA,
-        source_text="@@FORMULA_Fdisplay@@",
-        requires_translation=False,
-    ).requires_translation is False
+    assert (
+        SourceBlock(
+            block_id="formula",
+            role=BlockRole.FORMULA,
+            source_text="@@FORMULA_Fdisplay@@",
+            requires_translation=False,
+        ).requires_translation
+        is False
+    )
 
 
 def test_chunk_rejects_duplicate_source_block_ids() -> None:
@@ -561,6 +672,150 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
     assert validate_layout_intent_plan(document, valid) is valid
 
 
+def test_v02_layout_intent_plan_structure_defaults_and_validation() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.TITLE,
+                        bbox=BoundingBox(x0=0, y0=0, x1=10, y1=10),
+                        reading_order=0,
+                    ),
+                    DocumentBlock(
+                        block_id="b2",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=20, x1=10, y1=30),
+                        reading_order=1,
+                    ),
+                ],
+            )
+        ],
+    )
+    plan = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        document_profile=DocumentProfile(
+            document_kind=DocumentKind.UNDERGRADUATE_THESIS,
+            citation_style=CitationStyle.GB_T_7714,
+        ),
+        structure_plan=DocumentStructurePlan(
+            sections=[
+                DocumentStructureSection(
+                    section_id="title_01",
+                    kind=SectionKind.TITLE,
+                    source_block_ids=["b1"],
+                ),
+                DocumentStructureSection(
+                    section_id="body_01",
+                    kind=SectionKind.BODY,
+                    source_block_ids=["b2"],
+                ),
+            ]
+        ),
+        numbering_plan=NumberingPlan(
+            heading_numbering=NumberingRule(
+                enabled=True,
+                style="arabic",
+                section_ids=["body_01"],
+            )
+        ),
+        bibliography_plan=BibliographyPlan(citation_style="gb_t_7714"),
+        blocks=[
+            LayoutIntentBlock(source_block_id="b1", role=BlockRole.TITLE),
+            LayoutIntentBlock(source_block_id="b2", role=BlockRole.PARAGRAPH),
+        ],
+    )
+
+    assert plan.schema_version == "0.2"
+    assert validate_layout_intent_plan(document, plan) is plan
+
+
+def test_layout_intent_plan_rejects_unknown_structure_block_id() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=0, x1=10, y1=10),
+                        reading_order=0,
+                    )
+                ],
+            )
+        ],
+    )
+    plan = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        structure_plan=DocumentStructurePlan(
+            sections=[
+                DocumentStructureSection(
+                    section_id="body_01",
+                    kind=SectionKind.BODY,
+                    source_block_ids=["missing"],
+                )
+            ]
+        ),
+        blocks=[LayoutIntentBlock(source_block_id="b1", role=BlockRole.PARAGRAPH)],
+    )
+
+    with pytest.raises(LayoutIntentPlanValidationError, match="unknown source_block_id"):
+        validate_layout_intent_plan(document, plan)
+
+
+def test_layout_intent_plan_rejects_unknown_numbering_section_id() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=0, x1=10, y1=10),
+                        reading_order=0,
+                    )
+                ],
+            )
+        ],
+    )
+    plan = LayoutIntentPlan(
+        plan_id="plan_1",
+        doc_id="doc_1",
+        structure_plan=DocumentStructurePlan(
+            sections=[
+                DocumentStructureSection(
+                    section_id="body_01",
+                    kind=SectionKind.BODY,
+                    source_block_ids=["b1"],
+                )
+            ]
+        ),
+        numbering_plan=NumberingPlan(
+            heading_numbering=NumberingRule(section_ids=["missing_section"])
+        ),
+        blocks=[LayoutIntentBlock(source_block_id="b1", role=BlockRole.PARAGRAPH)],
+    )
+
+    with pytest.raises(LayoutIntentPlanValidationError, match="unknown section_id"):
+        validate_layout_intent_plan(document, plan)
+
+
 @pytest.mark.parametrize(
     ("model_cls", "payload"),
     [
@@ -608,9 +863,7 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
             {
                 "plan_id": "plan_1",
                 "doc_id": "doc_1",
-                "blocks": [
-                    {"source_block_id": "b1", "role": BlockRole.PARAGRAPH}
-                ],
+                "blocks": [{"source_block_id": "b1", "role": BlockRole.PARAGRAPH}],
                 "page_number": 1,
             },
         ),
@@ -619,9 +872,23 @@ def test_layout_intent_plan_requires_all_document_blocks() -> None:
             {
                 "analysis_id": "analysis_1",
                 "doc_id": "doc_1",
-                "block_signals": [
-                    {"source_block_id": "b1", "role_candidates": [BlockRole.TITLE]}
-                ],
+                "block_signals": [{"source_block_id": "b1", "role_candidates": [BlockRole.TITLE]}],
+                "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
+            },
+        ),
+        (
+            TaskIntent,
+            {
+                "document_kind": "generic_academic",
+                "page": 1,
+            },
+        ),
+        (
+            DocumentStructureSection,
+            {
+                "section_id": "body_01",
+                "kind": "body",
+                "source_block_ids": ["b1"],
                 "bbox": {"x0": 0, "y0": 0, "x1": 1, "y1": 1},
             },
         ),
@@ -654,6 +921,7 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
         "document-ir.schema.json",
         "input-source.schema.json",
         "asset-ir.schema.json",
+        "edit-scope.schema.json",
         "formula-recognition.schema.json",
         "ocr-recognition.schema.json",
         "user-intent.schema.json",
@@ -670,7 +938,7 @@ def test_json_schema_export_includes_metadata(tmp_path) -> None:
     for filename in expected_filenames:
         schema_text = (tmp_path / filename).read_text(encoding="utf-8")
         assert '"$schema": "https://json-schema.org/draft/2020-12/schema"' in schema_text
-        assert '"x-schema-version": "0.1"' in schema_text
+        assert '"x-schema-version": "0.2"' in schema_text
         assert exported[filename] == tmp_path / filename
 
 
@@ -683,6 +951,7 @@ def test_json_schema_helpers_include_contract_models() -> None:
     assert sorted(schemas) == [
         "asset-ir.schema.json",
         "document-ir.schema.json",
+        "edit-scope.schema.json",
         "formula-recognition.schema.json",
         "input-source.schema.json",
         "layout-intent-plan.schema.json",
@@ -694,7 +963,12 @@ def test_json_schema_helpers_include_contract_models() -> None:
         "workflow-run.schema.json",
     ]
     assert layout_plan_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-    assert layout_plan_schema["x-schema-version"] == "0.1"
+    assert layout_plan_schema["x-schema-version"] == "0.2"
+    assert "column_layout" in schema_for("user-intent")["properties"]
+    assert "column_layout" in schema_for("layout-intent-plan")["properties"]
+    assert (
+        "column_layout" in schema_for("translation-chunk")["$defs"]["RenderDefaults"]["properties"]
+    )
 
 
 def test_json_schema_helper_rejects_unknown_schema() -> None:

@@ -507,6 +507,215 @@ def test_job_not_found(tmp_path: Path, monkeypatch) -> None:
     assert response.json()["detail"] == "Job not found"
 
 
+def test_job_events_returns_current_status_before_workflow_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.QUEUED,
+            progress=0,
+            message="Queued",
+        )
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/jobs/job_1/events")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["job_id"] == "job_1"
+    assert payload["status"] == "queued"
+    assert payload["events"][0]["source"] == "job"
+    assert payload["events"][0]["phase"] == "queued"
+    assert payload["events"][0]["title"] == "Job queued"
+
+
+def test_job_events_combines_workflow_chunks_and_artifacts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.TRANSLATING,
+            progress=0.78,
+            message="Translated 2 of 2 chunks",
+            chunks=[
+                {
+                    "chunk_id": "chunk_1",
+                    "index": 1,
+                    "total": 2,
+                    "status": "completed",
+                    "progress": 1,
+                    "message": "Completed",
+                },
+                {
+                    "chunk_id": "chunk_2",
+                    "index": 2,
+                    "total": 2,
+                    "status": "completed",
+                    "progress": 1,
+                    "message": "Completed",
+                    "quality_flags": ["repaired_layout_plan"],
+                },
+            ],
+        )
+    )
+    storage.write_json(
+        "doc_1",
+        "workflow-run.json",
+        {
+            "workflow_id": "workflow_job_1",
+            "job_id": "job_1",
+            "doc_id": "doc_1",
+            "steps": [
+                {
+                    "step_id": "translate-1",
+                    "name": "translate",
+                    "status": "completed",
+                    "progress": 0.78,
+                    "message": "Translated 2 chunks",
+                    "input_artifacts": ["translation-chunks"],
+                    "output_artifacts": ["translation-plans", "translation-progress"],
+                    "diagnostics": {"quality_flags": ["deterministic_translator"]},
+                }
+            ],
+        },
+    )
+    storage.write_json("doc_1", "translation-progress.json", [])
+    storage.write_json("doc_1", "renderer-diagnostics.json", {"kind": "renderer"})
+    client = TestClient(app)
+
+    response = client.get("/api/jobs/job_1/events?limit=20")
+
+    assert response.status_code == 200
+    events = response.json()["events"]
+    sources = {event["source"] for event in events}
+    assert {"job", "workflow", "chunk", "artifact"} <= sources
+    assert any(event["phase"] == "translate" for event in events)
+    assert any(event["title"] == "Chunk 2/2: completed" for event in events)
+    assert any("renderer-diagnostics" in event["details"] for event in events)
+
+
+def test_job_events_ignores_stale_workflow_artifacts_for_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_2",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.QUEUED,
+            progress=0,
+            message="Queued retry",
+        )
+    )
+    storage.write_json(
+        "doc_1",
+        "workflow-run.json",
+        {
+            "workflow_id": "workflow_job_1",
+            "job_id": "job_1",
+            "doc_id": "doc_1",
+            "steps": [
+                {
+                    "step_id": "complete-1",
+                    "name": "complete",
+                    "status": "completed",
+                    "progress": 1,
+                    "message": "Old workflow completed",
+                }
+            ],
+        },
+    )
+    storage.write_json(
+        "doc_1",
+        "translation-progress.json",
+        [
+            {
+                "chunk_id": "chunk_old",
+                "index": 1,
+                "total": 1,
+                "status": "completed",
+                "progress": 1,
+                "message": "Old chunk",
+            }
+        ],
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/jobs/job_2/events")
+
+    assert response.status_code == 200
+    events = response.json()["events"]
+    assert {event["source"] for event in events} == {"job"}
+    assert events[0]["message"] == "Queued retry"
+
+
+def test_job_events_reports_failed_and_canceled_levels(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_failed",
+            doc_id="doc_failed",
+            filename="paper.pdf",
+            status=documents_route.JobState.FAILED,
+            progress=1,
+            message="Failed",
+            error="render failed",
+        )
+    )
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_canceled",
+            doc_id="doc_canceled",
+            filename="paper.pdf",
+            status=documents_route.JobState.CANCELED,
+            progress=1,
+            message="Canceled",
+        )
+    )
+    client = TestClient(app)
+
+    failed = client.get("/api/jobs/job_failed/events").json()["events"][0]
+    canceled = client.get("/api/jobs/job_canceled/events").json()["events"][0]
+
+    assert failed["level"] == "error"
+    assert failed["message"] == "render failed"
+    assert canceled["level"] == "warning"
+
+
+def test_job_events_missing_job_returns_404(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    client = TestClient(app)
+
+    response = client.get("/api/jobs/job_missing/events")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Job not found"
+
+
 def test_list_jobs_returns_recent_statuses(tmp_path: Path, monkeypatch) -> None:
     storage = Storage(tmp_path)
     monkeypatch.setattr(documents_route, "storage", storage)
@@ -646,6 +855,190 @@ def test_retry_job_without_upload_returns_404(tmp_path: Path, monkeypatch) -> No
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Original upload not found"
+
+
+def test_continue_job_requeues_existing_document_ir_without_upload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    )
+                ],
+            )
+        ],
+    )
+    storage.save_document_ir(document)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.FAILED,
+            progress=1,
+            message="Failed",
+            error="network timeout",
+        )
+    )
+    scheduled: list[tuple] = []
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
+    client = TestClient(app)
+
+    response = client.post("/api/jobs/job_1/continue")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["doc_id"] == "doc_1"
+    continuation_status = storage.load_status(payload["job_id"])
+    assert continuation_status.status == documents_route.JobState.QUEUED
+    assert continuation_status.message == "Queued continuation"
+    assert scheduled[0][0] is documents_route.process_document_continuation_job
+    assert scheduled[0][1][0] == payload["job_id"]
+    assert scheduled[0][1][1] == "doc_1"
+    assert scheduled[0][1][3] is None
+
+
+def test_continue_job_completed_job_returns_400(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.COMPLETED,
+            progress=1,
+            message="Completed",
+        )
+    )
+    client = TestClient(app)
+
+    response = client.post("/api/jobs/job_1/continue")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Completed jobs do not need continuation"
+
+
+def test_retypeset_job_creates_derived_job_from_saved_ir(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    )
+                ],
+            )
+        ],
+    )
+    storage.save_document_ir(document)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.COMPLETED,
+            progress=1,
+            message="Completed",
+        )
+    )
+    scheduled: list[tuple] = []
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/jobs/job_1/retypeset",
+        json={
+            "instruction": "Only compact the first page.",
+            "scope": {"mode": "pages", "page_numbers": [1]},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["doc_id"] != "doc_1"
+    queued = storage.load_status(payload["job_id"])
+    assert queued.doc_id == payload["doc_id"]
+    assert queued.message == "Queued re-typeset"
+    assert scheduled[0][0] is documents_route.process_document_retypeset_job
+    assert scheduled[0][1][1] == "doc_1"
+    assert scheduled[0][1][2] == payload["doc_id"]
+    assert scheduled[0][1][5].output_kind == "typeset_document"
+    assert scheduled[0][1][6].mode == "pages"
+
+
+def test_retypeset_job_rejects_invalid_scope(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.COMPLETED,
+            progress=1,
+            message="Completed",
+        )
+    )
+    storage.save_document_ir(
+        DocumentIR(
+            doc_id="doc_1",
+            pages=[
+                DocumentPage(
+                    page_id="p1",
+                    size=PageSize(width=300, height=400),
+                    blocks=[],
+                )
+            ],
+        )
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/jobs/job_1/retypeset",
+        json={"scope": {"mode": "pages"}},
+    )
+
+    assert response.status_code == 422
 
 
 def test_non_pdf_upload_returns_400(tmp_path: Path, monkeypatch) -> None:
@@ -832,7 +1225,7 @@ def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) 
             "target_lang": "zh-CN",
             "output_kind": "typeset_document",
             "style_intent": "academic",
-            "instruction": "按照gb-GB/T 7713.1 进行排版",
+            "instruction": "按照gb-GB/T 7713.1 进行排版，我需要双栏排版",
         },
     )
 
@@ -842,7 +1235,8 @@ def test_text_workflow_queues_job_with_user_intent(tmp_path: Path, monkeypatch) 
     assert status.status == "queued"
     assert status.filename == "text-input.txt"
     assert captured["func"] is documents_route.process_text_document_job
-    assert captured["args"][5].instruction == "按照gb-GB/T 7713.1 进行排版"
+    assert captured["args"][5].instruction == "按照gb-GB/T 7713.1 进行排版，我需要双栏排版"
+    assert captured["args"][5].column_layout.column_count == 2
 
 
 def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
@@ -871,6 +1265,42 @@ def test_image_workflow_queues_job(tmp_path: Path, monkeypatch) -> None:
     assert storage.find_upload(payload["doc_id"]) is not None
     assert scheduled[0][0] is documents_route.process_image_document_job
     assert scheduled[0][1][0] == payload["job_id"]
+
+
+def test_docx_workflow_queues_job_with_workflow_mode(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    scheduled: list[tuple] = []
+
+    def fake_schedule_job(func, *args, **kwargs):
+        scheduled.append((func, args, kwargs))
+
+    monkeypatch.setattr(documents_route, "schedule_job", fake_schedule_job)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/workflows/docx",
+        data={
+            "target_lang": "zh-CN",
+            "workflow_mode": "translate_and_typeset",
+            "instruction": "按照 GB/T 7713.1 排版",
+        },
+        files={
+            "file": (
+                "paper.docx",
+                b"PK\x03\x04docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    status = storage.load_status(payload["job_id"])
+    assert status.filename == "paper.docx"
+    assert storage.find_upload(payload["doc_id"]) is not None
+    assert scheduled[0][0] is documents_route.process_docx_document_job
+    assert scheduled[0][1][5].workflow_mode == "translate_and_typeset"
 
 
 def test_batch_pdf_upload_queues_multiple_jobs(tmp_path: Path, monkeypatch) -> None:

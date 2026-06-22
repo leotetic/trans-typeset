@@ -19,7 +19,7 @@ from pdf_translator_schema.validation import LayoutPlanValidationError
 from pydantic import ValidationError
 
 from ..provider_config import ProviderConfigError, normalize_openai_base_url
-from .formula_processing import is_formula_like_text
+from .formula_processing import is_formula_like_text, repair_formula_placeholders
 from .formulas.validation import FORMULA_REF_PATTERN
 
 _HAN_PATTERN = re.compile(r"[\u4e00-\u9fff]")
@@ -211,28 +211,32 @@ class OpenAICompatibleTranslator(Translator):
         attempt: int,
         previous_error: TranslationError | None = None,
     ) -> TranslationLayoutPlan:
+        system_prompt = (
+            "You translate academic PDF text blocks. Return only JSON matching "
+            "TranslationLayoutPlan schema_version 0.1. Do not include coordinates. "
+            "Return exactly one JSON object and no markdown."
+        )
         prompt = self._build_prompt(chunk, previous_error)
+        if _is_minimax_provider(self.base_url, self.model):
+            content = await self._translate_minimax_with_langchain(
+                chunk,
+                system_prompt,
+                prompt,
+            )
+            return self._validate_or_repair_content(chunk, content, attempt)
+
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You translate academic PDF text blocks. Return only JSON matching "
-                        "TranslationLayoutPlan schema_version 0.1. Do not include coordinates. "
-                        "Return exactly one JSON object and no markdown."
-                    ),
+                    "content": system_prompt,
                 },
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.2,
+            "response_format": {"type": "json_object"},
         }
-        if _is_minimax_provider(self.base_url, self.model):
-            payload["reasoning_split"] = True
-            if _is_minimax_m3_model(self.model):
-                payload["thinking"] = {"type": "disabled"}
-        else:
-            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -274,6 +278,35 @@ class OpenAICompatibleTranslator(Translator):
 
         content = self._extract_message_content(response.json(), chunk.chunk_id)
         return self._validate_or_repair_content(chunk, content, attempt)
+
+    async def _translate_minimax_with_langchain(
+        self,
+        chunk: TranslationChunk,
+        system_prompt: str,
+        prompt: str,
+    ) -> object:
+        try:
+            from langchain_openai import ChatOpenAI
+
+            model = ChatOpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                model=self.model,
+                temperature=0.2,
+                extra_body=_minimax_extra_body(self.model),
+                disabled_params={"parallel_tool_calls": None},
+            )
+            response = await model.ainvoke(
+                [
+                    ("system", system_prompt),
+                    ("user", prompt),
+                ]
+            )
+        except Exception as exc:
+            raise TranslationError(
+                f"MiniMax LangChain translator request failed for {chunk.chunk_id}: {exc}"
+            ) from exc
+        return _message_content(response)
 
     def _validate_or_repair_content(
         self,
@@ -359,6 +392,17 @@ class OpenAICompatibleTranslator(Translator):
             if not isinstance(translated_text, str) or not translated_text.strip():
                 translated_text = source.source_text
                 repaired_flags.extend(["empty_translation_repaired", "missing_translation"])
+            known_formula_ids = {
+                match.group(1)
+                for token in source.preserve_tokens
+                if (match := FORMULA_REF_PATTERN.fullmatch(token))
+            }
+            translated_text, placeholder_repair_count = repair_formula_placeholders(
+                translated_text,
+                known_formula_ids,
+            )
+            if placeholder_repair_count:
+                repaired_flags.append("formula_placeholder_syntax_repaired")
 
             raw_role = raw_block.get("role")
             if isinstance(raw_role, str) and raw_role in {role.value for role in BlockRole}:
@@ -609,6 +653,21 @@ def _is_minimax_provider(base_url: str, model: str) -> bool:
 def _is_minimax_m3_model(model: str) -> bool:
     normalized = model.lower()
     return "minimax-m3" in normalized or "minimax/m3" in normalized
+
+
+def _minimax_extra_body(model: str) -> dict[str, Any]:
+    extra_body: dict[str, Any] = {"reasoning_split": True}
+    if _is_minimax_m3_model(model):
+        extra_body["thinking"] = {"type": "disabled"}
+    return extra_body
+
+
+def _message_content(response: object) -> object:
+    if isinstance(response, dict):
+        return response.get("content", response)
+    if hasattr(response, "content"):
+        return response.content
+    return response
 
 
 def _is_ssl_protocol_mismatch(exc: httpx.HTTPError) -> bool:

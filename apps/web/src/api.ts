@@ -1,4 +1,4 @@
-import type { JobStatus, OutputKind, RenderDefaults, StyleIntent, UserConstraints } from "@trans-typesetting/schema";
+import type { EditScope, JobStatus, OutputKind, RenderDefaults, StyleIntent, UserConstraints, WorkflowMode } from "@trans-typesetting/schema";
 
 export interface CreateDocumentResponse {
   job_id: string;
@@ -55,10 +55,19 @@ export interface UpdateRuntimeConfig {
 }
 
 export interface WorkflowIntentInput {
+  workflow_mode?: WorkflowMode;
   output_kind: OutputKind;
   style_intent: StyleIntent;
   instruction: string;
   constraints?: UserConstraints;
+}
+
+export interface RetypesetJobInput {
+  instruction: string;
+  style_intent?: StyleIntent;
+  target_lang?: string;
+  constraints?: UserConstraints;
+  scope?: EditScope;
 }
 
 export interface CreateDocumentInput {
@@ -78,6 +87,30 @@ export interface ArtifactSummary {
 export interface DocumentArtifacts {
   doc_id: string;
   artifacts: ArtifactSummary[];
+}
+
+export type JobLogEventSource = "job" | "workflow" | "chunk" | "artifact";
+export type JobLogEventLevel = "info" | "success" | "warning" | "error";
+
+export interface JobLogEvent {
+  id: string;
+  sequence: number;
+  source: JobLogEventSource;
+  level: JobLogEventLevel;
+  phase: string;
+  title: string;
+  message: string;
+  progress?: number | null;
+  details: string[];
+}
+
+export interface JobLogResponse {
+  job_id: string;
+  doc_id?: string | null;
+  status: JobStatus["status"];
+  progress: number;
+  message: string;
+  events: JobLogEvent[];
 }
 
 export type ApiErrorKind = "http" | "network" | "timeout" | "abort" | "parse";
@@ -103,6 +136,8 @@ const jobStatusValues = new Set<JobStatus["status"]>([
   "failed",
   "canceled"
 ]);
+const jobLogSources = new Set<JobLogEventSource>(["job", "workflow", "chunk", "artifact"]);
+const jobLogLevels = new Set<JobLogEventLevel>(["info", "success", "warning", "error"]);
 
 const DEFAULT_TIMEOUT_MS = 12_000;
 
@@ -175,6 +210,25 @@ export async function createImageWorkflow(
   });
 }
 
+export async function createDocxWorkflow(
+  file: File,
+  targetLang: string,
+  intent: WorkflowIntentInput,
+  options: ApiRequestInit = {}
+) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("target_lang", targetLang);
+  appendIntentFields(formData, intent);
+
+  return requestJson("/api/workflows/docx", parseCreateDocumentResponse, {
+    method: "POST",
+    body: formData,
+    timeoutMs: 60_000,
+    ...options
+  });
+}
+
 export async function createDocumentsBatch(
   files: File[],
   targetLang: string,
@@ -199,6 +253,9 @@ export async function createDocumentsBatch(
 function appendIntentFields(formData: FormData, intent?: WorkflowIntentInput) {
   if (!intent) {
     return;
+  }
+  if (intent.workflow_mode) {
+    formData.append("workflow_mode", intent.workflow_mode);
   }
   formData.append("output_kind", intent.output_kind);
   formData.append("style_intent", intent.style_intent);
@@ -227,6 +284,18 @@ export async function getJob(jobId: string, options: ApiRequestInit = {}) {
   });
 }
 
+export async function getJobEvents(
+  jobId: string,
+  limit = 80,
+  options: ApiRequestInit = {}
+) {
+  const boundedLimit = Math.min(200, Math.max(1, Math.trunc(limit)));
+  return requestJson(`/api/jobs/${jobId}/events?limit=${boundedLimit}`, parseJobLogResponse, {
+    retries: 1,
+    ...options
+  });
+}
+
 export async function cancelJob(jobId: string, options: ApiRequestInit = {}) {
   return requestJson(`/api/jobs/${jobId}/cancel`, parseJobStatus, {
     method: "POST",
@@ -240,6 +309,32 @@ export async function retryJob(jobId: string, options: ApiRequestInit = {}) {
     method: "POST",
     retries: 1,
     ...options
+  });
+}
+
+export async function continueJob(jobId: string, options: ApiRequestInit = {}) {
+  return requestJson(`/api/jobs/${jobId}/continue`, parseCreateDocumentResponse, {
+    method: "POST",
+    retries: 1,
+    ...options
+  });
+}
+
+export async function retypesetJob(
+  jobId: string,
+  input: RetypesetJobInput,
+  options: ApiRequestInit = {}
+) {
+  const { headers, ...requestOptions } = options;
+  return requestJson(`/api/jobs/${jobId}/retypeset`, parseCreateDocumentResponse, {
+    method: "POST",
+    body: JSON.stringify(input),
+    headers: {
+      "Content-Type": "application/json",
+      ...headers
+    },
+    timeoutMs: 60_000,
+    ...requestOptions
   });
 }
 
@@ -487,6 +582,61 @@ function parseJobList(payload: unknown): JobStatus[] {
   return payload.map(parseJobStatus);
 }
 
+function parseJobLogResponse(payload: unknown): JobLogResponse {
+  if (
+    !isRecord(payload) ||
+    typeof payload.job_id !== "string" ||
+    typeof payload.status !== "string" ||
+    !jobStatusValues.has(payload.status as JobStatus["status"]) ||
+    typeof payload.progress !== "number" ||
+    typeof payload.message !== "string" ||
+    !Array.isArray(payload.events)
+  ) {
+    throw new Error("任务日志返回结构不正确。");
+  }
+  return {
+    job_id: payload.job_id,
+    doc_id: typeof payload.doc_id === "string" || payload.doc_id === null ? payload.doc_id : undefined,
+    status: payload.status as JobStatus["status"],
+    progress: payload.progress,
+    message: payload.message,
+    events: payload.events.map(parseJobLogEvent)
+  };
+}
+
+function parseJobLogEvent(payload: unknown): JobLogEvent {
+  if (
+    !isRecord(payload) ||
+    typeof payload.id !== "string" ||
+    typeof payload.sequence !== "number" ||
+    typeof payload.source !== "string" ||
+    !jobLogSources.has(payload.source as JobLogEventSource) ||
+    typeof payload.level !== "string" ||
+    !jobLogLevels.has(payload.level as JobLogEventLevel) ||
+    typeof payload.phase !== "string" ||
+    typeof payload.title !== "string" ||
+    typeof payload.message !== "string"
+  ) {
+    throw new Error("任务日志事件结构不正确。");
+  }
+  return {
+    id: payload.id,
+    sequence: payload.sequence,
+    source: payload.source as JobLogEventSource,
+    level: payload.level as JobLogEventLevel,
+    phase: payload.phase,
+    title: payload.title,
+    message: payload.message,
+    progress:
+      typeof payload.progress === "number" || payload.progress === null
+        ? payload.progress
+        : undefined,
+    details: Array.isArray(payload.details)
+      ? payload.details.filter((detail): detail is string => typeof detail === "string")
+      : []
+  };
+}
+
 function parseRuntimeConfig(payload: unknown): RuntimeConfig {
   if (
     !isRecord(payload) ||
@@ -566,6 +716,9 @@ function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
       payload.formula_numbering === "parenthesized" || payload.formula_numbering === "none"
         ? payload.formula_numbering
         : undefined,
+    column_layout: isRecord(payload.column_layout)
+      ? (payload.column_layout as RenderDefaults["column_layout"])
+      : undefined,
     page_layout: isRecord(payload.page_layout)
       ? (payload.page_layout as RenderDefaults["page_layout"])
       : undefined,

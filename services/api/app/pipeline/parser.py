@@ -31,6 +31,22 @@ _AIP_PARTIAL_SLASH_FONT_MARKERS = ("4C4E51",)
 _AIP_SYMBOL_FONT_MARKERS = ("4C4E74",)
 _SCRIPTABLE_PREVIOUS_CHAR = re.compile(r"[A-Za-z0-9α-ωΑ-Ω)\]\}']")
 _MATH_GEOMETRY_MARKER = re.compile(r"(?:[∂@∇∫∑¼þ=/_^]|\b[fgqmn][sn]\b)")
+_PUBLICATION_COPYRIGHT_PATTERN = re.compile(
+    r"^©\s*(?:(?:the\s+)?author\(s\)|authors?|作者)\b.*(?:19|20)\d{2}\.?$",
+    re.IGNORECASE,
+)
+_PUBLICATION_TIMESTAMP_PATTERN = re.compile(
+    r"^\d{1,2}\s+[A-Z][a-z]+\s+(?:19|20)\d{2}\s+\d{2}:\d{2}:\d{2}$"
+)
+_STRICT_CAPTION_LABEL_PATTERN = re.compile(
+    r"^\s*(?:"
+    r"(?:fig\.|figure|table)\s*[A-Z]?\d+(?:[.\-][A-Za-z0-9]+)*\s*[.:：)]|"
+    r"(?:图|表)\s*[A-Z]?\d+(?:[.\-][A-Za-z0-9]+)*\s*[.:：、)]"
+    r")",
+    re.IGNORECASE,
+)
+_CAPTIONABLE_ASSET_KINDS = {"image", "figure", "table"}
+_CAPTION_CONTEXT_MAX_DISTANCE_PT = 90.0
 
 
 class UnsupportedPdfError(ValueError):
@@ -56,7 +72,7 @@ def classify_role(
         return BlockRole.ABSTRACT
     if _looks_like_table_text(stripped):
         return BlockRole.TABLE
-    if lower.startswith(("fig.", "figure ", "table ")):
+    if _has_strict_caption_label(stripped):
         return BlockRole.CAPTION
     if re.fullmatch(r"(references|bibliography|works cited)\.?", lower) or re.match(
         r"^\[\d+\]",
@@ -87,6 +103,61 @@ def classify_role(
     if len(stripped) < 90 and font_size >= 12:
         return BlockRole.HEADING
     return BlockRole.PARAGRAPH
+
+
+def _has_strict_caption_label(text: str) -> bool:
+    return bool(_STRICT_CAPTION_LABEL_PATTERN.match(re.sub(r"\s+", " ", text).strip()))
+
+
+def _bbox_vertical_distance(a: BoundingBox, b: BoundingBox) -> float:
+    if a.y1 < b.y0:
+        return b.y0 - a.y1
+    if b.y1 < a.y0:
+        return a.y0 - b.y1
+    return 0.0
+
+
+def _bbox_horizontal_overlap_ratio(a: BoundingBox, b: BoundingBox) -> float:
+    overlap = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
+    width = max(1.0, min(a.x1 - a.x0, b.x1 - b.x0))
+    return overlap / width
+
+
+def _has_nearby_captionable_asset(block: DocumentBlock, assets: list[Asset]) -> bool:
+    for asset in assets:
+        if asset.kind not in _CAPTIONABLE_ASSET_KINDS:
+            continue
+        if (
+            _bbox_vertical_distance(asset.bbox, block.bbox)
+            <= _CAPTION_CONTEXT_MAX_DISTANCE_PT
+            and _bbox_horizontal_overlap_ratio(asset.bbox, block.bbox) >= 0.35
+        ):
+            return True
+    return False
+
+
+def _refine_caption_roles(
+    blocks: list[DocumentBlock],
+    assets: list[Asset],
+) -> list[DocumentBlock]:
+    refined: list[DocumentBlock] = []
+    for block in blocks:
+        has_caption_label = _has_strict_caption_label(block.source_text)
+        role = block.role
+        if role == BlockRole.CAPTION and not has_caption_label:
+            role = BlockRole.PARAGRAPH
+        elif (
+            role == BlockRole.PARAGRAPH
+            and has_caption_label
+            and _has_nearby_captionable_asset(block, assets)
+            and (block.style_seed.font_size or 10.0) <= 10.5
+        ):
+            role = BlockRole.CAPTION
+        if role != block.role:
+            refined.append(block.model_copy(update={"role": role}, deep=True))
+        else:
+            refined.append(block)
+    return refined
 
 
 def _looks_like_table_text(text: str) -> bool:
@@ -125,6 +196,41 @@ def _block_text(block: dict) -> str:
     return normalize_pdf_text(" ".join(_block_text_parts(block)))
 
 
+def _is_publication_boilerplate_text(
+    text: str,
+    bbox: object | None = None,
+    page_height: float = 0.0,
+) -> bool:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return False
+    if _PUBLICATION_COPYRIGHT_PATTERN.match(normalized):
+        return True
+
+    bbox_tuple = _coerce_bbox_tuple(bbox)
+    in_footer = False
+    if bbox_tuple is not None and page_height > 0:
+        x0, y0, x1, y1 = bbox_tuple
+        footer_band = page_height * HEADER_FOOTER_BAND_RATIO
+        in_footer = y1 >= page_height - footer_band or y0 >= page_height * 0.72
+        if (
+            x1 - x0 <= 14
+            and y1 - y0 >= 40
+            and _PUBLICATION_TIMESTAMP_PATTERN.match(normalized)
+        ):
+            return True
+
+    lower = normalized.lower()
+    if in_footer and "doi:" in lower:
+        return True
+    if in_footer and re.search(r"\bj\.\s+[a-z]", lower) and re.search(
+        r"\b(?:19|20)\d{2}\b",
+        lower,
+    ):
+        return True
+    return False
+
+
 def _header_footer_keys(page_dicts: list[dict]) -> set[str]:
     counts: dict[str, int] = {}
     page_count = len(page_dicts)
@@ -158,7 +264,10 @@ def _filter_header_footer_blocks(page_dict: dict, repeated_keys: set[str]) -> li
     for block in page_dict.get("blocks", []):
         if block.get("type") != 0 or not block.get("lines"):
             continue
-        text = _block_text(block).lower()
+        raw_text = _block_text(block)
+        if _is_publication_boilerplate_text(raw_text, block.get("bbox"), height):
+            continue
+        text = raw_text.lower()
         if text in repeated_keys and "bbox" in block:
             _, y0, _, y1 = block["bbox"]
             if y0 <= band or y1 >= height - band:
@@ -770,6 +879,7 @@ def parse_pdf(
                 )
             )
 
+        page_blocks = _refine_caption_roles(page_blocks, page_assets)
         pages.append(
             DocumentPage(
                 page_id=page_id,

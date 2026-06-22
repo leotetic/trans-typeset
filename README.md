@@ -41,6 +41,12 @@ npm run dev:web
 
 PDF 工作台入口分为两个上传源：`待翻译 PDF` 是必填内容源，`版式参考 PDF` 是可选的排版语义输入源。未提供版式参考时，后端会把内容 PDF 同时作为默认版式语义源，并在 `normalized-input` / `semantic-analysis` 中标记 `layout_source_fallback_to_content`。展开“自定义强约束”后，前端会用 typed 控件提交页尺寸、目标字号、续页和图片保留策略；首版不开放 raw JSON schema 编辑。
 
+前端现在按三条用户路径组织：仅翻译、仅智能排版、翻译并排版。提交时会写入 `workflow_mode=translate_only|typeset_only|translate_and_typeset`；仅排版会跳过 translator 并保留源文本，仅翻译仍生成 preview/PDF 但跳过模型增强的智能排版计划。Developer 区集中展示运行历史、模型/API/OCR 设置、pipeline events 和 schema/artifact inspector。
+
+Word 输入通过 `POST /api/workflows/docx` 进入流水线。为了尽量保留 Word 的真实分页和图片位置，后端要求本机安装 headless LibreOffice/`soffice`，或通过 `LIBREOFFICE_BIN` 指向可执行文件；DOCX 会先转换为 PDF，再复用 PDF parser。当前机器没有 `soffice` 时，任务会失败并写入 `docx-conversion` artifact，提示安装/配置 converter。
+
+图片输入和扫描版 PDF 会优先使用已配置且启用的 vision/OCR 模型抽取纯文本块；模型返回只允许文本和语义角色，不允许坐标。未配置 `AGENT_ENABLE_VISION_ANALYSIS` 或模型密钥时，系统继续使用 deterministic fallback，并在 `ocr-diagnostics`、`parser-diagnostics` 和质量 flags 中明确标记。
+
 常用配置在 `.env` 中：
 
 ```bash
@@ -83,24 +89,28 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - `GET /api/jobs`: 返回最近任务，可用于前端刷新恢复。
 - `POST /api/jobs/{job_id}/cancel`: 取消排队或运行中的任务。
 - `POST /api/jobs/{job_id}/retry`: 复用原上传文件重新排队。
+- `POST /api/jobs/{job_id}/retypeset`: 从历史任务复用 `DocumentIR`/上传文件/资产，按自然语言说明和 `EditScope` 创建新的原文重排派生任务。
 - `GET /api/documents/{doc_id}/artifacts`: 返回当前文档可用 artifact。
 - `GET /api/documents/{doc_id}/artifacts/document-ir`
 - `GET /api/documents/{doc_id}/artifacts/semantic-analysis`
 - `GET /api/documents/{doc_id}/artifacts/translation-chunks`
 - `GET /api/documents/{doc_id}/artifacts/translation-plans`
 - `GET /api/documents/{doc_id}/artifacts/translation-progress`
+- `GET /api/documents/{doc_id}/artifacts/edit-scope`
+- `GET /api/documents/{doc_id}/artifacts/retypeset-source`
+- `GET /api/documents/{doc_id}/artifacts/docx-conversion`
 - `GET /api/documents/{doc_id}/artifacts/parser-diagnostics`
 - `GET /api/documents/{doc_id}/artifacts/renderer-diagnostics`
 - `GET /api/documents/{doc_id}/artifacts/pdf-export-diagnostics`
 - `GET /api/documents/{doc_id}/assets/{filename}`: 返回 parser 提取的 PDF 图片资产，用于预览和 PDF 导出。
 
-前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、semantic analysis、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不匹配、溢出等 quality flags。
+前端工作台会在任务完成后显示 schema inspector，直接查看 `DocumentIR`、semantic analysis、chunks、plans、parser diagnostics 和 renderer diagnostics。Parser diagnostics 汇总页数、文本块、资产、角色计数和复杂 PDF fallback flags；Renderer diagnostics 汇总缺失译文、角色不一致、溢出和自然语言排版要求状态。`user-intent`、`semantic-analysis`、`layout-intent-plan` 与 `renderer-diagnostics.intent_requirements` 会把封面、摘要、目录、图表目录、实验报告结构、课程 metadata、页码、字体字号和语气等 prompt 要求标记为 satisfied、diagnostic 或 recognized，便于本地 UI 明确展示“已满足”或“需用户补充内容”。
 
 真实模型返回会先提取 `TranslationLayoutPlan` JSON object，再经过严格 schema 校验。OpenAI-compatible endpoint 不一定保证 `message.content` 是纯 JSON；后端会处理 prose、markdown fence 或 thinking 包裹后的 plan JSON，MiniMax-M3 会额外关闭 thinking 并启用 reasoning split。可修复的 chunk 级问题，例如误带坐标字段、缺失 block 或遗漏 preserve token，会被后端修复为合法 `TranslationLayoutPlan` 并写入 `quality_flags`；不可提取、不可解析或请求失败会按 chunk 重试后落到任务错误状态。`TRANSLATION_CONCURRENCY` 控制 chunk 并发翻译，`TRANSLATOR_MAX_ATTEMPTS` 控制每个 chunk 的模型调用尝试次数。
 
 `GET/PUT /api/config` 支持持久化本地运行配置，包括 provider/base URL/model/API key、默认语言、并发、重试、LangGraph agent repair 次数、vision analysis 开关、layout/vision 模型名和 `RenderDefaults`。API key 只写入本地 `data/config/runtime-config.json`，不会在响应中返回。前端配置面板可编辑字体栈、行高、段距和 overflow 最小字号缩放；chunker 和 renderer 使用同一份已持久化的 `RenderDefaults`，保证 prompt 中的 render defaults 与最终 HTML/PDF 一致。
 
-智能排版 workflow 由 LangGraph `StateGraph` 编排为 adapter、intent analysis、semantic recognition、plan、validation、translation、render evaluation、repair 和 export 节点。未配置模型 key 时会使用 deterministic semantic/layout fallback；图片 vision analysis 默认关闭，不会自动把用户图片发送到远端 provider。
+智能排版 workflow 由 LangGraph `StateGraph` 编排为 adapter、intent analysis、semantic recognition、plan、validation、translation/source-preserve、render evaluation、repair 和 export 节点。`output_kind=typeset_document` 会跳过真实 translator，生成 `translated_text == source_text` 的 renderer-compatible plans，并写入 `translation_skipped` / `source_text_preserved`。未配置模型 key 时会使用 deterministic semantic/layout fallback；图片 vision analysis 默认关闭，不会自动把用户图片发送到远端 provider。
 
 Renderer 当前执行确定性 overflow policy：先按 `min_font_scale` 缩放，再在页面可用空间内扩盒，仍放不下时创建 continuation page，并在 diagnostics 中标记 `font_scaled`、`box_expanded`、`continued_on_next_page` 或 `continuation_page`。
 

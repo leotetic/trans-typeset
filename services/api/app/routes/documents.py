@@ -8,19 +8,25 @@ from pdf_translator_schema import UserIntent
 
 from ..config import settings
 from ..jobs import schedule_job
+from ..job_events import build_job_log_response
 from ..models import (
     ArtifactSummary,
     BatchCreateDocumentResponse,
     CreateDocumentResponse,
     DocumentArtifacts,
+    JobLogResponse,
     JobState,
     JobStatus,
+    RetypesetJobRequest,
     RuntimeConfig,
     UpdateRuntimeConfig,
 )
 from ..provider_config import ProviderConfigError, normalize_openai_base_url
 from ..pipeline.orchestrator import (
+    process_document_continuation_job,
     process_document_job,
+    process_document_retypeset_job,
+    process_docx_document_job,
     process_image_document_job,
     process_text_document_job,
 )
@@ -43,10 +49,14 @@ JSON_ARTIFACTS = {
     "formula-diagnostics": ("formula-diagnostics.json", "formula-diagnostics"),
     "ocr-recognition": ("ocr-recognition.json", "ocr-recognition"),
     "ocr-diagnostics": ("ocr-diagnostics.json", "ocr-diagnostics"),
+    "docx-conversion": ("docx-conversion.json", "docx-conversion"),
     "document-ir": ("document_ir", "document-ir"),
     "translation-chunks": ("translation-chunks.json", "translation-chunks"),
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
+    "translation-plan-cache": ("translation-plan-cache.json", "translation-plan-cache"),
     "translation-diagnostics": ("translation-diagnostics.json", "translation-diagnostics"),
+    "edit-scope": ("edit-scope.json", "edit-scope"),
+    "retypeset-source": ("retypeset-source.json", "retypeset-source"),
     "layout-trace": ("layout-trace.json", "layout-trace"),
     "renderer-diagnostics": ("renderer-diagnostics.json", "renderer-diagnostics"),
     "render-evaluation": ("render-evaluation.json", "render-evaluation"),
@@ -82,6 +92,22 @@ async def ensure_image_upload(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WebP images are supported")
     if file.content_type and file.content_type not in allowed_types:
         raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WebP images are supported")
+
+
+async def ensure_docx_upload(file: UploadFile) -> None:
+    filename = file.filename or ""
+    if not filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=400, detail="Only DOCX uploads are supported")
+    allowed_types = {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/octet-stream",
+    }
+    if file.content_type and file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Only DOCX uploads are supported")
+    header = await file.read(4)
+    await file.seek(0)
+    if header != b"PK\x03\x04":
+        raise HTTPException(status_code=400, detail="Only DOCX uploads are supported")
 
 
 def ensure_target_lang(target_lang: str) -> None:
@@ -168,7 +194,8 @@ async def create_document(
     layout_file: Annotated[UploadFile | None, File()] = None,
     file: Annotated[UploadFile | None, File()] = None,
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
-    output_kind: Annotated[str, Form()] = "translation",
+    workflow_mode: Annotated[str | None, Form()] = None,
+    output_kind: Annotated[str, Form()] = "typeset_document",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
     page_width_pt: Annotated[float | None, Form()] = None,
@@ -196,6 +223,7 @@ async def create_document(
             allow_continuation=allow_continuation,
             preserve_images=preserve_images,
         ),
+        workflow_mode,
     )
 
     doc_id = storage.new_doc_id()
@@ -245,6 +273,7 @@ async def create_document(
 async def create_text_workflow(
     text: Annotated[str, Form()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    workflow_mode: Annotated[str | None, Form()] = None,
     output_kind: Annotated[str, Form()] = "typeset_document",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
@@ -270,6 +299,7 @@ async def create_text_workflow(
             allow_continuation=allow_continuation,
             preserve_images=preserve_images,
         ),
+        workflow_mode,
     )
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
@@ -301,6 +331,7 @@ async def create_text_workflow(
 async def create_image_workflow(
     file: Annotated[UploadFile, File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    workflow_mode: Annotated[str | None, Form()] = None,
     output_kind: Annotated[str, Form()] = "layout_reference",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
@@ -324,6 +355,7 @@ async def create_image_workflow(
             allow_continuation=allow_continuation,
             preserve_images=preserve_images,
         ),
+        workflow_mode,
     )
     doc_id = storage.new_doc_id()
     job_id = storage.new_job_id()
@@ -358,11 +390,74 @@ async def create_image_workflow(
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
 
+@router.post("/workflows/docx", response_model=CreateDocumentResponse)
+async def create_docx_workflow(
+    file: Annotated[UploadFile, File()],
+    target_lang: Annotated[str, Form()] = settings.default_target_lang,
+    workflow_mode: Annotated[str | None, Form()] = None,
+    output_kind: Annotated[str, Form()] = "typeset_document",
+    style_intent: Annotated[str, Form()] = "academic",
+    instruction: Annotated[str, Form()] = "",
+    page_width_pt: Annotated[float | None, Form()] = None,
+    page_height_pt: Annotated[float | None, Form()] = None,
+    target_font_size_pt: Annotated[float | None, Form()] = None,
+    allow_continuation: Annotated[bool | None, Form()] = None,
+    preserve_images: Annotated[bool | None, Form()] = None,
+) -> CreateDocumentResponse:
+    ensure_target_lang(target_lang)
+    await ensure_docx_upload(file)
+    user_intent = coerce_user_intent(
+        target_lang,
+        output_kind,
+        style_intent,
+        instruction,
+        _constraints_from_form(
+            page_width_pt=page_width_pt,
+            page_height_pt=page_height_pt,
+            target_font_size_pt=target_font_size_pt,
+            allow_continuation=allow_continuation,
+            preserve_images=preserve_images,
+        ),
+        workflow_mode,
+    )
+    doc_id = storage.new_doc_id()
+    job_id = storage.new_job_id()
+    docx_path = await storage.save_upload_file(
+        doc_id,
+        file,
+        settings.max_upload_bytes,
+        default_suffix=".docx",
+    )
+    storage.save_status(
+        JobStatus(
+            job_id=job_id,
+            doc_id=doc_id,
+            filename=file.filename or "document.docx",
+            target_lang=target_lang,
+            status=JobState.QUEUED,
+            progress=0,
+            message="Queued",
+        )
+    )
+    schedule_job(
+        process_docx_document_job,
+        job_id,
+        doc_id,
+        file.filename or "document.docx",
+        docx_path,
+        target_lang,
+        user_intent,
+        max_concurrency=_job_max_concurrency(),
+    )
+    return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
+
+
 @router.post("/documents/batch", response_model=BatchCreateDocumentResponse)
 async def create_documents_batch(
     files: Annotated[list[UploadFile], File()],
     target_lang: Annotated[str, Form()] = settings.default_target_lang,
-    output_kind: Annotated[str, Form()] = "translation",
+    workflow_mode: Annotated[str | None, Form()] = None,
+    output_kind: Annotated[str, Form()] = "typeset_document",
     style_intent: Annotated[str, Form()] = "academic",
     instruction: Annotated[str, Form()] = "",
     page_width_pt: Annotated[float | None, Form()] = None,
@@ -386,6 +481,7 @@ async def create_documents_batch(
             allow_continuation=allow_continuation,
             preserve_images=preserve_images,
         ),
+        workflow_mode,
     )
 
     jobs: list[CreateDocumentResponse] = []
@@ -430,6 +526,21 @@ async def get_job(job_id: str) -> JobStatus:
         return storage.load_status(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Job not found") from exc
+
+
+@router.get("/jobs/{job_id}/events", response_model=JobLogResponse)
+async def get_job_events(job_id: str, limit: int = 80) -> JobLogResponse:
+    try:
+        status = storage.load_status(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    bounded_limit = min(max(limit, 1), 200)
+    return build_job_log_response(
+        status,
+        storage,
+        JSON_ARTIFACTS,
+        limit=bounded_limit,
+    )
 
 
 @router.get("/jobs", response_model=list[JobStatus])
@@ -486,8 +597,65 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         message="Queued retry",
     )
     storage.save_status(next_status)
+    if pdf_path.suffix.lower() == ".docx":
+        schedule_job(
+            process_docx_document_job,
+            next_job_id,
+            status.doc_id,
+            status.filename,
+            pdf_path,
+            target_lang,
+            user_intent,
+            max_concurrency=_job_max_concurrency(),
+        )
+    else:
+        schedule_job(
+            process_document_job,
+            next_job_id,
+            status.doc_id,
+            status.filename,
+            pdf_path,
+            target_lang,
+            user_intent,
+            layout_pdf_path,
+            max_concurrency=_job_max_concurrency(),
+        )
+    return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
+
+
+@router.post("/jobs/{job_id}/continue", response_model=CreateDocumentResponse)
+async def continue_job(job_id: str) -> CreateDocumentResponse:
+    try:
+        status = storage.load_status(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    if not status.doc_id:
+        raise HTTPException(status_code=400, detail="Job has no document to continue")
+    if status.status == JobState.COMPLETED:
+        raise HTTPException(status_code=400, detail="Completed jobs do not need continuation")
+
+    pdf_path = storage.find_upload(status.doc_id, role="content")
+    document_ir_path = storage.documents / f"{status.doc_id}.json"
+    if pdf_path is None and not document_ir_path.exists():
+        raise HTTPException(status_code=404, detail="Original upload or DocumentIR not found")
+
+    layout_pdf_path = storage.find_upload(status.doc_id, role="layout")
+    target_lang = status.target_lang or settings.default_target_lang
+    ensure_target_lang(target_lang)
+    user_intent = _load_user_intent(status.doc_id)
+    next_job_id = storage.new_job_id()
+    next_status = JobStatus(
+        job_id=next_job_id,
+        doc_id=status.doc_id,
+        filename=status.filename,
+        target_lang=target_lang,
+        status=JobState.QUEUED,
+        progress=0,
+        message="Queued continuation",
+    )
+    storage.save_status(next_status)
     schedule_job(
-        process_document_job,
+        process_document_continuation_job,
         next_job_id,
         status.doc_id,
         status.filename,
@@ -498,6 +666,72 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
         max_concurrency=_job_max_concurrency(),
     )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
+
+
+@router.post("/jobs/{job_id}/retypeset", response_model=CreateDocumentResponse)
+async def retypeset_job(
+    job_id: str,
+    payload: RetypesetJobRequest,
+) -> CreateDocumentResponse:
+    try:
+        status = storage.load_status(job_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Job not found") from exc
+    if not status.doc_id:
+        raise HTTPException(status_code=400, detail="Job has no document to re-typeset")
+
+    source_doc_id = status.doc_id
+    pdf_path = storage.find_upload(source_doc_id, role="content")
+    document_ir_path = storage.documents / f"{source_doc_id}.json"
+    if pdf_path is None and not document_ir_path.exists():
+        raise HTTPException(status_code=404, detail="Original upload or DocumentIR not found")
+
+    previous_intent = _load_user_intent(source_doc_id)
+    target_lang = payload.target_lang or status.target_lang or settings.default_target_lang
+    ensure_target_lang(target_lang)
+    style_intent = payload.style_intent or (
+        previous_intent.style_intent if previous_intent is not None else "academic"
+    )
+    instruction = (
+        payload.instruction.strip()
+        or (previous_intent.instruction if previous_intent is not None else "")
+    )
+    constraints = payload.constraints or (
+        previous_intent.constraints if previous_intent is not None else None
+    )
+    user_intent = coerce_user_intent(
+        target_lang,
+        "typeset_document",
+        style_intent,
+        instruction,
+        constraints,
+    )
+
+    next_doc_id = storage.new_doc_id()
+    next_job_id = storage.new_job_id()
+    next_status = JobStatus(
+        job_id=next_job_id,
+        doc_id=next_doc_id,
+        filename=status.filename,
+        target_lang=target_lang,
+        status=JobState.QUEUED,
+        progress=0,
+        message="Queued re-typeset",
+    )
+    storage.save_status(next_status)
+    schedule_job(
+        process_document_retypeset_job,
+        next_job_id,
+        source_doc_id,
+        next_doc_id,
+        status.filename,
+        target_lang,
+        user_intent,
+        payload.scope,
+        job_id,
+        max_concurrency=_job_max_concurrency(),
+    )
+    return CreateDocumentResponse(job_id=next_job_id, doc_id=next_doc_id)
 
 
 @router.get("/documents/{doc_id}/preview", response_class=HTMLResponse)

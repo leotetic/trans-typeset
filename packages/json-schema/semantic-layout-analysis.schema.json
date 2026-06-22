@@ -1,5 +1,66 @@
 {
   "$defs": {
+    "AcademicRequirement": {
+      "additionalProperties": false,
+      "properties": {
+        "requirement_id": {
+          "minLength": 1,
+          "title": "Requirement Id",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "category": {
+          "default": "structure",
+          "enum": [
+            "structure",
+            "style",
+            "metadata",
+            "numbering",
+            "bibliography",
+            "length",
+            "tone",
+            "asset"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "section_kinds": {
+          "items": {
+            "$ref": "#/$defs/SectionKind"
+          },
+          "title": "Section Kinds",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "requirement_id"
+      ],
+      "title": "AcademicRequirement",
+      "type": "object"
+    },
     "BlockRole": {
       "enum": [
         "title",
@@ -15,6 +76,135 @@
         "unknown"
       ],
       "title": "BlockRole",
+      "type": "string"
+    },
+    "BlockSectionMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "source_block_id": {
+          "minLength": 1,
+          "title": "Source Block Id",
+          "type": "string"
+        },
+        "section_id": {
+          "minLength": 1,
+          "title": "Section Id",
+          "type": "string"
+        },
+        "section_kind": {
+          "$ref": "#/$defs/SectionKind",
+          "default": "unknown"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_block_id",
+        "section_id"
+      ],
+      "title": "BlockSectionMapping",
+      "type": "object"
+    },
+    "DocumentStructureCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "section_id": {
+          "minLength": 1,
+          "title": "Section Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/SectionKind",
+          "default": "unknown"
+        },
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "level": {
+          "default": 1,
+          "maximum": 6,
+          "minimum": 1,
+          "title": "Level",
+          "type": "integer"
+        },
+        "source_block_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Block Ids",
+          "type": "array"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "confidence": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "section_id"
+      ],
+      "title": "DocumentStructureCandidate",
+      "type": "object"
+    },
+    "SectionKind": {
+      "enum": [
+        "cover",
+        "title",
+        "abstract",
+        "keywords",
+        "toc",
+        "list_of_figures",
+        "list_of_tables",
+        "body",
+        "heading",
+        "figure",
+        "table",
+        "formula",
+        "references",
+        "appendix",
+        "acknowledgements",
+        "author_info",
+        "department",
+        "course_info",
+        "experiment_metadata",
+        "experiment_purpose",
+        "experiment_theory",
+        "experiment_steps",
+        "experiment_results",
+        "experiment_analysis",
+        "result_analysis",
+        "conclusion",
+        "unknown"
+      ],
+      "title": "SectionKind",
       "type": "string"
     },
     "SemanticAssetSignal": {
@@ -115,8 +305,11 @@
   "additionalProperties": false,
   "properties": {
     "schema_version": {
-      "const": "0.1",
-      "default": "0.1",
+      "default": "0.2",
+      "enum": [
+        "0.1",
+        "0.2"
+      ],
       "title": "Schema Version",
       "type": "string"
     },
@@ -156,6 +349,41 @@
       "title": "Section Hints",
       "type": "array"
     },
+    "structure_candidates": {
+      "items": {
+        "$ref": "#/$defs/DocumentStructureCandidate"
+      },
+      "title": "Structure Candidates",
+      "type": "array"
+    },
+    "block_section_mappings": {
+      "items": {
+        "$ref": "#/$defs/BlockSectionMapping"
+      },
+      "title": "Block Section Mappings",
+      "type": "array"
+    },
+    "recognized_requirements": {
+      "items": {
+        "$ref": "#/$defs/AcademicRequirement"
+      },
+      "title": "Recognized Requirements",
+      "type": "array"
+    },
+    "missing_sections": {
+      "items": {
+        "$ref": "#/$defs/SectionKind"
+      },
+      "title": "Missing Sections",
+      "type": "array"
+    },
+    "uncertain_sections": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uncertain Sections",
+      "type": "array"
+    },
     "confidence": {
       "default": 0.5,
       "maximum": 1,
@@ -178,5 +406,5 @@
   "title": "SemanticLayoutAnalysis",
   "type": "object",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "x-schema-version": "0.1"
+  "x-schema-version": "0.2"
 }
