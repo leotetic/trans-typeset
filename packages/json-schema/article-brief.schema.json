@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "0.1",
+      "default": "0.1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "title": {
+      "default": "",
+      "title": "Title",
+      "type": "string"
+    },
+    "field": {
+      "default": "",
+      "title": "Field",
+      "type": "string"
+    },
+    "background": {
+      "default": "",
+      "title": "Background",
+      "type": "string"
+    },
+    "main_idea": {
+      "default": "",
+      "title": "Main Idea",
+      "type": "string"
+    },
+    "contribution": {
+      "default": "",
+      "title": "Contribution",
+      "type": "string"
+    },
+    "key_terms": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Key Terms",
+      "type": "object"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
+      "type": "array"
+    }
+  },
+  "title": "ArticleBrief",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-schema-version": "0.2"
+}

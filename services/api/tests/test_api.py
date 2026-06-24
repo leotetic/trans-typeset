@@ -270,7 +270,7 @@ def test_config_defaults_chunk_size_by_translator_provider(tmp_path: Path, monke
 
     model_config = runtime_config.runtime_config_response(storage)
 
-    assert model_config.translation_chunk_max_chars == 3500
+    assert model_config.translation_chunk_max_chars == 1500
     assert model_config.translation_concurrency == 4
 
 
@@ -1496,11 +1496,17 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
         ],
     )
     storage.save_document_ir(document)
+    storage.write_json("doc_1", "article-brief.json", {"schema_version": "0.1"})
     storage.write_json("doc_1", "translation-chunks.json", [{"chunk_id": "chunk_1"}])
     storage.write_json(
         "doc_1",
         "translation-diagnostics.json",
         [{"chunk_id": "chunk_1", "error_type": "UnparseableTranslationResponseError"}],
+    )
+    storage.write_json(
+        "doc_1",
+        "translation-quality-diagnostics.json",
+        [{"chunk_id": "chunk_1", "action": "revision_applied"}],
     )
     storage.write_json("doc_1", "layout-trace.json", {"kind": "layout_trace"})
     storage.write_json("doc_1", "parser-diagnostics.json", {"kind": "parser_diagnostics"})
@@ -1523,9 +1529,11 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert artifacts["normalized-input"]["available"] is False
     assert artifacts["workflow-run"]["available"] is False
     assert artifacts["semantic-analysis"]["available"] is False
+    assert artifacts["article-brief"]["available"] is True
     assert artifacts["document-ir"]["available"] is True
     assert artifacts["translation-chunks"]["available"] is True
     assert artifacts["translation-diagnostics"]["available"] is True
+    assert artifacts["translation-quality-diagnostics"]["available"] is True
     assert artifacts["layout-trace"]["available"] is True
     assert artifacts["formula-recognition"]["available"] is True
     assert artifacts["formula-diagnostics"]["available"] is True
@@ -1534,8 +1542,12 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
 
     document_response = client.get("/api/documents/doc_1/artifacts/document-ir")
     chunks_response = client.get("/api/documents/doc_1/artifacts/translation-chunks")
+    article_brief_response = client.get("/api/documents/doc_1/artifacts/article-brief")
     translation_diagnostics_response = client.get(
         "/api/documents/doc_1/artifacts/translation-diagnostics"
+    )
+    translation_quality_response = client.get(
+        "/api/documents/doc_1/artifacts/translation-quality-diagnostics"
     )
     parser_response = client.get("/api/documents/doc_1/artifacts/parser-diagnostics")
     formula_response = client.get("/api/documents/doc_1/artifacts/formula-recognition")
@@ -1548,9 +1560,15 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert document_response.json()["doc_id"] == "doc_1"
     assert chunks_response.status_code == 200
     assert chunks_response.json() == [{"chunk_id": "chunk_1"}]
+    assert article_brief_response.status_code == 200
+    assert article_brief_response.json() == {"schema_version": "0.1"}
     assert translation_diagnostics_response.status_code == 200
     assert translation_diagnostics_response.json() == [
         {"chunk_id": "chunk_1", "error_type": "UnparseableTranslationResponseError"}
+    ]
+    assert translation_quality_response.status_code == 200
+    assert translation_quality_response.json() == [
+        {"chunk_id": "chunk_1", "action": "revision_applied"}
     ]
     assert parser_response.status_code == 200
     assert parser_response.json() == {"kind": "parser_diagnostics"}

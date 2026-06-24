@@ -1,5 +1,6 @@
 from app.pipeline.chunker import build_chunks, extract_preserve_tokens
 from pdf_translator_schema import (
+    ArticleBrief,
     BlockRole,
     BoundingBox,
     DocumentIR,
@@ -98,8 +99,75 @@ def test_build_chunks_nearby_titles_uses_previous_titles_in_reading_order() -> N
 
     chunks = build_chunks(document, target_lang="zh-CN")
 
-    body = chunks[0].source_blocks[2]
+    body = next(
+        block
+        for chunk in chunks
+        for block in chunk.source_blocks
+        if block.block_id == "body"
+    )
     assert body.nearby_titles == ["Main Title", "1 Introduction"]
+
+
+def test_build_chunks_starts_sections_with_heading_and_following_prose() -> None:
+    document = make_document(
+        [
+            make_block("intro", "1 Introduction", BlockRole.HEADING, reading_order=0),
+            make_block("body1", "a" * 60, reading_order=1),
+            make_block("methods", "2 Methods", BlockRole.HEADING, reading_order=2),
+            make_block("body2", "b" * 60, reading_order=3),
+        ]
+    )
+
+    chunks = build_chunks(document, target_lang="zh-CN", max_chars=80)
+
+    assert [[block.block_id for block in chunk.source_blocks] for chunk in chunks] == [
+        ["intro", "body1"],
+        ["methods", "body2"],
+    ]
+
+
+def test_build_chunks_propagates_article_brief() -> None:
+    brief = ArticleBrief(
+        title="Paper About RAG",
+        field="information retrieval",
+        main_idea="RAG improves generation with retrieved evidence.",
+        key_terms={"retrieval augmented generation": "检索增强生成"},
+    )
+    document = make_document([make_block("p1_b1", "retrieval augmented generation")])
+
+    chunks = build_chunks(document, target_lang="zh-CN", article_brief=brief)
+
+    assert chunks[0].article_brief is not None
+    assert chunks[0].article_brief.key_terms == {"retrieval augmented generation": "检索增强生成"}
+
+
+def test_build_chunks_keeps_reference_cluster_together_when_over_limit() -> None:
+    document = make_document(
+        [
+            make_block("p1_b1", "Body", reading_order=0),
+            make_block("ref_title", "References", BlockRole.REFERENCE, reading_order=1),
+            make_block("ref_1", "[1] " + "A" * 40, BlockRole.REFERENCE, reading_order=2),
+            make_block("ref_2", "[2] " + "B" * 40, BlockRole.REFERENCE, reading_order=3),
+        ]
+    )
+
+    chunks = build_chunks(document, target_lang="zh-CN", max_chars=35)
+
+    assert [block.block_id for block in chunks[-1].source_blocks] == [
+        "ref_title",
+        "ref_1",
+        "ref_2",
+    ]
+
+
+def test_build_chunks_keeps_oversized_block_unsplit() -> None:
+    document = make_document([make_block("oversized", "x" * 120)])
+
+    chunks = build_chunks(document, target_lang="zh-CN", max_chars=50)
+
+    assert len(chunks) == 1
+    assert chunks[0].source_blocks[0].block_id == "oversized"
+    assert len(chunks[0].source_blocks[0].source_text) > 50
 
 
 def test_build_chunks_adds_glossary_and_cross_chunk_context() -> None:

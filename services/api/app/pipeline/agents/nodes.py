@@ -993,11 +993,39 @@ async def _translate_chunks_node(
         intent,
         document,
     )
+    translation_skipped = (
+        intent.workflow_mode == WorkflowMode.TYPESET_ONLY
+        or intent.output_kind == OutputKind.TYPESET_DOCUMENT
+    )
+    article_brief = None
+    if not translation_skipped:
+        context.update_status(
+            job_id,
+            filename,
+            target_lang,
+            JobState.TRANSLATING,
+            0.34,
+            "Building article translation brief",
+            doc_id,
+        )
+        article_brief = await context.build_article_brief(
+            document,
+            target_lang=target_lang,
+            base_url=runtime_config["openai_base_url"],
+            api_key=runtime_config["openai_api_key"],
+            model=runtime_config["openai_model"],
+        )
+        context.storage.write_json(
+            doc_id,
+            "article-brief.json",
+            article_brief.model_dump(mode="json"),
+        )
     chunks = context.build_chunks(
         document,
         target_lang=target_lang,
         max_chars=runtime_config["translation_chunk_max_chars"],
         render_defaults=render_defaults,
+        article_brief=article_brief,
     )
     if not chunks:
         raise ValueError("Document has no translatable chunks")

@@ -3447,6 +3447,8 @@ function artifactLabel(name: string) {
   switch (name) {
     case "normalized-input":
       return "Input";
+    case "article-brief":
+      return "Article Brief";
     case "user-intent":
       return "Intent";
     case "workflow-run":
@@ -3475,6 +3477,10 @@ function artifactLabel(name: string) {
       return "Chunks";
     case "translation-plans":
       return "Plans";
+    case "translation-diagnostics":
+      return "Translation Diagnostics";
+    case "translation-quality-diagnostics":
+      return "Quality Review";
     case "renderer-diagnostics":
       return "Diagnostics";
     case "render-evaluation":

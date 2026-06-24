@@ -126,7 +126,7 @@ Renderer diagnostics 还包含基础布局回归检查：同页 block/asset 重�
 
 `packages/renderer/tests/fixtures/visual_regression.py` 提供确定性视觉回归样例，覆盖 overflow continuation、block/asset overlap、缺失译文回退、空 block、bbox 越页、table/formula/footnote 角色和 image/vector placeholder 资产。`npm run visual-regression` 会单独运行这个门禁；`npm run acceptance` 会先运行它，再执行完整 Python/前端验收。
 
-Chunker 会把文档标题、附近标题、当前 chunk 摘要和前一个 chunk 尾部写入 `TranslationChunk.context`，并支持传入术语表 `glossary`。真实模型 prompt 明确要求按 glossary 保持术语一致，并只翻译当前 chunk 的 listed blocks。
+翻译前后端会先生成 `ArticleBrief@0.1`：真实模型路径必须先得到一次 LLM 文章背景/主旨/贡献/关键术语摘要；未配置 API key 时使用低置信度 deterministic fallback，并标记 `article_brief_model_skipped_deterministic_mode`。Chunker 现在按 section-aware 小块切分，模型默认约 1500 字符，尽量让 heading 与后续正文同块，并保持公式、图注、表格和参考文献 cluster 不被拆散。每个 `TranslationChunk` 都携带文章 brief、附近标题、当前 chunk 摘要和前一个 chunk 尾部。真实模型 prompt 先强调忠实、自然的学术翻译和术语一致性，再给 JSON contract；初译后会对未翻译、源文泄漏、关键术语缺失、过短/过长等问题做选择性 review，严重问题触发一次 revision，并写入 `translation-quality-diagnostics.json`。
 
 Phase 4 本地产品能力包括：多 PDF 批量上传、持久任务历史、启动时自动恢复未完成任务、取消、失败/取消后的重新排队，以及前端运行配置编辑。批量接口是 `POST /api/documents/batch`。
 

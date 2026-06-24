@@ -694,12 +694,24 @@ export interface SourceBlock {
   requires_translation?: boolean;
 }
 
+export interface ArticleBrief extends NoLayoutCoordinates {
+  schema_version?: "0.1";
+  title?: string;
+  field?: string;
+  background?: string;
+  main_idea?: string;
+  contribution?: string;
+  key_terms?: Record<string, string>;
+  quality_flags?: string[];
+}
+
 export interface TranslationChunk {
   chunk_id: string;
   target_lang?: string;
   source_blocks: SourceBlock[];
   context?: string;
   glossary?: Record<string, string>;
+  article_brief?: ArticleBrief | null;
   render_defaults?: RenderDefaults;
   constraints?: {
     max_output_ratio?: number;

@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api", tags=["documents"])
 
 JSON_ARTIFACTS = {
     "normalized-input": ("normalized-input.json", "normalized-input"),
+    "article-brief": ("article-brief.json", "article-brief"),
     "user-intent": ("user-intent.json", "user-intent"),
     "workflow-run": ("workflow-run.json", "workflow-run"),
     "semantic-analysis": ("semantic-analysis.json", "semantic-layout-analysis"),
@@ -55,6 +56,10 @@ JSON_ARTIFACTS = {
     "translation-plans": ("translation-plans.json", "translation-layout-plans"),
     "translation-plan-cache": ("translation-plan-cache.json", "translation-plan-cache"),
     "translation-diagnostics": ("translation-diagnostics.json", "translation-diagnostics"),
+    "translation-quality-diagnostics": (
+        "translation-quality-diagnostics.json",
+        "translation-quality-diagnostics",
+    ),
     "edit-scope": ("edit-scope.json", "edit-scope"),
     "retypeset-source": ("retypeset-source.json", "retypeset-source"),
     "layout-trace": ("layout-trace.json", "layout-trace"),

@@ -12,6 +12,7 @@ from app.config import Settings
 from app.models import JobState
 from app.pipeline import orchestrator
 from app.pipeline.translator import DeterministicTranslator
+from app.pipeline.article_brief import ArticleBriefError
 from app.pipeline.workflow import (
     build_layout_intent_plan,
     coerce_user_intent,
@@ -22,6 +23,7 @@ from app.pipeline.parser import UnsupportedPdfError
 from app.storage import Storage
 from pdf_renderer import RenderDocument
 from pdf_translator_schema import (
+    ArticleBrief,
     Asset,
     BlockRole,
     BoundingBox,
@@ -44,6 +46,18 @@ from pdf_translator_schema.models import (
     OCRRecognitionResult,
     RenderDefaults,
 )
+
+
+async def fake_article_brief(*_args, **_kwargs) -> ArticleBrief:
+    return ArticleBrief(
+        title="Test Paper",
+        field="translation systems",
+        background="A local test document exercises the translation workflow.",
+        main_idea="The pipeline translates academic blocks with stable artifacts.",
+        contribution="It keeps terminology consistent.",
+        key_terms={"local pipeline": "本地流水线"},
+        quality_flags=["test_article_brief"],
+    )
 
 
 def test_render_evaluation_blocks_browser_overflow() -> None:
@@ -1529,6 +1543,8 @@ def test_text_workflow_runs_to_artifacts(
     layout_plan = storage.read_output_json("doc_1", "layout-intent-plan.json")
     layout_trace = storage.read_output_json("doc_1", "layout-trace.json")
     user_intent = storage.read_output_json("doc_1", "user-intent.json")
+    article_brief = storage.read_output_json("doc_1", "article-brief.json")
+    chunks = storage.read_output_json("doc_1", "translation-chunks.json")
 
     assert status.status == JobState.COMPLETED
     assert workflow["status"] == "completed"
@@ -1540,6 +1556,9 @@ def test_text_workflow_runs_to_artifacts(
     assert semantic["block_section_mappings"]
     assert semantic["quality_flags"]
     assert user_intent["schema_version"] == "0.2"
+    assert article_brief["schema_version"] == "0.1"
+    assert "article_brief_model_skipped_deterministic_mode" in article_brief["quality_flags"]
+    assert chunks[0]["article_brief"]["title"] == article_brief["title"]
     assert user_intent["column_layout"]["column_count"] == 2
     assert user_intent["output_targets"][0]["format"] == "html_preview"
     assert user_intent["output_targets"][1]["format"] == "pdf"
@@ -1556,6 +1575,52 @@ def test_text_workflow_runs_to_artifacts(
     assert storage.preview_html_path("doc_1").exists()
     assert storage.output_pdf_path("doc_1").read_bytes().startswith(b"%PDF-")
     assert (tmp_path / "checkpoints" / "langgraph.sqlite").exists()
+
+
+def test_text_workflow_fails_before_translation_when_model_article_brief_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(
+            openai_base_url="https://models.example.test/v1",
+            openai_api_key="fake-key",
+            openai_api_key_from_env=True,
+            openai_model="paper-model",
+            ocr_provider_order=("deterministic",),
+        ),
+    )
+
+    async def fail_article_brief(*_args, **_kwargs) -> ArticleBrief:
+        raise ArticleBriefError("brief model unavailable")
+
+    class ForbiddenTranslator:
+        async def translate(self, _chunk: TranslationChunk) -> TranslationLayoutPlan:
+            raise AssertionError("translator should not run after article brief failure")
+
+    monkeypatch.setattr(orchestrator, "build_article_brief", fail_article_brief)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: ForbiddenTranslator())
+
+    asyncio.run(
+        orchestrator.process_text_document_job(
+            "job_1",
+            "doc_1",
+            "text-input.txt",
+            "Paper Title\n\nAbstract This is a text workflow [1].",
+            "zh-CN",
+            coerce_user_intent("zh-CN"),
+        )
+    )
+
+    status = storage.load_status("job_1")
+
+    assert status.status == JobState.FAILED
+    assert "brief model unavailable" in (status.error or "")
+    assert not storage.output_json_path("doc_1", "translation-chunks.json").exists()
 
 
 def test_text_workflow_persists_minimax_intent_column_layout(
@@ -1586,6 +1651,7 @@ def test_text_workflow_persists_minimax_intent_column_layout(
         "build_translator",
         lambda *args, **kwargs: DeterministicTranslator(),
     )
+    monkeypatch.setattr(orchestrator, "build_article_brief", fake_article_brief)
 
     async def fake_render_to_pdf(html: str, output_path: Path) -> Path:
         assert "【译】" in html

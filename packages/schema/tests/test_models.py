@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from pdf_translator_schema import (
     AcademicRequirement,
+    ArticleBrief,
     Asset,
     AssetIR,
     BlockRole,
@@ -87,6 +88,29 @@ def test_render_defaults_are_available_on_chunk() -> None:
     assert chunk.render_defaults.role_styles.heading.font_stack is not None
     assert "SimHei" in chunk.render_defaults.role_styles.heading.font_stack
     assert "SimHei" in chunk.render_defaults.role_styles.title.font_stack
+
+
+def test_article_brief_is_available_on_translation_chunk_and_schema() -> None:
+    brief = ArticleBrief(
+        title="A Paper",
+        field="machine learning",
+        background="The paper studies retrieval.",
+        main_idea="A local pipeline improves translation.",
+        contribution="It preserves academic terms.",
+        key_terms={"retrieval augmented generation": "检索增强生成"},
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Hello")],
+        article_brief=brief,
+    )
+
+    assert chunk.article_brief is not None
+    assert chunk.article_brief.schema_version == "0.1"
+    assert chunk.article_brief.key_terms["retrieval augmented generation"] == "检索增强生成"
+    assert "article-brief.schema.json" in all_schemas()
+    assert schema_for("article-brief")["properties"]["title"]["type"] == "string"
+    assert "article_brief" in schema_for("translation-chunk")["properties"]
 
 
 def test_render_defaults_accept_gbt_formula_numbering_and_role_fonts() -> None:
@@ -918,6 +942,7 @@ def test_layout_plan_rejects_layout_coordinates(model_cls: type, payload: dict) 
 
 def test_json_schema_export_includes_metadata(tmp_path) -> None:
     expected_filenames = (
+        "article-brief.schema.json",
         "document-ir.schema.json",
         "input-source.schema.json",
         "asset-ir.schema.json",
@@ -949,6 +974,7 @@ def test_json_schema_helpers_include_contract_models() -> None:
     assert layout_plan_schema["title"] == "TranslationLayoutPlan"
     assert schemas["translation-layout-plan.schema.json"] == layout_plan_schema
     assert sorted(schemas) == [
+        "article-brief.schema.json",
         "asset-ir.schema.json",
         "document-ir.schema.json",
         "edit-scope.schema.json",

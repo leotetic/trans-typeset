@@ -519,10 +519,16 @@ def test_local_pipeline_formula_smoke_pdf_preserves_formula_rendering(
     assert rendered_display_height > source_display_height
     assert rendered_display_height >= rendered_formula_height
 
-    assert len(chunks) == 1
-    assert chunks[0]["source_blocks"][1]["source_text"].startswith("The density {{formula:")
-    assert chunks[0]["source_blocks"][2]["source_text"].startswith("We solve {{formula:")
-    assert chunks[0]["source_blocks"][3]["requires_translation"] is False
+    chunk_blocks = [
+        source_block
+        for chunk in chunks
+        for source_block in chunk["source_blocks"]
+    ]
+    assert len(chunks) == 2
+    assert chunk_blocks[1]["source_text"].startswith("The density {{formula:")
+    assert chunk_blocks[2]["source_text"].startswith("We solve {{formula:")
+    assert chunk_blocks[3]["role"] == "formula"
+    assert chunk_blocks[3]["requires_translation"] is False
 
     assert "{{formula:" not in html
     assert "@@FORMULA_" not in html

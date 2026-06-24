@@ -136,6 +136,7 @@ class OpenAICompatibleTranslator(Translator):
         self.model = model.strip()
         self.max_attempts = max(1, max_attempts)
         self._diagnostics: list[dict[str, Any]] = []
+        self._quality_diagnostics: list[dict[str, Any]] = []
 
     async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
         if not any(source.requires_translation for source in chunk.source_blocks):
@@ -205,6 +206,11 @@ class OpenAICompatibleTranslator(Translator):
         self._diagnostics.clear()
         return diagnostics
 
+    def drain_quality_diagnostics(self) -> list[dict[str, Any]]:
+        diagnostics = list(self._quality_diagnostics)
+        self._quality_diagnostics.clear()
+        return diagnostics
+
     async def _translate_once(
         self,
         chunk: TranslationChunk,
@@ -223,7 +229,8 @@ class OpenAICompatibleTranslator(Translator):
                 system_prompt,
                 prompt,
             )
-            return self._validate_or_repair_content(chunk, content, attempt)
+            plan = self._validate_or_repair_content(chunk, content, attempt)
+            return await self._review_or_revise(chunk, plan, attempt)
 
         payload = {
             "model": self.model,
@@ -277,7 +284,8 @@ class OpenAICompatibleTranslator(Translator):
             ) from exc
 
         content = self._extract_message_content(response.json(), chunk.chunk_id)
-        return self._validate_or_repair_content(chunk, content, attempt)
+        plan = self._validate_or_repair_content(chunk, content, attempt)
+        return await self._review_or_revise(chunk, plan, attempt)
 
     async def _translate_minimax_with_langchain(
         self,
@@ -557,6 +565,127 @@ class OpenAICompatibleTranslator(Translator):
             }
         )
 
+    async def _review_or_revise(
+        self,
+        chunk: TranslationChunk,
+        plan: TranslationLayoutPlan,
+        attempt: int,
+    ) -> TranslationLayoutPlan:
+        issues = _quality_issues_for_plan(chunk, plan)
+        severe_issues = [issue for issue in issues if issue["severity"] == "severe"]
+        if not severe_issues:
+            if issues:
+                self._quality_diagnostics.append(
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "attempt": attempt,
+                        "action": "local_flags_only",
+                        "issues": issues,
+                        "quality_flags": _unique_strings(
+                            [issue["flag"] for issue in issues]
+                        ),
+                    }
+                )
+            return _plan_with_quality_issue_flags(plan, issues)
+
+        self._quality_diagnostics.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "attempt": attempt,
+                "action": "revision_requested",
+                "issues": severe_issues,
+                "quality_flags": _unique_strings(
+                    [issue["flag"] for issue in severe_issues]
+                ),
+            }
+        )
+        try:
+            content = await self._request_revision(chunk, plan, severe_issues)
+            revised = self._validate_or_repair_content(chunk, content, attempt)
+            post_issues = _quality_issues_for_plan(chunk, revised)
+        except Exception as exc:
+            self._quality_diagnostics.append(
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "attempt": attempt,
+                    "action": "revision_failed",
+                    "error": str(exc),
+                    "issues": severe_issues,
+                    "quality_flags": ["translation_quality_revision_failed"],
+                }
+            )
+            return _plan_with_quality_issue_flags(
+                plan,
+                severe_issues,
+                extra_flags=["translation_quality_revision_failed"],
+            )
+
+        self._quality_diagnostics.append(
+            {
+                "chunk_id": chunk.chunk_id,
+                "attempt": attempt,
+                "action": "revision_applied",
+                "issues": severe_issues,
+                "post_review_issue_count": len(post_issues),
+                "quality_flags": _unique_strings(
+                    [
+                        "translation_quality_revised",
+                        *[issue["flag"] for issue in post_issues],
+                    ]
+                ),
+            }
+        )
+        return _plan_with_quality_issue_flags(
+            revised,
+            post_issues,
+            extra_flags=["translation_quality_revised"],
+        )
+
+    async def _request_revision(
+        self,
+        chunk: TranslationChunk,
+        plan: TranslationLayoutPlan,
+        issues: list[dict[str, Any]],
+    ) -> object:
+        system_prompt = (
+            "You revise academic translations for fidelity, terminology, and natural "
+            "target-language scholarly style. Return only JSON matching the original "
+            "TranslationLayoutPlan shape."
+        )
+        prompt = self._build_revision_prompt(chunk, plan, issues)
+        if _is_minimax_provider(self.base_url, self.model):
+            return await self._translate_minimax_with_langchain(
+                chunk,
+                system_prompt,
+                prompt,
+            )
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        request_url = f"{self.base_url}/chat/completions"
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    request_url, headers=headers, json=payload
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise TranslationError(
+                f"Translator revision request failed for {chunk.chunk_id}: {exc}"
+            ) from exc
+        return self._extract_message_content(response.json(), chunk.chunk_id)
+
     def _build_prompt(
         self,
         chunk: TranslationChunk,
@@ -584,18 +713,45 @@ class OpenAICompatibleTranslator(Translator):
             else ""
         )
         return (
-            "Translate the following academic paper chunk. Preserve citation, formula, "
-            "reference marker, figure, and table tokens. Cover every input block exactly once. "
+            "Academic translation task:\n"
+            "- Translate faithfully: preserve the author's meaning, logical relations, "
+            "technical nuance, hedging, and academic tone.\n"
+            "- Write natural target-language scholarly prose instead of literal or "
+            "word-by-word translation.\n"
+            "- Use the article background, main idea, and key terms below to keep "
+            "professional terminology and sentence meaning consistent.\n"
+            "- Translate only the listed source blocks; do not invent new claims or omit "
+            "source content.\n"
+            "- Preserve citation, formula, reference marker, figure, and table tokens exactly.\n"
+            "- Blocks with requires_translation=false are formula-only blocks and must be "
+            "copied exactly.\n\n"
+            f"{_article_brief_section(chunk)}\n\n"
+            f"Local chunk context:\n{chunk.context}\n\n"
+            "JSON contract:\n"
+            "Return one valid JSON object matching TranslationLayoutPlan schema_version 0.1. "
+            "Cover every input block exactly once. Do not include coordinates or page fields. "
             "Do not translate, delete, rewrite, or move canonical formula refs matching "
             "{{formula:formula_id}}; copy them exactly into translated_text or inline_items. "
-            "Blocks with requires_translation=false are formula-only blocks and must be "
-            "copied exactly. "
-            "Use glossary entries consistently when they are provided in the chunk JSON. "
-            "Use the chunk context for local continuity, but translate only the listed blocks. "
-            "Return valid JSON object only.\n\n"
+            "Use glossary entries consistently when they are provided.\n\n"
             f"Expected JSON shape:\n{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
             f"Chunk JSON:\n{chunk.model_dump_json()}"
             f"{retry_hint}"
+        )
+
+    def _build_revision_prompt(
+        self,
+        chunk: TranslationChunk,
+        plan: TranslationLayoutPlan,
+        issues: list[dict[str, Any]],
+    ) -> str:
+        return (
+            "Revise the draft translation for this academic paper chunk. Fix only the "
+            "reported translation quality issues while preserving the JSON contract, "
+            "source_block_id coverage, roles, citations, formulas, and reference markers.\n\n"
+            f"{_article_brief_section(chunk)}\n\n"
+            f"Issues to fix:\n{json.dumps(issues, ensure_ascii=False, indent=2)}\n\n"
+            f"Original chunk JSON:\n{chunk.model_dump_json()}\n\n"
+            f"Draft TranslationLayoutPlan JSON:\n{plan.model_dump_json()}"
         )
 
 
@@ -613,6 +769,172 @@ def build_translator(
         model=model,
         max_attempts=max_attempts,
     )
+
+
+def _article_brief_section(chunk: TranslationChunk) -> str:
+    brief = chunk.article_brief
+    if brief is None:
+        return "Article background/main idea:\nNo document-level article brief was provided."
+    return (
+        "Article background/main idea:\n"
+        f"Title: {brief.title}\n"
+        f"Field/domain: {brief.field}\n"
+        f"Background: {brief.background}\n"
+        f"Main idea: {brief.main_idea}\n"
+        f"Contribution/finding: {brief.contribution}\n"
+        f"Key terms: {json.dumps(brief.key_terms, ensure_ascii=False)}"
+    )
+
+
+def _quality_issues_for_plan(
+    chunk: TranslationChunk,
+    plan: TranslationLayoutPlan,
+) -> list[dict[str, Any]]:
+    source_by_id = {source.block_id: source for source in chunk.source_blocks}
+    issues: list[dict[str, Any]] = []
+    key_terms = chunk.article_brief.key_terms if chunk.article_brief is not None else {}
+    for block in plan.blocks:
+        source = source_by_id.get(block.source_block_id)
+        if source is None or not _requires_quality_review(source):
+            continue
+        source_text = _remove_preserve_tokens(source.source_text, source.preserve_tokens).strip()
+        translated_text = _remove_preserve_tokens(
+            block.translated_text,
+            source.preserve_tokens,
+        ).strip()
+        if not source_text:
+            continue
+        if not translated_text:
+            issues.append(
+                _quality_issue(
+                    source.block_id,
+                    "translation_quality_empty",
+                    "severe",
+                    "Translated text is empty after removing preserve tokens.",
+                )
+            )
+            continue
+        source_len = len(source_text)
+        translated_len = len(translated_text)
+        if source_len >= 80 and translated_len / max(source_len, 1) < 0.18:
+            issues.append(
+                _quality_issue(
+                    source.block_id,
+                    "translation_quality_suspiciously_short",
+                    "severe",
+                    "Translated text is much shorter than the source block.",
+                )
+            )
+        if source_len >= 80 and translated_len / max(source_len, 1) > 2.8:
+            issues.append(
+                _quality_issue(
+                    source.block_id,
+                    "translation_quality_suspiciously_long",
+                    "warning",
+                    "Translated text is much longer than the source block.",
+                )
+            )
+        if _is_chinese_target(chunk.target_lang) and _looks_untranslated_for_chinese_target(
+            source.source_text,
+            block.translated_text,
+            source.preserve_tokens,
+        ):
+            issues.append(
+                _quality_issue(
+                    source.block_id,
+                    "translation_quality_source_leakage",
+                    "severe",
+                    "Chinese target text still looks mostly like untranslated source prose.",
+                )
+            )
+        for source_term, target_term in key_terms.items():
+            if not source_term or not target_term:
+                continue
+            if source_term.strip().lower() == target_term.strip().lower():
+                continue
+            if not _contains_term(source.source_text, source_term):
+                continue
+            if not _contains_term(block.translated_text, target_term):
+                issues.append(
+                    _quality_issue(
+                        source.block_id,
+                        "translation_quality_missing_key_term",
+                        "severe",
+                        f"Expected key term translation {target_term!r} for {source_term!r}.",
+                    )
+                )
+    return _dedupe_quality_issues(issues)
+
+
+def _requires_quality_review(source: Any) -> bool:
+    if not getattr(source, "requires_translation", True):
+        return False
+    role = getattr(source, "role", BlockRole.UNKNOWN)
+    if role in {BlockRole.FORMULA, BlockRole.FIGURE, BlockRole.TABLE, BlockRole.REFERENCE}:
+        return False
+    return True
+
+
+def _quality_issue(
+    block_id: str,
+    flag: str,
+    severity: str,
+    message: str,
+) -> dict[str, Any]:
+    return {
+        "source_block_id": block_id,
+        "flag": flag,
+        "severity": severity,
+        "message": message,
+    }
+
+
+def _dedupe_quality_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for issue in issues:
+        key = (str(issue.get("source_block_id", "")), str(issue.get("flag", "")))
+        if key in seen:
+            continue
+        result.append(issue)
+        seen.add(key)
+    return result
+
+
+def _plan_with_quality_issue_flags(
+    plan: TranslationLayoutPlan,
+    issues: list[dict[str, Any]],
+    *,
+    extra_flags: list[str] | None = None,
+) -> TranslationLayoutPlan:
+    flags_by_block: dict[str, list[str]] = {}
+    for issue in issues:
+        block_id = str(issue.get("source_block_id", ""))
+        flag = str(issue.get("flag", ""))
+        if block_id and flag:
+            flags_by_block.setdefault(block_id, []).append(flag)
+    extra_flags = extra_flags or []
+    revised_blocks: list[TranslationBlockPlan] = []
+    for block in plan.blocks:
+        flags = flags_by_block.get(block.source_block_id, [])
+        if extra_flags and (flags or not flags_by_block):
+            flags = [*flags, *extra_flags]
+        if not flags:
+            revised_blocks.append(block)
+            continue
+        revised_blocks.append(
+            block.model_copy(
+                update={"quality_flags": _unique_strings([*block.quality_flags, *flags])},
+                deep=True,
+            )
+        )
+    return plan.model_copy(update={"blocks": revised_blocks}, deep=True)
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_text = re.sub(r"\s+", " ", text).lower()
+    normalized_term = re.sub(r"\s+", " ", term).strip().lower()
+    return bool(normalized_term) and normalized_term in normalized_text
 
 
 def _preserve_only_plan(chunk: TranslationChunk) -> TranslationLayoutPlan:

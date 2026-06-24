@@ -2,6 +2,7 @@ from .defaults import DEFAULT_RENDER_DEFAULTS, DEFAULT_TARGET_LANG
 from .models import (
     Asset,
     AssetIR,
+    ArticleBrief,
     BlockRole,
     BoundingBox,
     ColumnLayoutDefaults,
@@ -105,6 +106,7 @@ def export_schema(output_dir):
 __all__ = [
     "Asset",
     "AssetIR",
+    "ArticleBrief",
     "AlignmentDefaults",
     "AcademicRequirement",
     "BlockRole",

@@ -27,18 +27,33 @@ v2 在该 contract 之上新增 workflow 智能排版骨架。`InputSource`、`A
 
 ## LLM 输入
 
+后端会先生成 `ArticleBrief@0.1`，再发送 `TranslationChunk`。真实模型翻译路径要求先得到
+LLM 生成的文章背景摘要；无 API key 的 deterministic 本地路径会生成低置信度 fallback brief，
+并写入 `article_brief_model_skipped_deterministic_mode`。
+
+`ArticleBrief` 包含：
+
+- `title`
+- `field`: 学科/领域。
+- `background`: 译者需要理解的研究背景。
+- `main_idea`: 文章核心问题、方法或主张。
+- `contribution`: 主要贡献或发现。
+- `key_terms`: 专业术语原文到目标语言自然译法的映射。
+- `quality_flags`
+
 后端发送 `TranslationChunk`，每个 block 包含：
 
 - `block_id`: renderer 用来把译文放回原始 `DocumentIR` block。
 - `role`: 标题、摘要、正文、图注、公式、参考文献等语义角色。
-- `source_text`: 发给模型的文本。若 parser 识别到公式，这里使用 `@@FORMULA_...@@` 占位符，而不是原始公式内容。
+- `source_text`: 发给模型的文本。若 parser 识别到公式，这里使用 `{{formula:...}}` 占位符，而不是原始公式内容。
 - `nearby_titles`: 局部上下文。
 - `preserve_tokens`: 必须保留的 citation、公式占位符、reference marker、figure/table token。
 - `requires_translation`: `false` 表示纯公式 block，translator 会本地保留，不发送给模型翻译。
 - `context`: 文档标题、附近标题、当前 chunk 摘要和前一个 chunk 尾部，用于跨 chunk 连贯性。
 - `glossary`: 术语表，translator prompt 要求按该表保持术语一致。
+- `article_brief`: 同一篇文章共享的背景、主旨和关键术语，prompt 会优先展示它以提升专业词句的自然度。
 
-Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBlock.text_for_translation` 写入带公式占位符的文本，并在 `DocumentBlock.formulas[]` 记录 `formula_id`、`placeholder`、`kind=inline|display`、原始公式文本、LaTeX、bbox、置信度和质量 flags。LLM 不应看到或改写原始公式；只需原样保留 `@@FORMULA_...@@`。
+Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBlock.text_for_translation` 写入带公式占位符的文本，并在 `DocumentBlock.formulas[]` 记录 `formula_id`、`placeholder`、`kind=inline|display`、原始公式文本、LaTeX、bbox、置信度和质量 flags。LLM 不应看到或改写原始公式；只需原样保留 `{{formula:...}}`。
 
 ## LLM 输出
 
@@ -60,7 +75,7 @@ Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBloc
 
 renderer 负责坐标、分页、溢出、字号缩放和 continuation page。模型不得返回 `bbox`、`x`、`y`、`page` 等布局坐标字段；Pydantic models 使用 `extra="forbid"` 拒绝这些字段。
 
-后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens` 对应的 inline item，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired`、`preserve_token_repaired` 或 `formula_placeholder_repaired`。不可解析 JSON、无法提取 plan JSON 或请求失败会按 chunk 重试，最终失败会进入 job status。
+后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens` 对应的 inline item，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired`、`preserve_token_repaired` 或 `formula_placeholder_repaired`。初次校验后会执行选择性翻译质量检查：未翻译、源文泄漏、关键术语缺失、过短/过长等严重问题会触发一次 revision 调用，并写入 `translation-quality-diagnostics`。不可解析 JSON、无法提取 plan JSON、brief 请求失败或翻译请求失败会进入 job status。
 
 ## 默认排版值
 
@@ -117,9 +132,11 @@ exported_paths = export_schema(Path("packages/json-schema"))
 - `validation-and-repair`: plan validation 结果和 repair history。
 - `asset-ir`: image adapter 或后续 OCR/视觉摘要 adapter 生成的 `AssetIR[]`。
 - `document-ir`: parser 输出的 `DocumentIR`，是 bbox、页面尺寸和阅读顺序的事实来源。
-- `translation-chunks`: chunker 发送给 translator 的 `TranslationChunk[]`，包含 `preserve_tokens`、附近标题、默认渲染值和约束。
+- `article-brief`: 翻译前生成的 `ArticleBrief@0.1`，包含文章背景、主旨、贡献和关键术语。
+- `translation-chunks`: chunker 发送给 translator 的 `TranslationChunk[]`，包含 `preserve_tokens`、附近标题、`article_brief`、默认渲染值和约束。
 - `translation-plans`: translator 或 source-preserving builder 通过 `validate_layout_plan` 后的 `TranslationLayoutPlan[]`。
 - `translation-progress`: chunk 级翻译进度、失败信息和 repair/quality flag 汇总。
+- `translation-quality-diagnostics`: 选择性翻译质量检查和 revision 记录。
 - `edit-scope`: 历史重排使用的 `EditScope`。
 - `retypeset-source`: source-only 重排摘要、来源 job/doc、复用 artifact 和质量 flags。
 - `parser-diagnostics`: parser 阶段的页数、文本块、span/line metadata、资产、角色计数、复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。

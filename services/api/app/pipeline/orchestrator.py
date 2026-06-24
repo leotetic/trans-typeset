@@ -35,6 +35,7 @@ from ..runtime_config import effective_runtime_config, render_defaults_for_docum
 from ..storage import storage
 from .agents import run_typesetting_graph
 from .agents.state import TypesettingGraphContext
+from .article_brief import build_article_brief
 from .chunker import build_chunks
 from .docx import DocxConversionError, convert_docx_to_pdf
 from .formula_processing import build_formula_diagnostics
@@ -679,6 +680,7 @@ def _graph_context() -> TypesettingGraphContext:
         build_parser_diagnostics=build_parser_diagnostics,
         enrich_document_formulas=_enrich_document_formulas,
         build_formula_diagnostics=build_formula_diagnostics,
+        build_article_brief=build_article_brief,
         build_chunks=build_chunks,
         build_translator=build_translator,
         translate_chunks=_translate_chunks,
@@ -876,20 +878,46 @@ async def _run_workflow_from_document(
 
     runtime_config = effective_runtime_config(storage)
     render_defaults = render_defaults_for_document(storage, target_lang, intent, document)
+    translation_skipped = (
+        intent.workflow_mode == WorkflowMode.TYPESET_ONLY
+        or intent.output_kind == OutputKind.TYPESET_DOCUMENT
+    )
+    article_brief = None
+    if not translation_skipped:
+        update_status(
+            job_id,
+            filename,
+            target_lang,
+            JobState.TRANSLATING,
+            0.34,
+            "Building article translation brief",
+            doc_id,
+            chunks=status_chunks,
+        )
+        article_brief = await build_article_brief(
+            document,
+            target_lang=target_lang,
+            base_url=runtime_config["openai_base_url"],
+            api_key=runtime_config["openai_api_key"],
+            model=runtime_config["openai_model"],
+        )
+        storage.write_json(
+            doc_id,
+            "article-brief.json",
+            article_brief.model_dump(mode="json"),
+        )
     chunks = build_chunks(
         document,
         target_lang=target_lang,
         max_chars=runtime_config["translation_chunk_max_chars"],
         render_defaults=render_defaults,
+        article_brief=article_brief,
     )
     if not chunks:
         raise ValueError("Document has no translatable chunks")
     storage.write_json(doc_id, "translation-chunks.json", [chunk.model_dump() for chunk in chunks])
     storage.write_json(doc_id, "formula-diagnostics.json", build_formula_diagnostics(document))
-    if (
-        intent.workflow_mode == WorkflowMode.TYPESET_ONLY
-        or intent.output_kind == OutputKind.TYPESET_DOCUMENT
-    ):
+    if translation_skipped:
         plans = build_source_preserving_layout_plans(
             document=document,
             chunks=chunks,
@@ -1271,6 +1299,8 @@ async def _translate_chunks(
     completed_chunks = 0
     semaphore = asyncio.Semaphore(max(1, translation_concurrency))
     translation_diagnostics: list[dict[str, Any]] = []
+    translation_quality_diagnostics: list[dict[str, Any]] = []
+    storage.write_json(doc_id, "translation-quality-diagnostics.json", translation_quality_diagnostics)
     translation_cache = _load_translation_plan_cache(doc_id)
     existing_plans = (
         _load_existing_translation_plans(doc_id) if reuse_cached_plans else {}
@@ -1280,12 +1310,25 @@ async def _translate_chunks(
     def drain_translation_diagnostics() -> None:
         drain_diagnostics = getattr(translator, "drain_diagnostics", None)
         if not callable(drain_diagnostics):
+            diagnostics = []
+        else:
+            diagnostics = drain_diagnostics()
+        if diagnostics:
+            translation_diagnostics.extend(diagnostics)
+            storage.write_json(doc_id, "translation-diagnostics.json", translation_diagnostics)
+
+        drain_quality_diagnostics = getattr(translator, "drain_quality_diagnostics", None)
+        if not callable(drain_quality_diagnostics):
             return
-        diagnostics = drain_diagnostics()
-        if not diagnostics:
+        quality_diagnostics = drain_quality_diagnostics()
+        if not quality_diagnostics:
             return
-        translation_diagnostics.extend(diagnostics)
-        storage.write_json(doc_id, "translation-diagnostics.json", translation_diagnostics)
+        translation_quality_diagnostics.extend(quality_diagnostics)
+        storage.write_json(
+            doc_id,
+            "translation-quality-diagnostics.json",
+            translation_quality_diagnostics,
+        )
 
     def diagnostic_quality_flags_for_chunk(chunk_id: str) -> list[str]:
         flags: list[str] = []

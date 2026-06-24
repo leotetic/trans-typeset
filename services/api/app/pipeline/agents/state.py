@@ -53,6 +53,7 @@ class TypesettingGraphContext:
         build_parser_diagnostics: Any,
         enrich_document_formulas: Any,
         build_formula_diagnostics: Any,
+        build_article_brief: Any,
         build_chunks: Any,
         build_translator: Any,
         translate_chunks: Any,
@@ -71,6 +72,7 @@ class TypesettingGraphContext:
         self.build_parser_diagnostics = build_parser_diagnostics
         self.enrich_document_formulas = enrich_document_formulas
         self.build_formula_diagnostics = build_formula_diagnostics
+        self.build_article_brief = build_article_brief
         self.build_chunks = build_chunks
         self.build_translator = build_translator
         self.translate_chunks = translate_chunks

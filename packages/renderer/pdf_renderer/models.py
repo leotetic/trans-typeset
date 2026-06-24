@@ -921,6 +921,12 @@ def _height_from_katex_html(html: str, font_size_pt: float) -> float | None:
                 depth_em = max(depth_em, abs(value))
         max_em = max(max_em, height_em + depth_em)
     if max_em <= 0:
+        latex_match = re.search(r'data-latex="(?P<latex>[^"]*)"', html)
+        if latex_match:
+            return _formula_latex_heuristic_height(
+                unescape(latex_match.group("latex")),
+                font_size_pt,
+            )
         return None
     return max_em * font_size_pt
 

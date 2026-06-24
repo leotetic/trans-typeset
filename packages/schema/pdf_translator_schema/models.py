@@ -1078,6 +1078,17 @@ class RenderDefaults(StrictBaseModel):
     preserve_policy: PreservePolicy = Field(default_factory=PreservePolicy)
 
 
+class ArticleBrief(NoLayoutCoordinatesModel):
+    schema_version: Literal["0.1"] = "0.1"
+    title: str = ""
+    field: str = ""
+    background: str = ""
+    main_idea: str = ""
+    contribution: str = ""
+    key_terms: dict[str, str] = Field(default_factory=dict)
+    quality_flags: list[str] = Field(default_factory=list)
+
+
 class SourceBlock(StrictBaseModel):
     block_id: str = Field(min_length=1)
     role: BlockRole
@@ -1111,6 +1122,7 @@ class TranslationChunk(StrictBaseModel):
     source_blocks: list[SourceBlock] = Field(min_length=1)
     context: str = ""
     glossary: dict[str, str] = Field(default_factory=dict)
+    article_brief: ArticleBrief | None = None
     render_defaults: RenderDefaults = Field(default_factory=RenderDefaults)
     constraints: TranslationConstraints = Field(default_factory=TranslationConstraints)
 

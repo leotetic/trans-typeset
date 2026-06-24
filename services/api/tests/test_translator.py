@@ -11,11 +11,14 @@ from app.pipeline.translator import (
     build_translator,
 )
 from pdf_translator_schema import (
+    ArticleBrief,
     BlockRole,
     RenderDefaults,
     SourceBlock,
+    TranslationBlockPlan,
     TranslationChunk,
     TranslationConstraints,
+    TranslationLayoutPlan,
 )
 
 
@@ -133,13 +136,31 @@ def test_build_translator_without_api_key_uses_deterministic() -> None:
 
 
 def test_openai_prompt_instructs_glossary_and_context_usage() -> None:
-    chunk = make_chunk()
+    chunk = make_chunk().model_copy(
+        update={
+            "article_brief": ArticleBrief(
+                title="Paper About RAG",
+                field="information retrieval",
+                background="The paper studies retrieval-augmented generation.",
+                main_idea="RAG grounds generated text in retrieved evidence.",
+                contribution="It improves academic factuality.",
+                key_terms={"retrieval augmented generation": "检索增强生成"},
+            ),
+            "glossary": {"retrieval augmented generation": "检索增强生成"},
+        },
+        deep=True,
+    )
     translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
 
     prompt = translator._build_prompt(chunk)
 
+    assert prompt.index("Academic translation task") < prompt.index("JSON contract")
+    assert "faithfully" in prompt
+    assert "natural target-language scholarly prose" in prompt
+    assert "Article background/main idea" in prompt
+    assert "RAG grounds generated text" in prompt
+    assert "检索增强生成" in prompt
     assert "Use glossary entries consistently" in prompt
-    assert "Use the chunk context for local continuity" in prompt
     assert chunk.context in prompt
 
 
@@ -438,6 +459,139 @@ def test_target_language_check_skips_non_prose_and_non_translation_blocks() -> N
     plan = translator._validate_or_repair_content(chunk, payload, attempt=1)
 
     assert [block.quality_flags for block in plan.blocks] == [[], [], [], []]
+
+
+def test_openai_translator_revises_chunk_when_key_term_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=(
+                    "Retrieval augmented generation improves academic answers by "
+                    "grounding generated claims in retrieved evidence from papers."
+                ),
+            )
+        ],
+        article_brief=ArticleBrief(
+            title="RAG Study",
+            field="information retrieval",
+            main_idea="The paper studies retrieval augmented generation.",
+            key_terms={"retrieval augmented generation": "检索增强生成"},
+        ),
+    )
+    initial_payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "这种方法通过论文证据支撑生成内容，从而提升学术回答质量。",
+                "role": "paragraph",
+            }
+        ],
+    }
+    revised_payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "检索增强生成通过论文证据支撑生成内容，从而提升学术回答质量。",
+                "role": "paragraph",
+            }
+        ],
+    }
+    calls: list[dict] = []
+
+    class FakeResponse:
+        def __init__(self, content: object) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": self.content}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *args) -> None:
+            return None
+
+        async def post(self, *args, **kwargs) -> FakeResponse:
+            calls.append(kwargs["json"])
+            return FakeResponse(initial_payload if len(calls) == 1 else revised_payload)
+
+    monkeypatch.setattr(translator_module.httpx, "AsyncClient", FakeAsyncClient)
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+
+    plan = asyncio.run(translator.translate(chunk))
+    diagnostics = translator.drain_quality_diagnostics()
+
+    assert len(calls) == 2
+    assert "You revise academic translations" in calls[1]["messages"][0]["content"]
+    assert "translation_quality_missing_key_term" in calls[1]["messages"][1]["content"]
+    assert plan.blocks[0].translated_text.startswith("检索增强生成")
+    assert "translation_quality_revised" in plan.blocks[0].quality_flags
+    assert [diagnostic["action"] for diagnostic in diagnostics] == [
+        "revision_requested",
+        "revision_applied",
+    ]
+
+
+def test_openai_translator_quality_review_does_not_call_revision_for_good_plan() -> None:
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=(
+                    "Retrieval augmented generation improves academic answers by "
+                    "grounding generated claims in retrieved evidence from papers."
+                ),
+            )
+        ],
+        article_brief=ArticleBrief(
+            title="RAG Study",
+            field="information retrieval",
+            main_idea="The paper studies retrieval augmented generation.",
+            key_terms={"retrieval augmented generation": "检索增强生成"},
+        ),
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id=chunk.chunk_id,
+        target_lang=chunk.target_lang,
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=(
+                    "检索增强生成通过从论文中检索到的证据支撑生成式主张，"
+                    "从而提升学术回答的可靠性。"
+                ),
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+    translator = OpenAICompatibleTranslator("https://example.test/v1", "key", "model")
+
+    reviewed = asyncio.run(translator._review_or_revise(chunk, plan, attempt=1))
+
+    assert reviewed.blocks[0].translated_text == plan.blocks[0].translated_text
+    assert translator.drain_quality_diagnostics() == []
 
 
 def test_minimax_m3_payload_disables_thinking_and_splits_reasoning(

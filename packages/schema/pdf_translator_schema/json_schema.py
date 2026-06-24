@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import (
+    ArticleBrief,
     AssetIR,
     DocumentIR,
     EditScope,
@@ -24,6 +25,7 @@ SCHEMA_URI = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_VERSION = "0.2"
 
 SCHEMA_MODELS = {
+    "article-brief": ArticleBrief,
     "document-ir": DocumentIR,
     "input-source": InputSource,
     "asset-ir": AssetIR,

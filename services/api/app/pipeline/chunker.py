@@ -4,6 +4,7 @@ import re
 
 from pdf_translator_schema import (
     BlockRole,
+    ArticleBrief,
     DocumentBlock,
     DocumentIR,
     RenderDefaults,
@@ -35,6 +36,14 @@ TOKEN_PATTERN = re.compile(
     r")"
 )
 TITLE_ROLES = {BlockRole.TITLE, BlockRole.HEADING}
+SECTION_START_ROLES = {BlockRole.TITLE, BlockRole.HEADING}
+CLUSTER_ROLES = {
+    BlockRole.CAPTION,
+    BlockRole.FIGURE,
+    BlockRole.FORMULA,
+    BlockRole.REFERENCE,
+    BlockRole.TABLE,
+}
 
 
 def extract_preserve_tokens(text: str) -> list[str]:
@@ -95,6 +104,7 @@ def _make_chunk(
     render_defaults: RenderDefaults,
     context: str,
     glossary: dict[str, str],
+    article_brief: ArticleBrief | None,
 ) -> TranslationChunk:
     return TranslationChunk(
         chunk_id=f"{document.doc_id}_chunk_{index:04d}",
@@ -102,6 +112,7 @@ def _make_chunk(
         source_blocks=blocks,
         context=context,
         glossary=glossary,
+        article_brief=article_brief,
         render_defaults=render_defaults,
         constraints=TranslationConstraints(),
     )
@@ -168,6 +179,7 @@ def build_chunks(
     max_chars: int = 6000,
     glossary: dict[str, str] | None = None,
     render_defaults: RenderDefaults | None = None,
+    article_brief: ArticleBrief | None = None,
 ) -> list[TranslationChunk]:
     if max_chars <= 0:
         raise ValueError("max_chars must be greater than 0")
@@ -190,6 +202,45 @@ def build_chunks(
         for block in sorted(page.blocks, key=lambda item: item.reading_order)
     ]
 
+    def flush_current() -> None:
+        nonlocal current_blocks, current_chars, previous_chunk_blocks
+        if not current_blocks:
+            return
+        chunks.append(
+            _make_chunk(
+                document,
+                len(chunks) + 1,
+                target_lang,
+                current_blocks,
+                render_defaults,
+                _chunk_context(
+                    document,
+                    len(chunks) + 1,
+                    current_blocks,
+                    previous_chunk_blocks,
+                ),
+                glossary,
+                article_brief,
+            )
+        )
+        previous_chunk_blocks = current_blocks
+        current_blocks = []
+        current_chars = 0
+
+    def should_keep_with_current(source_block: SourceBlock, next_chars: int) -> bool:
+        if not current_blocks:
+            return False
+        previous = current_blocks[-1]
+        if previous.role in TITLE_ROLES and len(current_blocks) == 1:
+            return True
+        if previous.role in CLUSTER_ROLES and source_block.role == previous.role:
+            return True
+        if previous.role in {BlockRole.FIGURE, BlockRole.TABLE} and source_block.role == BlockRole.CAPTION:
+            return True
+        if source_block.role in CLUSTER_ROLES and previous.role == source_block.role:
+            return True
+        return next_chars <= max_chars
+
     for page in document.pages:
         page_blocks = sorted(page.blocks, key=lambda block: block.reading_order)
         for block in page_blocks:
@@ -210,46 +261,26 @@ def build_chunks(
             )
             block_chars = len(source_block.source_text)
             next_chars = current_chars + block_chars + (1 if current_blocks else 0)
-            if current_blocks and next_chars > max_chars:
-                chunks.append(
-                    _make_chunk(
-                        document,
-                        len(chunks) + 1,
-                        target_lang,
-                        current_blocks,
-                        render_defaults,
-                        _chunk_context(
-                            document,
-                            len(chunks) + 1,
-                            current_blocks,
-                            previous_chunk_blocks,
-                        ),
-                        glossary,
-                    )
-                )
-                previous_chunk_blocks = current_blocks
-                current_blocks = []
-                current_chars = 0
+            if (
+                source_block.role in CLUSTER_ROLES
+                and current_blocks
+                and current_blocks[-1].role not in CLUSTER_ROLES
+            ):
+                flush_current()
+                next_chars = block_chars
+            elif source_block.role in SECTION_START_ROLES and current_blocks:
+                flush_current()
+                next_chars = block_chars
+            elif current_blocks and next_chars > max_chars and not should_keep_with_current(
+                source_block,
+                next_chars,
+            ):
+                flush_current()
+                next_chars = block_chars
             current_blocks.append(source_block)
             current_chars = _chunk_char_count(current_blocks)
 
-    if current_blocks:
-        chunks.append(
-            _make_chunk(
-                document,
-                len(chunks) + 1,
-                target_lang,
-                current_blocks,
-                render_defaults,
-                _chunk_context(
-                    document,
-                    len(chunks) + 1,
-                    current_blocks,
-                    previous_chunk_blocks,
-                ),
-                glossary,
-            )
-        )
+    flush_current()
 
     if not chunks:
         raise ValueError("Document has no translatable text blocks")
