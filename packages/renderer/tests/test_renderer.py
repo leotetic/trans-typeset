@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import builtins
 import json
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pdf_renderer.katex as katex_helper
 import pdf_renderer.models as renderer_models
 import pdf_renderer.renderer as renderer_module
 import pytest
@@ -166,13 +168,47 @@ def test_katex_display_margin_is_zeroed_to_prevent_formula_clipping() -> None:
 def test_katex_render_to_string_handles_empty_stdout_without_crashing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    katex_helper.clear_katex_cache()
     monkeypatch.setattr(
-        renderer_models.subprocess,
+        katex_helper.subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=None, stderr="boom"),
     )
 
     assert renderer_models._katex_render_to_string(r"\int f_s\,d\Omega", display=True) is None
+
+
+def test_katex_helper_batches_and_caches_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
+    katex_helper.clear_katex_cache()
+    calls: list[int] = []
+
+    def fake_run(args, **kwargs):
+        payload = json.loads(base64.b64decode(args[-1]).decode("utf-8"))
+        calls.append(len(payload))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "unavailable": False,
+                    "results": [
+                        {"ok": True, "html": f"<span>{item['latex']}</span>"}
+                        for item in payload
+                    ],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr(katex_helper.subprocess, "run", fake_run)
+
+    rendered = katex_helper.render_katex_many(
+        [("x = y", True), (r"\alpha + \beta", False)]
+    )
+    cached = katex_helper.render_katex("x = y", display=True)
+
+    assert calls == [2]
+    assert rendered[("x = y", True)].html == "<span>x = y</span>"
+    assert cached.html == "<span>x = y</span>"
 
 
 def test_katex_strut_depth_counts_toward_formula_height() -> None:

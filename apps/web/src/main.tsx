@@ -196,7 +196,9 @@ function App() {
     ocr_provider_order: ["pix2text", "deterministic"],
     ocr_min_confidence: 0.35,
     ocr_provider_timeout_seconds: 12,
-    ocr_max_visual_candidates: 12
+    ocr_max_visual_candidates: 4,
+    formula_recognition_concurrency: 8,
+    formula_visual_ocr_concurrency: 2
   });
   const [configIssue, setConfigIssue] = useState<string | null>(null);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
@@ -358,7 +360,9 @@ function App() {
         ocr_provider_order: config.ocr_provider_order,
         ocr_min_confidence: config.ocr_min_confidence,
         ocr_provider_timeout_seconds: config.ocr_provider_timeout_seconds,
-        ocr_max_visual_candidates: config.ocr_max_visual_candidates
+        ocr_max_visual_candidates: config.ocr_max_visual_candidates,
+        formula_recognition_concurrency: config.formula_recognition_concurrency,
+        formula_visual_ocr_concurrency: config.formula_visual_ocr_concurrency
       });
       setConfigIssue(null);
       if (!config.allowed_target_langs.includes(targetLang)) {
@@ -1044,7 +1048,9 @@ function App() {
         ocr_provider_order: configDraft.ocr_provider_order,
         ocr_min_confidence: configDraft.ocr_min_confidence,
         ocr_provider_timeout_seconds: configDraft.ocr_provider_timeout_seconds,
-        ocr_max_visual_candidates: configDraft.ocr_max_visual_candidates
+        ocr_max_visual_candidates: configDraft.ocr_max_visual_candidates,
+        formula_recognition_concurrency: configDraft.formula_recognition_concurrency,
+        formula_visual_ocr_concurrency: configDraft.formula_visual_ocr_concurrency
       });
       setRuntimeConfig(config);
       setConfigDraft((draft) => ({ ...draft, openai_api_key: "" }));
@@ -2172,6 +2178,8 @@ function RuntimeConfigCard({
     ocr_min_confidence: number;
     ocr_provider_timeout_seconds: number;
     ocr_max_visual_candidates: number;
+    formula_recognition_concurrency: number;
+    formula_visual_ocr_concurrency: number;
   };
   issue: string | null;
   validation: BaseUrlValidation;
@@ -2187,6 +2195,8 @@ function RuntimeConfigCard({
     ocr_min_confidence: number;
     ocr_provider_timeout_seconds: number;
     ocr_max_visual_candidates: number;
+    formula_recognition_concurrency: number;
+    formula_visual_ocr_concurrency: number;
   }>>;
   onSave: () => void;
 }) {
@@ -2214,7 +2224,7 @@ function RuntimeConfigCard({
           <strong>{issue ? issue : provider === "deterministic" ? "Deterministic 本地模式" : config?.openai_model}</strong>
           <small>
             {config
-              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · Chunk ${config.translation_chunk_max_chars} · OCR ${config.ocr_provider_order.join(">")} · ${config.ocr_provider_timeout_seconds}s/${config.ocr_max_visual_candidates}`
+              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · Chunk ${config.translation_chunk_max_chars} · OCR ${config.ocr_provider_order.join(">")} · ${config.ocr_provider_timeout_seconds}s/${config.ocr_max_visual_candidates} · 公式 ${config.formula_recognition_concurrency}/${config.formula_visual_ocr_concurrency}`
               : "读取后端配置中"}
           </small>
         </div>
@@ -2360,6 +2370,38 @@ function RuntimeConfigCard({
               onDraftChange((current) => ({
                 ...current,
                 ocr_max_visual_candidates: clampInt(event.target.value, 0, 200)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>公式并发</span>
+          <input
+            name="formula_recognition_concurrency"
+            type="number"
+            min={1}
+            max={32}
+            value={draft.formula_recognition_concurrency}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                formula_recognition_concurrency: clampInt(event.target.value, 1, 32)
+              }))
+            }
+          />
+        </label>
+        <label>
+          <span>视觉并发</span>
+          <input
+            name="formula_visual_ocr_concurrency"
+            type="number"
+            min={1}
+            max={8}
+            value={draft.formula_visual_ocr_concurrency}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                formula_visual_ocr_concurrency: clampInt(event.target.value, 1, 8)
               }))
             }
           />
@@ -3467,6 +3509,8 @@ function artifactLabel(name: string) {
       return "Formula";
     case "formula-diagnostics":
       return "Formula QA";
+    case "formula-performance":
+      return "Formula Speed";
     case "ocr-recognition":
       return "OCR";
     case "ocr-diagnostics":

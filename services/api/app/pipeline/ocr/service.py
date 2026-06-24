@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from pdf_translator_schema.models import OCRRecognitionResult
 
@@ -19,7 +21,7 @@ class OCRService:
     asset_base_path: Path | None = None
     min_confidence: float = 0.35
     provider_timeout_seconds: float = 12.0
-    max_visual_candidates: int = 12
+    max_visual_candidates: int = 4
     min_text_confidence: float = 0.65
     on_record: Callable[[dict[str, Any]], None] | None = None
 
@@ -27,6 +29,7 @@ class OCRService:
         self.records: list[dict] = []
         self._cache: dict[str, OCRRecognitionResult] = {}
         self._visual_attempts = 0
+        self._lock = asyncio.Lock()
 
     async def recognize_formula(
         self,
@@ -46,24 +49,29 @@ class OCRService:
                 cache_key = f"image:{image_sha256(preprocessed_path)}:{candidate.display_mode}"
             except Exception:
                 cache_key = f"image:{candidate.candidate_id}:{preprocessed_path}"
-        if cache_key in self._cache:
-            result = self._cache[cache_key]
-            self.records.append(
-                {
+        async with self._lock:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                cache_record = {
                     "candidate_id": candidate.candidate_id,
-                    "provider": result.provider,
+                    "provider": cached.provider,
                     "status": "cache_hit",
-                    "confidence": result.confidence,
+                    "confidence": cached.confidence,
                 }
-            )
-            self._emit_record(self.records[-1])
-            return result
+                self.records.append(cache_record)
+            else:
+                cache_record = None
+        if cached is not None:
+            self._emit_record(cache_record or {})
+            return cached
 
         attempts: list[dict] = []
         best: OCRRecognitionResult | None = None
         if visual_candidate:
-            self._visual_attempts += 1
-            if self.max_visual_candidates >= 0 and self._visual_attempts > self.max_visual_candidates:
+            async with self._lock:
+                self._visual_attempts += 1
+                visual_attempts = self._visual_attempts
+            if self.max_visual_candidates >= 0 and visual_attempts > self.max_visual_candidates:
                 best = OCRRecognitionResult(
                     latex=candidate.source_text,
                     text=candidate.source_text,
@@ -83,24 +91,28 @@ class OCRService:
                         "quality_flags": best.quality_flags,
                     }
                 )
-                self._cache[cache_key] = best
-                self.records.append(
-                    {
-                        "candidate_id": candidate.candidate_id,
-                        "source_kind": candidate.source_kind.value,
-                        "display_mode": candidate.display_mode,
-                        "status": "recognized" if best.latex or best.text else "empty",
-                        "provider": best.provider,
-                        "confidence": best.confidence,
-                        "attempts": attempts,
-                    }
-                )
-                self._emit_record(self.records[-1])
+                skipped_record = {
+                    "candidate_id": candidate.candidate_id,
+                    "source_kind": candidate.source_kind.value,
+                    "display_mode": candidate.display_mode,
+                    "status": "recognized" if best.latex or best.text else "empty",
+                    "provider": best.provider,
+                    "confidence": best.confidence,
+                    "attempts": attempts,
+                }
+                async with self._lock:
+                    self._cache[cache_key] = best
+                    self.records.append(skipped_record)
+                self._emit_record(skipped_record)
                 return best
 
         for provider in _ordered_providers(self.providers, prefer_visual=prefer_visual):
             provider_name = getattr(provider, "name", provider.__class__.__name__)
-            if text_candidate and provider_name in {"pix2text", "openai_vision", "minimax_vision"} and not visual_candidate:
+            if (
+                text_candidate
+                and provider_name in {"pix2text", "openai_vision", "minimax_vision"}
+                and not visual_candidate
+            ):
                 continue
             self._emit_record(
                 {
@@ -109,6 +121,7 @@ class OCRService:
                     "status": "started",
                 }
             )
+            attempt_started = time.perf_counter()
             try:
                 result = await asyncio.wait_for(
                     provider.recognize_formula(
@@ -126,6 +139,7 @@ class OCRService:
                         "status": "failed",
                         "error": f"{provider_name} timed out",
                         "quality_flags": [f"{provider_name}_timeout"],
+                        "elapsed_ms": round((time.perf_counter() - attempt_started) * 1000, 2),
                     }
                 )
                 self._emit_record(
@@ -145,6 +159,7 @@ class OCRService:
                         "status": "failed",
                         "error": str(exc),
                         "quality_flags": ["ocr_provider_unavailable"],
+                        "elapsed_ms": round((time.perf_counter() - attempt_started) * 1000, 2),
                     }
                 )
                 self._emit_record(
@@ -171,6 +186,7 @@ class OCRService:
                     "status": "recognized" if result.latex or result.text else "empty",
                     "confidence": result.confidence,
                     "quality_flags": result.quality_flags,
+                    "elapsed_ms": round((time.perf_counter() - attempt_started) * 1000, 2),
                     "validator_status": validate_formula_latex(
                         result.latex or result.text,
                         source_text=candidate.source_text,
@@ -195,7 +211,9 @@ class OCRService:
             if best is None or result.confidence > best.confidence:
                 best = result
             confidence_threshold = (
-                self.min_text_confidence if text_candidate and not visual_candidate else self.min_confidence
+                self.min_text_confidence
+                if text_candidate and not visual_candidate
+                else self.min_confidence
             )
             if (
                 (result.latex or result.text)
@@ -212,19 +230,19 @@ class OCRService:
                 confidence=0.0,
                 quality_flags=["ocr_provider_unavailable"],
             )
-        self._cache[cache_key] = best
-        self.records.append(
-            {
-                "candidate_id": candidate.candidate_id,
-                "source_kind": candidate.source_kind.value,
-                "display_mode": candidate.display_mode,
-                "status": "recognized" if best.latex or best.text else "empty",
-                "provider": best.provider,
-                "confidence": best.confidence,
-                "attempts": attempts,
-            }
-        )
-        self._emit_record(self.records[-1])
+        record = {
+            "candidate_id": candidate.candidate_id,
+            "source_kind": candidate.source_kind.value,
+            "display_mode": candidate.display_mode,
+            "status": "recognized" if best.latex or best.text else "empty",
+            "provider": best.provider,
+            "confidence": best.confidence,
+            "attempts": attempts,
+        }
+        async with self._lock:
+            self._cache[cache_key] = best
+            self.records.append(record)
+        self._emit_record(record)
         return best
 
     def diagnostics(self) -> dict:

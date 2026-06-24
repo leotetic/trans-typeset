@@ -37,7 +37,9 @@ class Settings:
     ocr_provider_order: tuple[str, ...] = ("pix2text", "deterministic")
     ocr_min_confidence: float = 0.35
     ocr_provider_timeout_seconds: float = 12.0
-    ocr_max_visual_candidates: int = 12
+    ocr_max_visual_candidates: int = 4
+    formula_recognition_concurrency: int = 8
+    formula_visual_ocr_concurrency: int = 2
     render_font_stack: tuple[str, ...] = (
         "Times New Roman",
         "SimSun",
@@ -183,7 +185,15 @@ def load_settings() -> Settings:
         ),
         ocr_max_visual_candidates=parse_int(
             os.getenv("OCR_MAX_VISUAL_CANDIDATES", ""),
-            12,
+            4,
+        ),
+        formula_recognition_concurrency=parse_int(
+            os.getenv("FORMULA_RECOGNITION_CONCURRENCY", ""),
+            8,
+        ),
+        formula_visual_ocr_concurrency=parse_int(
+            os.getenv("FORMULA_VISUAL_OCR_CONCURRENCY", ""),
+            2,
         ),
         render_font_stack=parse_csv(
             os.getenv(

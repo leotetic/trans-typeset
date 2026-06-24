@@ -2,18 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pdf_renderer.katex as katex_helper
 import pytest
-from app.pipeline.parser import parse_pdf
+import app.pipeline.formulas.validation as formula_validation
 from app.pipeline.formulas import (
     DeterministicFormulaRecognizer,
     detect_formula_candidates,
     enrich_document_formulas,
 )
-import app.pipeline.formulas.validation as formula_validation
 from app.pipeline.formulas.normalization import formula_corruption_flags, latex_from_pdf_text
 from app.pipeline.formulas.recognizer import FormulaRecognitionError, _extract_json_object
 from app.pipeline.formulas.validation import validate_formula_latex
@@ -23,6 +24,7 @@ from app.pipeline.ocr import (
     OCRService,
     Pix2TextOCRProvider,
 )
+from app.pipeline.parser import parse_pdf
 from pdf_renderer import RenderDocument, render_to_html
 from pdf_translator_schema import (
     Asset,
@@ -234,8 +236,9 @@ def test_legacy_formula_normalization_does_not_promote_sentence_formula_role_to_
 def test_formula_validation_handles_empty_stderr_without_crashing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    katex_helper.clear_katex_cache()
     monkeypatch.setattr(
-        formula_validation.subprocess,
+        katex_helper.subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(returncode=2, stdout="", stderr=None),
     )
@@ -978,6 +981,127 @@ def test_formula_service_updates_document_ir_and_diagnostics(tmp_path) -> None:
     assert result.diagnostics["recognizer_type"] == "deterministic"
 
 
+def test_formula_service_keeps_many_clean_text_formulas_on_fast_path(tmp_path) -> None:
+    blocks = [
+        DocumentBlock(
+            block_id=f"b_formula_{index}",
+            page_id="p1",
+            role=BlockRole.PARAGRAPH,
+            bbox=BoundingBox(x0=20, y0=20 + index * 2, x1=260, y1=30 + index * 2),
+            reading_order=index,
+            source_text=f"where x{index} = y{index} + 1 holds.",
+        )
+        for index in range(500)
+    ]
+    document = DocumentIR(
+        doc_id="doc_many",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=1200),
+                blocks=blocks,
+            )
+        ],
+    )
+
+    class FailingVisualProvider:
+        name = "pix2text"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            raise AssertionError("clean text-layer formulas should not use visual OCR")
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_many",
+            asset_output_dir=tmp_path,
+            recognizer=DeterministicFormulaRecognizer(),
+            ocr_service=OCRService(
+                providers=[FailingVisualProvider(), DeterministicOCRProvider()],
+                max_visual_candidates=4,
+            ),
+            formula_recognition_concurrency=16,
+            formula_visual_ocr_concurrency=2,
+        )
+    )
+
+    assert len(result.formulas) == 500
+    assert result.diagnostics["candidate_count"] == 500
+    performance = result.diagnostics["performance"]
+    assert performance["crop_count"] == 0
+    assert performance["visual_attempt_count"] == 0
+    assert not list(tmp_path.glob("*.png"))
+
+
+def test_formula_service_parallelizes_slow_visual_candidates(tmp_path) -> None:
+    assets = []
+    for index in range(6):
+        image_path = tmp_path / f"formula_{index}.png"
+        image_path.write_bytes(f"fake-image-{index}".encode("ascii"))
+        assets.append(
+            Asset(
+                asset_id=f"a_formula_{index}",
+                page_id="p1",
+                kind="image",
+                bbox=BoundingBox(
+                    x0=20,
+                    y0=80 + index * 40,
+                    x1=220,
+                    y1=100 + index * 40,
+                ),
+                path=str(image_path),
+            )
+        )
+    document = DocumentIR(
+        doc_id="doc_parallel",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[],
+                assets=assets,
+            )
+        ],
+    )
+
+    class SlowVisualProvider:
+        name = "pix2text"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            await asyncio.sleep(0.05)
+            return OCRRecognitionResult(
+                text="x = y + 1",
+                latex="x = y + 1",
+                region_kind="formula",
+                provider="pix2text",
+                confidence=0.95,
+            )
+
+    async def run_once(concurrency: int) -> tuple[float, object]:
+        started = time.perf_counter()
+        result = await enrich_document_formulas(
+            document,
+            doc_id=f"doc_parallel_{concurrency}",
+            asset_output_dir=tmp_path,
+            recognizer=DeterministicFormulaRecognizer(),
+            ocr_service=OCRService(
+                providers=[SlowVisualProvider(), DeterministicOCRProvider()],
+                asset_base_path=tmp_path,
+                max_visual_candidates=20,
+            ),
+            formula_recognition_concurrency=concurrency,
+            formula_visual_ocr_concurrency=concurrency,
+        )
+        return time.perf_counter() - started, result
+
+    serial_elapsed, serial_result = asyncio.run(run_once(1))
+    parallel_elapsed, parallel_result = asyncio.run(run_once(6))
+
+    assert len(serial_result.formulas) == 6
+    assert len(parallel_result.formulas) == 6
+    assert parallel_elapsed < serial_elapsed * 0.75
+
+
 def test_formula_service_reports_active_ocr_provider_order(tmp_path) -> None:
     class EmptyPix2TextProvider:
         name = "pix2text"
@@ -1149,7 +1273,7 @@ def test_formula_service_migrates_legacy_display_formula_cluster(tmp_path) -> No
     assert result.diagnostics["legacy_formula_migrated_count"] >= 1
 
 
-def test_formula_service_prefers_visual_provider_for_complex_display_formula(tmp_path) -> None:
+def test_formula_service_keeps_clean_complex_display_formula_on_text_layer(tmp_path) -> None:
     (tmp_path / "formula_asset.png").write_bytes(b"fake-image")
     block = DocumentBlock(
         block_id="b_complex_display",
@@ -1179,18 +1303,11 @@ def test_formula_service_prefers_visual_provider_for_complex_display_formula(tmp
         ],
     )
 
-    class VisualOnlyProvider:
+    class FailingVisualProvider:
         name = "pix2text"
 
         async def recognize_formula(self, candidate, *, image_path=None):
-            return OCRRecognitionResult(
-                text=r"\frac{\partial f_s}{\partial t} = \sum_n",
-                latex=r"\frac{\partial f_s}{\partial t} = \sum_n",
-                region_kind="formula",
-                provider="pix2text",
-                confidence=0.91,
-                quality_flags=["pix2text_used"],
-            )
+            raise AssertionError("clean display formula should stay on text-layer path")
 
     result = asyncio.run(
         enrich_document_formulas(
@@ -1198,14 +1315,14 @@ def test_formula_service_prefers_visual_provider_for_complex_display_formula(tmp
             doc_id="doc_1",
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
-            ocr_service=OCRService(providers=[VisualOnlyProvider(), DeterministicOCRProvider()]),
+            ocr_service=OCRService(providers=[FailingVisualProvider(), DeterministicOCRProvider()]),
         )
     )
 
     assert len(result.formulas) == 1
-    assert result.formulas[0].ocr_provider == "pix2text"
-    assert "formula_visual_escalated" in result.diagnostics["records"][0]["quality_flags"]
-    assert result.diagnostics["records"][0]["status"] in {"recognized", "upgraded"}
+    assert result.formulas[0].ocr_provider == "text_layer_normalizer"
+    assert "formula_visual_escalated" not in result.diagnostics["records"][0]["quality_flags"]
+    assert result.diagnostics["records"][0]["status"] == "recognized"
 
 
 def test_formula_service_prefers_visual_provider_for_corrupt_display_text_layer(tmp_path) -> None:

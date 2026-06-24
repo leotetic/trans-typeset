@@ -186,6 +186,20 @@ def effective_runtime_config(storage: Storage) -> dict:
             persisted.get("ocr_max_visual_candidates", settings.ocr_max_visual_candidates)
             or settings.ocr_max_visual_candidates
         ),
+        "formula_recognition_concurrency": int(
+            persisted.get(
+                "formula_recognition_concurrency",
+                settings.formula_recognition_concurrency,
+            )
+            or settings.formula_recognition_concurrency
+        ),
+        "formula_visual_ocr_concurrency": int(
+            persisted.get(
+                "formula_visual_ocr_concurrency",
+                settings.formula_visual_ocr_concurrency,
+            )
+            or settings.formula_visual_ocr_concurrency
+        ),
         "render_defaults": render_defaults,
     }
     if sys.version_info >= (3, 14) and "pix2text" in config["ocr_provider_order"]:
@@ -388,5 +402,7 @@ def runtime_config_response(storage: Storage) -> RuntimeConfig:
         ocr_min_confidence=effective["ocr_min_confidence"],
         ocr_provider_timeout_seconds=effective["ocr_provider_timeout_seconds"],
         ocr_max_visual_candidates=effective["ocr_max_visual_candidates"],
+        formula_recognition_concurrency=effective["formula_recognition_concurrency"],
+        formula_visual_ocr_concurrency=effective["formula_visual_ocr_concurrency"],
         render_defaults=effective["render_defaults"],
     )

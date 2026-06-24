@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+from pdf_renderer.katex import prewarm_katex, render_katex
 
 from .normalization import contains_natural_language, formula_corruption_flags, normalize_pdf_text
 
@@ -132,7 +133,11 @@ def validate_formula_latex(
         quality_flags=tuple(
             _unique(
                 [
-                    *(["formula_low_confidence"] if acceptance_level == "accepted_low_confidence" else []),
+                    *(
+                        ["formula_low_confidence"]
+                        if acceptance_level == "accepted_low_confidence"
+                        else []
+                    ),
                     *corruption_flags,
                 ]
             )
@@ -216,38 +221,29 @@ def _has_structured_visual_math(latex: str) -> bool:
     )
 
 
+def prewarm_formula_latex_validation(latex_values: list[str]) -> None:
+    items: list[tuple[str, bool]] = []
+    for latex in latex_values:
+        normalized = normalize_pdf_text(latex).strip()
+        if not normalized:
+            continue
+        items.append((normalized, _requires_display_mode_for_validation(normalized)))
+    if items:
+        prewarm_katex(items, cwd=_project_root())
+
+
 @lru_cache(maxsize=512)
 def _katex_render_error(latex: str) -> str | None:
-    display_mode = "true" if _requires_display_mode_for_validation(latex) else "false"
-    script = (
-        "let katex;try{katex=require('katex')}catch(error){process.exit(3);}"
-        "const latex=Buffer.from(process.argv[1],'base64').toString('utf8');"
-        "try{katex.renderToString(latex,{displayMode:"
-        + display_mode
-        + ",throwOnError:true,"
-        "strict:'ignore',trust:false});}"
-        "catch(error){process.stderr.write(String(error&&error.message||error));process.exit(2);}"
+    rendered = render_katex(
+        latex,
+        display=_requires_display_mode_for_validation(latex),
+        cwd=_project_root(),
     )
-    try:
-        import base64
-
-        payload = base64.b64encode(latex.encode("utf-8")).decode("ascii")
-        completed = subprocess.run(
-            ["node", "-e", script, payload],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-            cwd=_project_root(),
-        )
-    except Exception:
+    if rendered.unavailable:
         return None
-    if completed.returncode in {0, 3}:
+    if rendered.html is not None:
         return None
-    stderr = completed.stderr or ""
-    return stderr.strip() or "katex_render_failed"
+    return rendered.error or "katex_render_failed"
 
 
 def _project_root() -> Path:

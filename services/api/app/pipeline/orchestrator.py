@@ -790,7 +790,7 @@ async def _enrich_document_formulas(
         asset_base_path=storage.asset_dir(doc_id),
         min_confidence=runtime_config.get("ocr_min_confidence", 0.35),
         provider_timeout_seconds=runtime_config.get("ocr_provider_timeout_seconds", 12.0),
-        max_visual_candidates=runtime_config.get("ocr_max_visual_candidates", 12),
+        max_visual_candidates=runtime_config.get("ocr_max_visual_candidates", 4),
         on_record=record_ocr_attempt,
     )
     return await enrich_document_formulas(
@@ -801,6 +801,14 @@ async def _enrich_document_formulas(
         recognizer=recognizer,
         ocr_service=ocr_service,
         recognizer_type=recognizer_type,
+        formula_recognition_concurrency=runtime_config.get(
+            "formula_recognition_concurrency",
+            8,
+        ),
+        formula_visual_ocr_concurrency=runtime_config.get(
+            "formula_visual_ocr_concurrency",
+            2,
+        ),
         visual_formula_recognition_enabled=any(
             getattr(provider, "name", "") in {"pix2text", "openai_vision", "minimax_vision"}
             for provider in ocr_providers

@@ -97,6 +97,8 @@ class RuntimeConfig(BaseModel):
     ocr_min_confidence: float
     ocr_provider_timeout_seconds: float
     ocr_max_visual_candidates: int
+    formula_recognition_concurrency: int
+    formula_visual_ocr_concurrency: int
     render_defaults: RenderDefaults
 
 
@@ -116,6 +118,8 @@ class UpdateRuntimeConfig(BaseModel):
     ocr_min_confidence: float | None = Field(default=None, ge=0, le=1)
     ocr_provider_timeout_seconds: float | None = Field(default=None, ge=1, le=120)
     ocr_max_visual_candidates: int | None = Field(default=None, ge=0, le=200)
+    formula_recognition_concurrency: int | None = Field(default=None, ge=1, le=32)
+    formula_visual_ocr_concurrency: int | None = Field(default=None, ge=1, le=8)
     render_defaults: RenderDefaults | None = None
 
 
