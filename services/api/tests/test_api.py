@@ -75,6 +75,9 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
     assert payload["agent_enable_vision_analysis"] is True
     assert payload["layout_planner_model"] == "layout-model"
     assert payload["vision_analyzer_model"] == "vision-model"
+    assert payload["ocr_max_visual_candidates"] == 4
+    assert payload["formula_recognition_concurrency"] == 8
+    assert payload["formula_visual_ocr_concurrency"] == 2
     assert payload["render_defaults"]["target_lang"] == "ja-JP"
     assert payload["render_defaults"]["font_stack"] == ["Example Sans", "serif"]
     assert payload["render_defaults"]["line_height"] == 1.44
@@ -412,6 +415,8 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
             "translation_concurrency": 4,
             "translator_max_attempts": 3,
             "translation_chunk_max_chars": 4200,
+            "formula_recognition_concurrency": 12,
+            "formula_visual_ocr_concurrency": 3,
             "render_defaults": render_defaults,
         },
     )
@@ -425,6 +430,8 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
     assert payload["translation_concurrency"] == 4
     assert payload["translator_max_attempts"] == 3
     assert payload["translation_chunk_max_chars"] == 4200
+    assert payload["formula_recognition_concurrency"] == 12
+    assert payload["formula_visual_ocr_concurrency"] == 3
     assert payload["render_defaults"]["font_stack"] == ["Noto Sans CJK SC", "serif"]
     assert payload["render_defaults"]["line_height"] == 1.5
     assert payload["render_defaults"]["overflow_policy"]["min_font_scale"] == 0.72
@@ -494,6 +501,22 @@ def test_update_config_rejects_unsupported_default_language(tmp_path: Path, monk
 
     assert response.status_code == 400
     assert "Unsupported target language" in response.json()["detail"]
+
+
+def test_update_config_rejects_invalid_formula_concurrency(tmp_path: Path, monkeypatch) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    client = TestClient(app)
+
+    response = client.put(
+        "/api/config",
+        json={
+            "formula_recognition_concurrency": 0,
+            "formula_visual_ocr_concurrency": 9,
+        },
+    )
+
+    assert response.status_code == 422
 
 
 def test_job_not_found(tmp_path: Path, monkeypatch) -> None:
@@ -1514,6 +1537,11 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
         "formula-diagnostics.json",
         {"kind": "formula_diagnostics"},
     )
+    storage.write_json(
+        "doc_1",
+        "formula-performance.json",
+        {"kind": "formula_performance"},
+    )
     client = TestClient(app)
 
     summary = client.get("/api/documents/doc_1/artifacts")
@@ -1529,6 +1557,7 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert artifacts["layout-trace"]["available"] is True
     assert artifacts["formula-recognition"]["available"] is True
     assert artifacts["formula-diagnostics"]["available"] is True
+    assert artifacts["formula-performance"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False
     assert artifacts["parser-diagnostics"]["available"] is True
 
@@ -1541,6 +1570,9 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     formula_response = client.get("/api/documents/doc_1/artifacts/formula-recognition")
     formula_diagnostics_response = client.get(
         "/api/documents/doc_1/artifacts/formula-diagnostics"
+    )
+    formula_performance_response = client.get(
+        "/api/documents/doc_1/artifacts/formula-performance"
     )
     trace_response = client.get("/api/documents/doc_1/artifacts/layout-trace")
 
@@ -1558,6 +1590,8 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert formula_response.json() == [{"formula_id": "formula_1", "latex": "x = y"}]
     assert formula_diagnostics_response.status_code == 200
     assert formula_diagnostics_response.json() == {"kind": "formula_diagnostics"}
+    assert formula_performance_response.status_code == 200
+    assert formula_performance_response.json() == {"kind": "formula_performance"}
     assert trace_response.status_code == 200
     assert trace_response.json() == {"kind": "layout_trace"}
 

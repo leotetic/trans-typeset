@@ -47,6 +47,7 @@ JSON_ARTIFACTS = {
     "formula-candidates": ("formula-candidates.json", "formula-candidates"),
     "formula-recognition": ("formula-recognition.json", "formula-recognition"),
     "formula-diagnostics": ("formula-diagnostics.json", "formula-diagnostics"),
+    "formula-performance": ("formula-performance.json", "formula-performance"),
     "ocr-recognition": ("ocr-recognition.json", "ocr-recognition"),
     "ocr-diagnostics": ("ocr-diagnostics.json", "ocr-diagnostics"),
     "docx-conversion": ("docx-conversion.json", "docx-conversion"),

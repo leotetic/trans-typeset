@@ -262,6 +262,11 @@ async def _read_input(
                 )
                 context.storage.write_json(
                     doc_id,
+                    "formula-performance.json",
+                    formula_result.diagnostics.get("performance", {}),
+                )
+                context.storage.write_json(
+                    doc_id,
                     "formula-candidates.json",
                     formula_result.candidates,
                 )
@@ -335,6 +340,7 @@ async def _read_input(
                         False,
                     ),
                     "quality_flags": formula_result.diagnostics.get("quality_flags", []),
+                    "performance": formula_result.diagnostics.get("performance", {}),
                     "enrichment": formula_result.diagnostics,
                 }
             except Exception as exc:
@@ -355,6 +361,16 @@ async def _read_input(
                         "visual_formula_recognition_enabled": False,
                         "quality_flags": ["formula_enrichment_failed"],
                         "error": str(exc),
+                    },
+                )
+                context.storage.write_json(
+                    doc_id,
+                    "formula-performance.json",
+                    {
+                        "kind": "formula_performance",
+                        "candidate_count": 0,
+                        "total_ms": 0,
+                        "quality_flags": ["formula_enrichment_failed"],
                     },
                 )
                 parser_diagnostics["formula_candidate_count"] = 0
@@ -400,6 +416,7 @@ async def _read_input(
                 "parser-diagnostics",
                 "formula-recognition",
                 "formula-diagnostics",
+                "formula-performance",
             ]
             if used_scanned_ocr:
                 output_artifacts.extend(["asset-ir", "ocr-recognition", "ocr-diagnostics"])

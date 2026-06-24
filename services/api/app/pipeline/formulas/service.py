@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,8 +20,8 @@ from pdf_translator_schema.models import (
 from ..ocr import DeterministicOCRProvider, OCRService
 from .detector import FormulaCandidate, detect_formula_candidates
 from .deterministic import DeterministicFormulaRecognizer
-from .normalization import contains_natural_language, normalize_pdf_text
-from .validation import validate_formula_latex
+from .normalization import contains_natural_language, latex_from_pdf_text, normalize_pdf_text
+from .validation import prewarm_formula_latex_validation, validate_formula_latex
 
 _MATH_SIGNAL_PATTERN = re.compile(
     r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|phi|omega|Delta|Omega|cdot|times)|"
@@ -49,6 +51,7 @@ _FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR = "_formula_ocr_provider_diagnostics"
 _DISPLAY_COMPLEXITY_PATTERN = re.compile(
     r"(?:\\(?:frac|sum|int|partial|nabla|sqrt|left|right)|[∂∇∫∑]|[(){}\[\]])"
 )
+_VISUAL_PROVIDER_NAMES = {"pix2text", "openai_vision", "minimax_vision"}
 
 
 class FormulaRecognizer(Protocol):
@@ -90,6 +93,83 @@ class FormulaEnrichmentResult:
     ocr_records: list[dict]
 
 
+@dataclass(frozen=True)
+class _CandidateOutcome:
+    index: int
+    formula: FormulaIR | None
+    record: dict
+    rejected_record: dict | None
+    diagnostic_flags: list[str]
+    display_cluster_promoted_count: int = 0
+    legacy_formula_migrated_count: int = 0
+
+
+class _FormulaPerformance:
+    def __init__(self, candidate_count: int) -> None:
+        self.started_at = time.perf_counter()
+        self.candidate_count = candidate_count
+        self.crop_count = 0
+        self.text_recognition_ms = 0.0
+        self.visual_ocr_ms = 0.0
+        self.validation_ms = 0.0
+        self.crop_ms = 0.0
+        self._lock = asyncio.Lock()
+
+    async def add_ms(self, field: str, elapsed_ms: float) -> None:
+        async with self._lock:
+            setattr(self, field, float(getattr(self, field)) + elapsed_ms)
+
+    async def add_crop(self, elapsed_ms: float, cropped: bool) -> None:
+        async with self._lock:
+            self.crop_ms += elapsed_ms
+            if cropped:
+                self.crop_count += 1
+
+    def summary(self, ocr_diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        ocr_diagnostics = ocr_diagnostics or {}
+        records = ocr_diagnostics.get("records", [])
+        visual_ocr_ms_by_provider: dict[str, float] = {}
+        visual_attempt_count = 0
+        skipped_visual_count = 0
+        cache_hit_count = 0
+        if isinstance(records, list):
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                if record.get("status") == "cache_hit":
+                    cache_hit_count += 1
+                for attempt in record.get("attempts", []):
+                    if not isinstance(attempt, dict):
+                        continue
+                    provider = str(attempt.get("provider", "unknown"))
+                    flags = set(attempt.get("quality_flags", []) or [])
+                    if provider in _VISUAL_PROVIDER_NAMES:
+                        visual_attempt_count += 1
+                        visual_ocr_ms_by_provider[provider] = (
+                            visual_ocr_ms_by_provider.get(provider, 0.0)
+                            + float(attempt.get("elapsed_ms", 0.0) or 0.0)
+                        )
+                    if "ocr_visual_candidate_limit_reached" in flags:
+                        skipped_visual_count += 1
+        return {
+            "kind": "formula_performance",
+            "candidate_count": self.candidate_count,
+            "crop_count": self.crop_count,
+            "text_recognition_ms": round(self.text_recognition_ms, 2),
+            "visual_ocr_ms": round(self.visual_ocr_ms, 2),
+            "visual_ocr_ms_by_provider": {
+                provider: round(elapsed_ms, 2)
+                for provider, elapsed_ms in sorted(visual_ocr_ms_by_provider.items())
+            },
+            "validation_ms": round(self.validation_ms, 2),
+            "crop_ms": round(self.crop_ms, 2),
+            "cache_hit_count": cache_hit_count,
+            "visual_attempt_count": visual_attempt_count,
+            "skipped_visual_count": skipped_visual_count,
+            "total_ms": round((time.perf_counter() - self.started_at) * 1000, 2),
+        }
+
+
 async def enrich_document_formulas(
     document: DocumentIR,
     *,
@@ -99,6 +179,8 @@ async def enrich_document_formulas(
     recognizer: FormulaRecognizer | None = None,
     ocr_service: OCRService | None = None,
     recognizer_type: str = "deterministic",
+    formula_recognition_concurrency: int = 8,
+    formula_visual_ocr_concurrency: int = 2,
     visual_formula_recognition_enabled: bool = False,
     on_progress: Callable[[int, int, FormulaCandidate], None] | None = None,
 ) -> FormulaEnrichmentResult:
@@ -134,113 +216,150 @@ async def enrich_document_formulas(
     if getattr(ocr_service, "asset_base_path", None) is None:
         ocr_service.asset_base_path = asset_output_dir
     working_document = document
-    candidates = _ensure_formula_candidate_assets(
-        working_document,
-        candidates,
-        doc_id=doc_id,
-        asset_output_dir=asset_output_dir,
-        pdf_path=pdf_path,
-    )
-    formulas: list[FormulaIR] = []
-    records: list[dict] = []
-    rejected_records: list[dict] = []
-    diagnostic_flags: list[str] = []
-    display_cluster_promoted_count = 0
-    legacy_formula_migrated_count = 0
-
     total_candidates = len(candidates)
-    for index, candidate in enumerate(candidates, start=1):
-        if on_progress is not None:
-            try:
-                on_progress(index, total_candidates, candidate)
-            except Exception:
-                pass
+    performance = _FormulaPerformance(total_candidates)
+    _prewarm_text_candidate_validation(candidates)
+    recognition_semaphore = asyncio.Semaphore(max(1, int(formula_recognition_concurrency or 1)))
+    visual_semaphore = asyncio.Semaphore(max(1, int(formula_visual_ocr_concurrency or 1)))
+    completed_count = 0
+    progress_lock = asyncio.Lock()
+
+    async def process_candidate(index: int, candidate: FormulaCandidate) -> _CandidateOutcome:
+        nonlocal completed_count
         try:
-            ocr_result, validator, recognition_record = await _recognize_candidate(
-                candidate,
-                recognizer=recognizer,
-                ocr_service=ocr_service,
-                prefer_text_recognizer=prefer_text_recognizer,
-            )
-            records.append(recognition_record)
-            validator = validate_formula_latex(
-                ocr_result.latex or ocr_result.text,
-                source_text=candidate.source_text,
-                display_mode=candidate.display_mode,
-            )
-            formula = FormulaIR(
-                formula_id=candidate.candidate_id,
-                page_id=candidate.page_id,
-                source_block_id=candidate.source_block_id,
-                anchor_block_id=candidate.anchor_block_id,
-                asset_id=candidate.asset_id,
-                latex=(ocr_result.latex or ocr_result.text)
-                if validator.accepted or _should_attach_image_fallback_formula(candidate, validator)
-                else "",
-                source_text=candidate.source_text,
-                source_text_range=candidate.source_text_range,
-                span_ids=list(candidate.span_ids),
-                display_mode=candidate.display_mode,
-                confidence=ocr_result.confidence,
-                ocr_provider=ocr_result.provider,
-                ocr_confidence=ocr_result.confidence,
-                source_kind=candidate.source_kind,
-                quality_flags=_unique(
-                    [*candidate.quality_flags, *ocr_result.quality_flags, *validator.quality_flags]
-                ),
-            )
-            if candidate.parser_cluster_id:
-                display_cluster_promoted_count += 1
-            if candidate.legacy_formula_ids:
-                legacy_formula_migrated_count += len(candidate.legacy_formula_ids)
+            async with recognition_semaphore:
+                ocr_result, validator, recognition_record = await _recognize_candidate(
+                    candidate,
+                    recognizer=recognizer,
+                    ocr_service=ocr_service,
+                    prefer_text_recognizer=prefer_text_recognizer,
+                    doc_id=doc_id,
+                    asset_output_dir=asset_output_dir,
+                    pdf_path=pdf_path,
+                    visual_semaphore=visual_semaphore,
+                    performance=performance,
+                )
+                formula = FormulaIR(
+                    formula_id=candidate.candidate_id,
+                    page_id=candidate.page_id,
+                    source_block_id=candidate.source_block_id,
+                    anchor_block_id=candidate.anchor_block_id,
+                    asset_id=recognition_record.get("candidate_asset_id")
+                    or candidate.asset_id,
+                    latex=(ocr_result.latex or ocr_result.text)
+                    if validator.accepted
+                    or _should_attach_image_fallback_formula(candidate, validator)
+                    else "",
+                    source_text=candidate.source_text,
+                    source_text_range=candidate.source_text_range,
+                    span_ids=list(candidate.span_ids),
+                    display_mode=candidate.display_mode,
+                    confidence=ocr_result.confidence,
+                    ocr_provider=ocr_result.provider,
+                    ocr_confidence=ocr_result.confidence,
+                    source_kind=candidate.source_kind,
+                    quality_flags=_unique(
+                        [
+                            *candidate.quality_flags,
+                            *ocr_result.quality_flags,
+                            *validator.quality_flags,
+                        ]
+                    ),
+                )
+                rejection_reason = _formula_attachment_rejection_reason(
+                    candidate,
+                    formula,
+                    validator,
+                )
+                if rejection_reason is not None:
+                    rejection_flags = _unique([*formula.quality_flags, rejection_reason])
+                    rejected_record = {
+                        **recognition_record,
+                        "status": "rejected",
+                        "reason": rejection_reason,
+                        "formula_id": formula.formula_id,
+                        "latex": formula.latex or (ocr_result.latex or ocr_result.text),
+                        "accepted_provider": formula.ocr_provider if formula.latex else None,
+                        "accepted_confidence": formula.confidence if formula.latex else None,
+                        "validator_status": validator.status,
+                        "fallback_reason": validator.fallback_reason,
+                        "quality_flags": rejection_flags,
+                    }
+                    return _CandidateOutcome(
+                        index=index,
+                        formula=None,
+                        record=rejected_record,
+                        rejected_record=rejected_record,
+                        diagnostic_flags=rejection_flags,
+                    )
+                recognition_record.update(
+                    {
+                        "formula_id": formula.formula_id,
+                        "status": "recognized",
+                        "latex": formula.latex,
+                        "accepted_provider": formula.ocr_provider,
+                        "accepted_confidence": formula.confidence,
+                        "validator_status": validator.status,
+                        "fallback_reason": validator.fallback_reason,
+                        "source_kind": formula.source_kind.value,
+                    }
+                )
+                return _CandidateOutcome(
+                    index=index,
+                    formula=formula,
+                    record=recognition_record,
+                    rejected_record=None,
+                    diagnostic_flags=list(formula.quality_flags),
+                    display_cluster_promoted_count=1 if candidate.parser_cluster_id else 0,
+                    legacy_formula_migrated_count=len(candidate.legacy_formula_ids),
+                )
         except Exception as exc:
-            records.append(
-                {
+            return _CandidateOutcome(
+                index=index,
+                formula=None,
+                record={
                     "formula_id": candidate.candidate_id,
                     "status": "failed",
                     "error": str(exc),
-                }
+                },
+                rejected_record=None,
+                diagnostic_flags=["formula_recognition_failed"],
             )
-            diagnostic_flags.append("formula_recognition_failed")
-            continue
-        else:
-            rejection_reason = _formula_attachment_rejection_reason(candidate, formula)
-            if rejection_reason is not None:
-                rejection_flags = _unique([*formula.quality_flags, rejection_reason])
-                rejected_record = {
-                    **recognition_record,
-                    "status": "rejected",
-                    "reason": rejection_reason,
-                    "formula_id": formula.formula_id,
-                    "latex": formula.latex or (ocr_result.latex or ocr_result.text),
-                    "accepted_provider": formula.ocr_provider if formula.latex else None,
-                    "accepted_confidence": formula.confidence if formula.latex else None,
-                    "validator_status": validator.status,
-                    "fallback_reason": validator.fallback_reason,
-                    "quality_flags": rejection_flags,
-                }
-                records[-1] = rejected_record
-                rejected_records.append(rejected_record)
-                diagnostic_flags.extend(rejection_flags)
-                continue
-            recognition_record.update(
-                {
-                    "formula_id": formula.formula_id,
-                    "status": "recognized",
-                    "latex": formula.latex,
-                    "accepted_provider": formula.ocr_provider,
-                    "accepted_confidence": formula.confidence,
-                    "validator_status": validator.status,
-                    "fallback_reason": validator.fallback_reason,
-                    "source_kind": formula.source_kind.value,
-                }
-            )
-            records[-1] = recognition_record
-            formulas.append(formula)
-            diagnostic_flags.extend(formula.quality_flags)
+        finally:
+            async with progress_lock:
+                completed_count += 1
+                current_completed = completed_count
+            if on_progress is not None:
+                try:
+                    on_progress(current_completed, total_candidates, candidate)
+                except Exception:
+                    pass
+
+    outcomes = await asyncio.gather(
+        *(
+            process_candidate(index, candidate)
+            for index, candidate in enumerate(candidates, start=1)
+        )
+    )
+    outcomes = sorted(outcomes, key=lambda outcome: outcome.index)
+    formulas = [outcome.formula for outcome in outcomes if outcome.formula is not None]
+    records = [outcome.record for outcome in outcomes]
+    rejected_records = [
+        outcome.rejected_record for outcome in outcomes if outcome.rejected_record is not None
+    ]
+    diagnostic_flags = [
+        flag for outcome in outcomes for flag in outcome.diagnostic_flags
+    ]
+    display_cluster_promoted_count = sum(
+        outcome.display_cluster_promoted_count for outcome in outcomes
+    )
+    legacy_formula_migrated_count = sum(
+        outcome.legacy_formula_migrated_count for outcome in outcomes
+    )
 
     enriched = _attach_formulas(working_document, formulas)
     ocr_diagnostics = ocr_service.diagnostics()
+    performance_summary = performance.summary(ocr_diagnostics)
     active_provider_order = [
         str(item) for item in ocr_diagnostics.get("active_provider_order", [])
     ]
@@ -268,6 +387,7 @@ async def enrich_document_formulas(
         "source_counts": _source_counts(candidates),
         "recognizer_type": recognizer_type,
         "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
+        "performance": performance_summary,
         "ocr_provider": _ocr_provider_status(active_provider_order),
         "ocr": ocr_diagnostics,
     }
@@ -286,56 +406,105 @@ async def enrich_document_formulas(
     )
 
 
+def _prewarm_text_candidate_validation(candidates: list[FormulaCandidate]) -> None:
+    latex_values: list[str] = []
+    for candidate in candidates:
+        if candidate.source_kind not in {
+            FormulaSourceKind.TEXT_LAYER,
+            FormulaSourceKind.INLINE_TEXT,
+        }:
+            continue
+        latex, _flags = latex_from_pdf_text(candidate.source_text)
+        if latex:
+            latex_values.append(latex)
+    prewarm_formula_latex_validation(latex_values)
+
+
 async def _recognize_candidate(
     candidate: FormulaCandidate,
     *,
     recognizer: FormulaRecognizer,
     ocr_service: OCRService,
     prefer_text_recognizer: bool,
+    doc_id: str,
+    asset_output_dir: Path,
+    pdf_path: Path | None,
+    visual_semaphore: asyncio.Semaphore,
+    performance: _FormulaPerformance,
 ) -> tuple[Any, Any, dict[str, Any]]:
     if prefer_text_recognizer and candidate.source_kind in {
         FormulaSourceKind.TEXT_LAYER,
         FormulaSourceKind.INLINE_TEXT,
     }:
+        started = time.perf_counter()
         text_result = await recognizer.recognize(candidate)
+        await performance.add_ms(
+            "text_recognition_ms",
+            (time.perf_counter() - started) * 1000,
+        )
+        started = time.perf_counter()
         text_validator = validate_formula_latex(
             text_result.latex,
             source_text=candidate.source_text,
             display_mode=candidate.display_mode,
         )
+        await performance.add_ms(
+            "validation_ms",
+            (time.perf_counter() - started) * 1000,
+        )
         if _should_escalate_text_candidate(candidate, text_result, text_validator):
-            visual_result = await ocr_service.recognize_formula(
+            visual_candidate, crop_elapsed_ms, cropped = _ensure_single_formula_candidate_asset(
                 candidate,
-                prefer_visual=_prefer_visual_formula_provider(candidate),
+                doc_id=doc_id,
+                asset_output_dir=asset_output_dir,
+                pdf_path=pdf_path,
             )
-            visual_validator = validate_formula_latex(
-                visual_result.latex or visual_result.text,
-                source_text=candidate.source_text,
-                display_mode=candidate.display_mode,
-            )
-            if visual_validator.accepted and not (
-                set(visual_result.quality_flags) & _VISUAL_MOCK_FLAGS
-            ):
-                return (
-                    visual_result,
-                    visual_validator,
-                    {
-                        "formula_id": candidate.candidate_id,
-                        "status": "upgraded",
-                        "accepted_provider": visual_result.provider,
-                        "accepted_confidence": visual_result.confidence,
-                        "validator_status": visual_validator.status,
-                        "fallback_reason": visual_validator.fallback_reason,
-                        "source_kind": candidate.source_kind.value,
-                        "quality_flags": _unique(
-                            [
-                                *text_result.quality_flags,
-                                *visual_result.quality_flags,
-                                "formula_visual_escalated",
-                            ]
-                        ),
-                    },
+            await performance.add_crop(crop_elapsed_ms, cropped)
+            if visual_candidate.image_path:
+                started = time.perf_counter()
+                async with visual_semaphore:
+                    visual_result = await ocr_service.recognize_formula(
+                        visual_candidate,
+                        prefer_visual=_prefer_visual_formula_provider(visual_candidate),
+                    )
+                await performance.add_ms(
+                    "visual_ocr_ms",
+                    (time.perf_counter() - started) * 1000,
                 )
+                started = time.perf_counter()
+                visual_validator = validate_formula_latex(
+                    visual_result.latex or visual_result.text,
+                    source_text=candidate.source_text,
+                    display_mode=candidate.display_mode,
+                )
+                await performance.add_ms(
+                    "validation_ms",
+                    (time.perf_counter() - started) * 1000,
+                )
+                if visual_validator.accepted and not (
+                    set(visual_result.quality_flags) & _VISUAL_MOCK_FLAGS
+                ):
+                    return (
+                        visual_result,
+                        visual_validator,
+                        {
+                            "formula_id": candidate.candidate_id,
+                            "status": "upgraded",
+                            "accepted_provider": visual_result.provider,
+                            "accepted_confidence": visual_result.confidence,
+                            "validator_status": visual_validator.status,
+                            "fallback_reason": visual_validator.fallback_reason,
+                            "source_kind": candidate.source_kind.value,
+                            "candidate_asset_id": visual_candidate.asset_id,
+                            "quality_flags": _unique(
+                                [
+                                    *text_result.quality_flags,
+                                    *visual_result.quality_flags,
+                                    "formula_visual_escalated",
+                                ]
+                            ),
+                        },
+                    )
         return (
             _recognition_result_from_formula_result(text_result),
             text_validator,
@@ -350,14 +519,25 @@ async def _recognize_candidate(
                 "quality_flags": list(text_result.quality_flags),
             },
         )
-    ocr_result = await ocr_service.recognize_formula(
-        candidate,
-        prefer_visual=_prefer_visual_formula_provider(candidate),
+    started = time.perf_counter()
+    async with visual_semaphore:
+        ocr_result = await ocr_service.recognize_formula(
+            candidate,
+            prefer_visual=_prefer_visual_formula_provider(candidate),
+        )
+    await performance.add_ms(
+        "visual_ocr_ms",
+        (time.perf_counter() - started) * 1000,
     )
+    started = time.perf_counter()
     validator = validate_formula_latex(
         ocr_result.latex or ocr_result.text,
         source_text=candidate.source_text,
         display_mode=candidate.display_mode,
+    )
+    await performance.add_ms(
+        "validation_ms",
+        (time.perf_counter() - started) * 1000,
     )
     return (
         ocr_result,
@@ -393,19 +573,22 @@ def _should_escalate_text_candidate(
     result: FormulaRecognitionResult,
     validator: Any,
 ) -> bool:
-    if not candidate.image_path:
+    if candidate.display_mode == "inline":
+        return False
+    result_flags = set(result.quality_flags)
+    if (
+        validator.accepted
+        and result.confidence >= 0.65
+        and not (result_flags & _TEXT_ESCALATION_FLAGS)
+    ):
         return False
     if _prefer_visual_formula_provider(candidate):
         return True
-    if candidate.display_mode == "display" and set(result.quality_flags) & _TEXT_ESCALATION_FLAGS:
+    if candidate.display_mode == "display" and result_flags & _TEXT_ESCALATION_FLAGS:
         return True
-    if validator.accepted and result.confidence >= 0.65 and not (
-        set(result.quality_flags) & _TEXT_ESCALATION_FLAGS
-    ):
-        return False
     if validator.status in {"prose_like", "katex_error", "not_math"}:
         return True
-    if set(result.quality_flags) & _TEXT_ESCALATION_FLAGS:
+    if result_flags & _TEXT_ESCALATION_FLAGS:
         return True
     return result.confidence < 0.65
 
@@ -435,13 +618,14 @@ def _prefer_visual_formula_provider(candidate: FormulaCandidate) -> bool:
 def _formula_attachment_rejection_reason(
     candidate: FormulaCandidate,
     formula: FormulaIR,
+    validator: Any | None = None,
 ) -> str | None:
     flags = set(formula.quality_flags)
     if "formula_prose_like" in flags or "formula_not_math" in flags:
         return "formula_not_math_rejected"
     if flags.intersection(_VISUAL_MOCK_FLAGS):
         return "formula_visual_mock_rejected"
-    validator = validate_formula_latex(
+    validator = validator or validate_formula_latex(
         formula.latex,
         source_text=formula.source_text,
         display_mode=formula.display_mode,
@@ -519,6 +703,85 @@ def _display_latex_looks_like_prose(text: str) -> bool:
     if len(words) >= 10 and math_signals <= max(1, len(words) // 8):
         return True
     return False
+
+
+def _ensure_single_formula_candidate_asset(
+    candidate: FormulaCandidate,
+    *,
+    doc_id: str,
+    asset_output_dir: Path,
+    pdf_path: Path | None,
+) -> tuple[FormulaCandidate, float, bool]:
+    if pdf_path is None or candidate.image_path or candidate.display_mode == "inline":
+        return candidate, 0.0, False
+    started = time.perf_counter()
+    try:
+        import fitz
+    except Exception:
+        return candidate, (time.perf_counter() - started) * 1000, False
+
+    asset_output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        pdf = fitz.open(pdf_path)
+    except Exception:
+        return candidate, (time.perf_counter() - started) * 1000, False
+
+    try:
+        page_index = _page_index_from_page_id(candidate.page_id)
+        if page_index is None or page_index >= len(pdf):
+            return candidate, (time.perf_counter() - started) * 1000, False
+        output_path = asset_output_dir / f"{candidate.candidate_id}.png"
+        try:
+            page = pdf[page_index]
+            clip = _padded_formula_crop_rect(
+                fitz,
+                candidate,
+                page_width=page.rect.width,
+                page_height=page.rect.height,
+            )
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
+            pixmap.save(output_path)
+        except Exception:
+            return candidate, (time.perf_counter() - started) * 1000, False
+        asset_path = f"/api/documents/{doc_id}/assets/{output_path.name}"
+        quality_flags = list(candidate.quality_flags)
+        if clip.y0 < candidate.bbox.y0 or clip.y1 > candidate.bbox.y1:
+            quality_flags.append("formula_crop_padded")
+        if _equation_number_present(candidate.source_text):
+            quality_flags.append("formula_equation_number_preserved")
+        return (
+            FormulaCandidate(
+                candidate_id=candidate.candidate_id,
+                page_id=candidate.page_id,
+                bbox=candidate.bbox,
+                source_kind=candidate.source_kind,
+                source_block_id=candidate.source_block_id,
+                anchor_block_id=candidate.anchor_block_id,
+                asset_id=candidate.candidate_id,
+                source_text=candidate.source_text,
+                source_text_range=candidate.source_text_range,
+                span_ids=candidate.span_ids,
+                display_mode=candidate.display_mode,
+                image_path=asset_path,
+                quality_flags=tuple(_unique(quality_flags)),
+                legacy_formula_ids=candidate.legacy_formula_ids,
+                parser_cluster_id=candidate.parser_cluster_id,
+            ),
+            (time.perf_counter() - started) * 1000,
+            True,
+        )
+    finally:
+        pdf.close()
+
+
+def _page_index_from_page_id(page_id: str) -> int | None:
+    match = re.search(r"(\d+)$", page_id)
+    if match is None:
+        return None
+    try:
+        return max(0, int(match.group(1)) - 1)
+    except ValueError:
+        return None
 
 
 def _ensure_formula_candidate_assets(

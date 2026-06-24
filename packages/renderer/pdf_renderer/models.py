@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-import subprocess
 from dataclasses import dataclass, field, replace
-from math import ceil
-from html import escape, unescape
 from functools import lru_cache
+from html import escape, unescape
+from math import ceil
 from typing import Any
 
 from pdf_translator_schema import (
@@ -27,6 +26,12 @@ from pdf_translator_schema.models import (
     StyleSeed,
 )
 
+from .katex import (
+    KATEX_UNAVAILABLE as _KATEX_UNAVAILABLE,
+    prewarm_katex,
+    render_katex,
+)
+
 
 _SCHEMA_RENDER_DEFAULTS = RenderDefaults()
 _CONTINUATION_MARGIN_PT = 54.0
@@ -38,7 +43,6 @@ _UNDERFILLED_LARGE_BOTTOM_WHITESPACE_RATIO = 0.45
 _UNDERFILLED_LARGE_BOTTOM_MAX_UTILIZATION = 0.35
 _RIGHT_COLUMN_START_TOP_RATIO = 0.15
 _LEFT_COLUMN_UNDERFILLED_WHITESPACE_RATIO = 0.45
-_KATEX_UNAVAILABLE = "__katex_unavailable__"
 _LAYOUT_EPSILON_PT = 0.01
 _DISPLAY_FORMULA_MIN_LINES = 2.35
 _DISPLAY_FORMULA_VERTICAL_MARGIN_EM = 0.36
@@ -427,6 +431,32 @@ def _unresolved_formula_html(formula_id: str, *, display: bool) -> str:
     )
 
 
+def _prewarm_document_formula_katex(document: DocumentIR) -> None:
+    items: list[tuple[str, bool]] = []
+    for formula in document.formulas:
+        latex = (formula.latex or formula.source_text or "").strip()
+        if not latex:
+            continue
+        display = formula.display_mode == "display"
+        if display:
+            latex, _tag_number = _strip_latex_equation_tag(latex)
+        if latex and _latex_looks_renderable(latex):
+            items.append((latex, display))
+    for page in document.pages:
+        for block in page.blocks:
+            for formula in block.formulas:
+                latex = (formula.latex or formula.source_text or "").strip()
+                if not latex:
+                    continue
+                display = formula.kind == "display"
+                if display:
+                    latex, _tag_number = _strip_latex_equation_tag(latex)
+                if latex and _latex_looks_renderable(latex):
+                    items.append((latex, display))
+    if items:
+        prewarm_katex(items)
+
+
 @lru_cache(maxsize=512)
 def _katex_html(latex: str, *, display: bool) -> str | None:
     rendered = _katex_render_to_string(latex, display=display)
@@ -438,35 +468,10 @@ def _katex_html(latex: str, *, display: bool) -> str | None:
 
 
 def _katex_render_to_string(latex: str, *, display: bool) -> str | None:
-    script = (
-        "let katex;try{katex=require('katex')}catch(error){process.exit(3);}"
-        "const latex=Buffer.from(process.argv[1],'base64').toString('utf8');"
-        "try{process.stdout.write(katex.renderToString(latex,{displayMode:"
-        + ("true" if display else "false")
-        + ",throwOnError:true,strict:'ignore',trust:false}));}"
-        "catch(error){process.stderr.write(String(error&&error.message||error));process.exit(2);}"
-    )
-    try:
-        import base64
-
-        payload = base64.b64encode(latex.encode("utf-8")).decode("ascii")
-        completed = subprocess.run(
-            ["node", "-e", script, payload],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-        )
-    except Exception:
-        return None
-    if completed.returncode == 3:
+    rendered = render_katex(latex, display=display)
+    if rendered.unavailable:
         return _KATEX_UNAVAILABLE
-    stdout = completed.stdout or ""
-    if completed.returncode != 0 or not stdout.strip():
-        return None
-    return stdout
+    return rendered.html
 
 
 def _strip_latex_equation_tag(latex: str) -> tuple[str, str | None]:
@@ -1715,6 +1720,7 @@ class RenderDocument:
             if render_defaults is not None
             else RenderDefaults(target_lang=target_lang)
         )
+        _prewarm_document_formula_katex(document)
         if defaults.layout_mode == LayoutMode.CONTINUOUS_REFLOW:
             return _from_ir_and_plans_continuous_reflow(
                 document,

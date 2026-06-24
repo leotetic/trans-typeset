@@ -1278,7 +1278,7 @@ def test_formula_enrichment_reports_progress_and_falls_back_from_pix2text(
                         role=BlockRole.FORMULA,
                         bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
                         reading_order=0,
-                        source_text=r"\partial f_s / \partial t = \sum_n (4)",
+                        source_text="@fs=@t þ f 0 s=k2 (4)",
                     )
                 ],
                 assets=[

@@ -32,6 +32,8 @@ export interface RuntimeConfig {
   ocr_min_confidence: number;
   ocr_provider_timeout_seconds: number;
   ocr_max_visual_candidates: number;
+  formula_recognition_concurrency: number;
+  formula_visual_ocr_concurrency: number;
   render_defaults: RenderDefaults;
 }
 
@@ -51,6 +53,8 @@ export interface UpdateRuntimeConfig {
   ocr_min_confidence?: number;
   ocr_provider_timeout_seconds?: number;
   ocr_max_visual_candidates?: number;
+  formula_recognition_concurrency?: number;
+  formula_visual_ocr_concurrency?: number;
   render_defaults?: RenderDefaults;
 }
 
@@ -660,6 +664,8 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     typeof payload.ocr_min_confidence !== "number" ||
     typeof payload.ocr_provider_timeout_seconds !== "number" ||
     typeof payload.ocr_max_visual_candidates !== "number" ||
+    typeof payload.formula_recognition_concurrency !== "number" ||
+    typeof payload.formula_visual_ocr_concurrency !== "number" ||
     !isRecord(payload.render_defaults)
   ) {
     throw new Error("运行配置返回结构不正确。");
@@ -685,6 +691,8 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     ocr_min_confidence: payload.ocr_min_confidence,
     ocr_provider_timeout_seconds: payload.ocr_provider_timeout_seconds,
     ocr_max_visual_candidates: payload.ocr_max_visual_candidates,
+    formula_recognition_concurrency: payload.formula_recognition_concurrency,
+    formula_visual_ocr_concurrency: payload.formula_visual_ocr_concurrency,
     render_defaults: renderDefaults
   };
 }
