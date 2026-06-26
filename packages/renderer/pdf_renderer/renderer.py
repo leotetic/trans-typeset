@@ -105,8 +105,10 @@ async def render_preview_with_browser_layout(
     render_document: RenderDocument | None = None
     html = ""
     page_diagnostics: dict[str, Any] | None = None
+    final_rebuild_needed = False
 
     for iteration in range(1, max(1, max_iterations) + 1):
+        final_rebuild_needed = False
         render_document = RenderDocument.from_ir_and_plans(
             document,
             plans,
@@ -175,28 +177,30 @@ async def render_preview_with_browser_layout(
                 changed = True
         if not changed:
             break
+        final_rebuild_needed = True
 
-    if render_document is None:
+    if render_document is None or final_rebuild_needed:
         render_document = RenderDocument.from_ir_and_plans(
             document,
             plans,
             target_lang,
             render_defaults=render_defaults,
             layout_intent_plan=layout_intent_plan,
+            measured_min_heights=measured_min_heights,
             measured_preferred_heights=measured_preferred_heights,
             forced_full_width_block_ids=forced_full_width_block_ids,
         )
         html = render_to_html(render_document)
     diagnostics = render_document.diagnostics()
-    return (
-        html,
-        render_document,
-        _merge_browser_diagnostics(
-            diagnostics,
-            page_diagnostics=page_diagnostics,
-            layout_iterations=layout_iterations,
-        ),
+    merged_diagnostics = _merge_browser_diagnostics(
+        diagnostics,
+        page_diagnostics=page_diagnostics,
+        layout_iterations=layout_iterations,
     )
+    if final_rebuild_needed:
+        merged_diagnostics["browser_layout_final_rebuild_applied"] = True
+        merged_diagnostics["browser_layout_final_rebuild_measured"] = False
+    return html, render_document, merged_diagnostics
 
 
 async def render_to_pdf(
@@ -205,6 +209,7 @@ async def render_to_pdf(
     *,
     diagnostics_path: Path | None = None,
     asset_base_path: Path | None = None,
+    source_pdf_path: Path | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     started_at = time.monotonic()
@@ -253,11 +258,31 @@ async def render_to_pdf(
             diagnostics["browser_validation"] = _browser_validation_from_page(
                 diagnostics["page"]
             )
+            replay_placements = (
+                await _collect_formula_replay_placements(page)
+                if source_pdf_path is not None
+                else []
+            )
+            diagnostics["formula_direct_replay"] = {
+                "status": "not_requested" if source_pdf_path is None else "pending",
+                "candidate_count": len(replay_placements),
+                "source_pdf_path": str(source_pdf_path) if source_pdf_path is not None else None,
+            }
             await page.pdf(
                 path=str(output_path),
                 print_background=True,
                 prefer_css_page_size=True,
             )
+            if source_pdf_path is not None and replay_placements:
+                diagnostics["formula_direct_replay"].update(
+                    _overlay_formula_source_clips(
+                        output_path,
+                        source_pdf_path,
+                        replay_placements,
+                    )
+                )
+            elif source_pdf_path is not None:
+                diagnostics["formula_direct_replay"]["status"] = "no_candidates"
             diagnostics["status"] = "completed"
             diagnostics["console_messages"] = console_messages[:25]
             diagnostics["failed_requests"] = failed_requests[:50]
@@ -351,6 +376,7 @@ def _merge_browser_diagnostics(
         diagnostics["block_visual_slacks"] = []
         diagnostics["browser_figure_group_issue_count"] = 0
         diagnostics["browser_figure_group_issues"] = []
+        diagnostics["browser_formula_diagnostics"] = {}
         return diagnostics
 
     page_diagnostics = page_diagnostics or {}
@@ -361,6 +387,9 @@ def _merge_browser_diagnostics(
     figure_group_issues = page_diagnostics.get("figure_group_issues")
     if not isinstance(figure_group_issues, list):
         figure_group_issues = []
+    formula_diagnostics = page_diagnostics.get("formula_diagnostics")
+    if not isinstance(formula_diagnostics, dict):
+        formula_diagnostics = {}
     if overflows:
         quality_counts["browser_overflow"] = quality_counts.get("browser_overflow", 0) + len(
             overflows
@@ -378,17 +407,32 @@ def _merge_browser_diagnostics(
     diagnostics["block_visual_slacks"] = visual_slacks
     diagnostics["browser_figure_group_issue_count"] = len(figure_group_issues)
     diagnostics["browser_figure_group_issues"] = figure_group_issues
+    diagnostics["browser_formula_diagnostics"] = formula_diagnostics
     return diagnostics
 
 
 def _browser_validation_from_page(page_diagnostics: dict[str, Any]) -> dict[str, Any]:
     block_count = int(page_diagnostics.get("block_overflow_count") or 0)
     figure_count = int(page_diagnostics.get("figure_group_issue_count") or 0)
-    status = "passed" if block_count == 0 and figure_count == 0 else "failed"
+    formula_diagnostics = page_diagnostics.get("formula_diagnostics")
+    if not isinstance(formula_diagnostics, dict):
+        formula_diagnostics = {}
+    formula_issue_count = (
+        int(formula_diagnostics.get("unresolved_count") or 0)
+        + int(formula_diagnostics.get("raw_tex_unrendered_count") or 0)
+        + int(formula_diagnostics.get("browser_katex_failed_count") or 0)
+        + int(formula_diagnostics.get("katex_error_count") or 0)
+    )
+    status = (
+        "passed"
+        if block_count == 0 and figure_count == 0 and formula_issue_count == 0
+        else "failed"
+    )
     return {
         "status": status,
         "block_overflow_count": block_count,
         "figure_group_issue_count": figure_count,
+        "formula_issue_count": formula_issue_count,
     }
 
 
@@ -789,6 +833,71 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
               }
               return issues;
             });
+          const formulaNodes = [...document.querySelectorAll('.formula')];
+          const formulaDiagnostics = {
+            node_count: formulaNodes.length,
+            katex_rendered_count: formulaNodes.filter(
+              (node) => node.querySelector('.katex, .katex-display')
+            ).length,
+            katex_error_count: formulaNodes.filter(
+              (node) => node.querySelector('.katex-error')
+            ).length,
+            image_fallback_count: formulaNodes.filter(
+              (node) => node.querySelector('.formula-image-fallback')
+            ).length,
+            pdf_formula_replay_count: formulaNodes.filter(
+              (node) => node.querySelector('.formula-pdf-primitive-replay')
+            ).length,
+            source_clip_replay_count: formulaNodes.filter(
+              (node) => node.querySelector('.formula-pdf-source-clip-replay')
+            ).length,
+            plaintext_fallback_count: formulaNodes.filter(
+              (node) => node.querySelector('.formula-plaintext-fallback')
+            ).length,
+            unresolved_count: formulaNodes.filter(
+              (node) => node.hasAttribute('data-unresolved-formula-id')
+            ).length,
+            raw_tex_count: formulaNodes.filter(
+              (node) => node.hasAttribute('data-raw-tex')
+            ).length,
+            raw_tex_unrendered_count: formulaNodes.filter(
+              (node) => node.getAttribute('data-raw-tex-status') === 'unrendered'
+            ).length,
+            browser_katex_rendered_count: formulaNodes.filter(
+              (node) => node.getAttribute('data-browser-katex-status') === 'rendered'
+            ).length,
+            browser_katex_failed_count: formulaNodes.filter(
+              (node) => node.getAttribute('data-browser-katex-status') === 'failed'
+            ).length,
+            unresolved_formula_ids: formulaNodes
+              .map((node) => node.getAttribute('data-unresolved-formula-id'))
+              .filter(Boolean),
+            raw_tex_nodes: formulaNodes
+              .filter((node) => node.hasAttribute('data-raw-tex'))
+              .map((node) => ({
+                raw: node.getAttribute('data-raw-tex'),
+                latex: node.getAttribute('data-latex'),
+                status: node.getAttribute('data-raw-tex-status'),
+                browser_katex_status: node.getAttribute('data-browser-katex-status')
+              })),
+            image_fallbacks: formulaNodes
+              .filter((node) => node.querySelector('.formula-image-fallback'))
+              .map((node) => {
+                const fallback = node.querySelector('.formula-image-fallback');
+                const img = fallback ? fallback.querySelector('img') : null;
+                return {
+                  formula_id: node.getAttribute('data-formula-id') ||
+                    (fallback && fallback.getAttribute('data-fallback-formula-id')),
+                  latex: node.getAttribute('data-latex') ||
+                    (fallback && fallback.getAttribute('data-latex')),
+                  display: node.getAttribute('data-display') ||
+                    (fallback && fallback.getAttribute('data-display')),
+                  complete: img ? img.complete : null,
+                  natural_width: img ? img.naturalWidth : null,
+                  natural_height: img ? img.naturalHeight : null
+                };
+              })
+          };
           return {
             pages: pages.length,
             blocks: blocks.length,
@@ -809,10 +918,166 @@ async def _collect_page_diagnostics(page: Any) -> dict[str, Any]:
             block_visual_slacks: blockVisualSlacks,
             block_visual_slack_count: blockVisualSlacks.length,
             figure_group_issues: figureGroupIssues,
-            figure_group_issue_count: figureGroupIssues.length
+            figure_group_issue_count: figureGroupIssues.length,
+            formula_diagnostics: formulaDiagnostics
           };
         }"""
     )
+
+
+async def _collect_formula_replay_placements(page: Any) -> list[dict[str, Any]]:
+    placements = await page.evaluate(
+        """() => {
+          return [...document.querySelectorAll('.formula[data-pdf-formula="true"]')]
+            .map((node) => {
+              const pageNode = node.closest('.page');
+              if (!pageNode) {
+                return null;
+              }
+              const sourcePageIndex = node.getAttribute('data-pdf-formula-source-page-index');
+              const sourceBbox = node.getAttribute('data-pdf-formula-source-bbox');
+              if (sourcePageIndex === null || !sourceBbox) {
+                return null;
+              }
+              const replayNode =
+                node.querySelector('.formula-pdf-source-clip-replay') ||
+                node.querySelector('.formula-pdf-primitive-replay') ||
+                node.querySelector('.formula-image-fallback') ||
+                node;
+              const rect = replayNode.getBoundingClientRect();
+              const pageRect = pageNode.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) {
+                return null;
+              }
+              return {
+                formula_id: node.getAttribute('data-formula-id'),
+                target_page_index: Number.parseInt(pageNode.getAttribute('data-page-index') || '0', 10),
+                source_page_index: Number.parseInt(sourcePageIndex, 10),
+                source_bbox: sourceBbox,
+                x_px: rect.left - pageRect.left,
+                y_px: rect.top - pageRect.top,
+                width_px: rect.width,
+                height_px: rect.height
+              };
+            })
+            .filter(Boolean);
+        }"""
+    )
+    return placements if isinstance(placements, list) else []
+
+
+def _overlay_formula_source_clips(
+    output_path: Path,
+    source_pdf_path: Path,
+    placements: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not output_path.exists() or not source_pdf_path.exists():
+        return {
+            "status": "failed",
+            "error": "output or source PDF is missing",
+            "succeeded_count": 0,
+            "failed_count": len(placements),
+        }
+    try:
+        import fitz
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error": f"PyMuPDF unavailable: {exc}",
+            "succeeded_count": 0,
+            "failed_count": len(placements),
+        }
+
+    target_doc = None
+    source_doc = None
+    succeeded = 0
+    failures: list[dict[str, Any]] = []
+    temp_path = output_path.with_name(f"{output_path.stem}.formula-replay.tmp.pdf")
+    try:
+        target_doc = fitz.open(output_path)
+        source_doc = fitz.open(source_pdf_path)
+        for placement in placements:
+            try:
+                target_index = int(placement.get("target_page_index", 0))
+                source_index = int(placement.get("source_page_index", 0))
+                if target_index < 0 or target_index >= len(target_doc):
+                    raise ValueError("target page index out of range")
+                if source_index < 0 or source_index >= len(source_doc):
+                    raise ValueError("source page index out of range")
+                source_bbox = _parse_bbox_csv(str(placement.get("source_bbox", "")))
+                if source_bbox is None:
+                    raise ValueError("source bbox is malformed")
+                x0 = float(placement.get("x_px", 0) or 0) * _PT_PER_CSS_PX
+                y0 = float(placement.get("y_px", 0) or 0) * _PT_PER_CSS_PX
+                width = float(placement.get("width_px", 0) or 0) * _PT_PER_CSS_PX
+                height = float(placement.get("height_px", 0) or 0) * _PT_PER_CSS_PX
+                if width <= 0 or height <= 0:
+                    raise ValueError("target rect is empty")
+                target_rect = fitz.Rect(x0, y0, x0 + width, y0 + height)
+                source_rect = fitz.Rect(*source_bbox)
+                pixmap = source_doc[source_index].get_pixmap(
+                    matrix=fitz.Matrix(4, 4),
+                    clip=source_rect,
+                    alpha=True,
+                )
+                target_doc[target_index].insert_image(
+                    target_rect,
+                    stream=pixmap.tobytes("png"),
+                    keep_proportion=True,
+                    overlay=True,
+                )
+                succeeded += 1
+            except Exception as exc:
+                failures.append(
+                    {
+                        "formula_id": placement.get("formula_id"),
+                        "error": str(exc)[:200],
+                    }
+                )
+        if succeeded:
+            target_doc.save(temp_path, garbage=4, deflate=True)
+            target_doc.close()
+            source_doc.close()
+            target_doc = None
+            source_doc = None
+            temp_path.replace(output_path)
+        return {
+            "status": "completed" if not failures else "partial",
+            "succeeded_count": succeeded,
+            "failed_count": len(failures),
+            "failures": failures[:25],
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error": str(exc)[:300],
+            "succeeded_count": succeeded,
+            "failed_count": len(placements) - succeeded,
+            "failures": failures[:25],
+        }
+    finally:
+        if target_doc is not None:
+            target_doc.close()
+        if source_doc is not None:
+            source_doc.close()
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _parse_bbox_csv(value: str) -> tuple[float, float, float, float] | None:
+    try:
+        parts = [float(part.strip()) for part in value.split(",")]
+    except ValueError:
+        return None
+    if len(parts) != 4:
+        return None
+    x0, y0, x1, y1 = parts
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1, y1
 
 
 def _friendly_playwright_error(exc: Exception) -> str:

@@ -20,6 +20,7 @@ from pdf_translator_schema.models import (
     BoundingBox,
     DocumentBlock,
     Formula,
+    FormulaReplayDefaults,
     PageSize,
     RenderDefaults,
     RoleStyleDefaults,
@@ -58,7 +59,11 @@ _FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
 _FORMULA_RENDER_MATH_SIGNAL_PATTERN = re.compile(
     r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|"
     r"alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|"
-    r"phi|omega|Delta|Omega|cdot|times)|\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*"
+    r"xi|eta|phi|omega|varepsilon|varphi|Delta|Omega|Gamma|Lambda|Phi|"
+    r"Sigma|Xi|Pi|le|leq|ge|geq|ne|neq|approx|sim|equiv|infty|to|"
+    r"rightarrow|leftarrow|mapsto|pm|mp|cdot|times|div|prod|lim|forall|"
+    r"exists|in|notin|subset|supset|subseteq|supseteq|cup|cap|mathbb|"
+    r"mathbf|mathrm|operatorname)|\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*"
     r"[A-Za-z0-9α-ωΑ-Ω])"
 )
 _KATEX_STRUT_STYLE_PATTERN = re.compile(
@@ -248,6 +253,32 @@ _MALFORMED_FORMULA_REF_PATTERN = re.compile(r"(?<!\{)\{formula:([A-Za-z0-9_.:-]+
 # e.g. "... (12)", "...（3.4）", "... (2a)". GB/T numbering must not duplicate it.
 _SOURCE_EQUATION_NUMBER_PATTERN = re.compile(r"[（(]\s*[A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?\s*[)）]\s*$")
 _UNRESOLVED_FORMULA_ID_ATTR_PATTERN = re.compile(r'data-unresolved-formula-id="([^"]*)"')
+_RAW_TEX_NODE_ATTR_PATTERN = re.compile(
+    r'<span\b[^>]*\bdata-raw-tex="(?P<raw>[^"]*)"[^>]*'
+    r'\bdata-raw-tex-status="(?P<status>[^"]*)"[^>]*'
+    r'\bdata-latex="(?P<latex>[^"]*)"[^>]*>',
+    re.IGNORECASE,
+)
+_RAW_TEX_DISPLAY_DOLLAR_PATTERN = re.compile(
+    r"(?<!\\)\$\$(?P<latex>[\s\S]{1,1600}?)(?<!\\)\$\$"
+)
+_RAW_TEX_DOLLAR_PATTERN = re.compile(r"(?<!\\)\$(?P<latex>[^$\n]{1,300})(?<!\\)\$")
+_RAW_TEX_PAREN_PATTERN = re.compile(r"\\\((?P<latex>[\s\S]{1,500}?)\\\)")
+_RAW_TEX_BRACKET_PATTERN = re.compile(r"\\\[(?P<latex>[\s\S]{1,800}?)\\\]")
+_RAW_TEX_COMMAND_SPAN_PATTERN = re.compile(
+    r"(?P<latex>(?:[+\-−=<>≤≥]\s*)?\\(?:"
+    r"mathbb|mathbf|mathrm|operatorname|partial|nabla|frac|sqrt|sum|int|prod|lim|"
+    r"alpha|beta|gamma|delta|epsilon|varepsilon|theta|lambda|mu|nu|xi|eta|pi|"
+    r"rho|sigma|phi|varphi|omega|Delta|Omega|Gamma|Lambda|Phi|Sigma|Xi|Pi|"
+    r"le|leq|ge|geq|ne|neq|approx|sim|equiv|infty|to|rightarrow|leftarrow|"
+    r"mapsto|pm|mp|cdot|times|div|forall|exists|in|notin|subset|supset|"
+    r"subseteq|supseteq|cup|cap"
+    r")\b(?:\s*(?:\\[A-Za-z]+|[A-Za-z0-9α-ωΑ-Ω{}_^+\-*/=<>≤≥,.:;()\[\]−])){0,120})"
+)
+_RAW_TEX_GREEK_COMMAND_JOIN_PATTERN = re.compile(
+    r"\\(alpha|beta|gamma|delta|epsilon|varepsilon|theta|lambda|mu|nu|xi|eta|pi|"
+    r"rho|sigma|phi|varphi|omega)(?=[A-Z])"
+)
 
 
 @dataclass(frozen=True)
@@ -261,16 +292,76 @@ def _formula_ir_html_for_text(
     document: DocumentIR,
     *,
     role: BlockRole,
+    render_defaults: RenderDefaults | None = None,
 ) -> tuple[str | None, list[str]]:
     formulas = document.formulas_by_id()
     text, repair_count = _repair_malformed_formula_refs(text, set(formulas))
-    if not _FORMULA_REF_PATTERN.search(text):
+    raw_spans = _raw_tex_spans(
+        text,
+        display_default=role == BlockRole.FORMULA,
+        formulas=formulas,
+    )
+    if not _FORMULA_REF_PATTERN.search(text) and not raw_spans:
         return None, []
     flags: list[str] = ["formula_placeholder_syntax_repaired"] if repair_count else []
+    if raw_spans:
+        parts: list[str] = []
+        cursor = 0
+        for span in raw_spans:
+            segment_html, segment_flags = _formula_refs_html_for_segment(
+                text[cursor : span.start],
+                document,
+                formulas,
+                role=role,
+                render_defaults=render_defaults,
+            )
+            parts.append(segment_html)
+            flags.extend(segment_flags)
+            span_html, span_flags = _raw_tex_span_html(span, formulas=formulas)
+            parts.append(span_html)
+            flags.extend(span_flags)
+            cursor = span.end
+        segment_html, segment_flags = _formula_refs_html_for_segment(
+            text[cursor:],
+            document,
+            formulas,
+            role=role,
+            render_defaults=render_defaults,
+        )
+        parts.append(segment_html)
+        flags.extend(segment_flags)
+        return "".join(parts), _unique_flags(flags)
+    html, formula_flags = _formula_refs_html_for_segment(
+        text,
+        document,
+        formulas,
+        role=role,
+        render_defaults=render_defaults,
+    )
+    flags.extend(formula_flags)
+    return html, _unique_flags(flags)
+
+
+def _formula_refs_html_for_segment(
+    text: str,
+    document: DocumentIR,
+    formulas: dict[str, Any],
+    *,
+    role: BlockRole,
+    render_defaults: RenderDefaults | None = None,
+) -> tuple[str, list[str]]:
+    if not text:
+        return "", []
+    flags: list[str] = []
+    if not _FORMULA_REF_PATTERN.search(text):
+        return _non_formula_segment_html(text, role=role)
     parts: list[str] = []
     last_index = 0
     for match in _FORMULA_REF_PATTERN.finditer(text):
-        raw_html, raw_flags = _non_formula_text_html(text[last_index : match.start()])
+        raw_html, raw_flags = _non_formula_segment_html(
+            text[last_index : match.start()],
+            role=role,
+        )
         parts.append(raw_html)
         flags.extend(raw_flags)
         formula_id = match.group(1)
@@ -285,55 +376,16 @@ def _formula_ir_html_for_text(
             flags.append("unresolved_formula_placeholder")
         else:
             display = formula.display_mode == "display" or role == BlockRole.FORMULA
-            rendered = None
-            latex = formula.latex
-            if display:
-                latex, _tag_number = _strip_latex_equation_tag(latex)
-            validation = _validate_formula_latex(
-                latex,
-                source_text=formula.source_text,
+            formula_html, formula_flags = _formula_token_html(
+                formula,
+                document=document,
                 display=display,
+                render_defaults=render_defaults,
             )
-            force_image_fallback = display and bool(
-                set(getattr(formula, "quality_flags", [])) & _FORMULA_CORRUPTION_FALLBACK_FLAGS
-                and validation.fallback_reason == "formula_asset_image"
-            )
-            if (
-                not force_image_fallback
-                and validation.accepted
-                and latex.strip()
-                and _latex_looks_renderable(latex)
-            ):
-                rendered = _katex_html(latex, display=display)
-            if rendered is None:
-                fallback, fallback_flags = _formula_fallback_html(
-                    formula,
-                    document,
-                    fallback_reason="formula_asset_image"
-                    if force_image_fallback
-                    else validation.fallback_reason,
-                )
-                parts.append(
-                    _formula_ir_span(
-                        formula,
-                        fallback,
-                        display=display,
-                        include_latex=not _uses_formula_image_fallback(fallback_flags),
-                        latex_override=latex,
-                    )
-                )
-                flags.extend(fallback_flags)
-            else:
-                parts.append(
-                    _formula_ir_span(
-                        formula,
-                        rendered,
-                        display=display,
-                        latex_override=latex,
-                    )
-                )
+            parts.append(formula_html)
+            flags.extend(formula_flags)
         last_index = match.end()
-    raw_html, raw_flags = _non_formula_text_html(text[last_index:])
+    raw_html, raw_flags = _non_formula_segment_html(text[last_index:], role=role)
     parts.append(raw_html)
     flags.extend(raw_flags)
     return "".join(parts), _unique_flags(flags)
@@ -363,19 +415,465 @@ def _formula_ir_span(
     display: bool,
     include_latex: bool = True,
     latex_override: str | None = None,
+    extra_attrs: dict[str, str] | None = None,
 ) -> str:
     css_kind = "display" if display else "inline"
     latex = latex_override if latex_override is not None else getattr(formula, "latex", "")
     latex = latex or getattr(formula, "source_text", "")
     formula_id = getattr(formula, "formula_id", "")
     latex_attr = f' data-latex="{escape(latex, quote=True)}"' if include_latex else ""
+    extra_attr_text = ""
+    if extra_attrs:
+        extra_attr_text = "".join(
+            f' {escape(str(name), quote=True)}="{escape(str(value), quote=True)}"'
+            for name, value in extra_attrs.items()
+            if value is not None
+        )
     return (
         f'<span class="formula formula-{css_kind} formula-ir" '
         f'data-formula-id="{escape(formula_id, quote=True)}" '
         f'data-display="{"true" if display else "false"}"'
-        f"{latex_attr}>"
+        f"{latex_attr}{extra_attr_text}>"
         f"{inner_html}</span>"
     )
+
+
+def _formula_display_mode(formula: Any, *, role: BlockRole) -> bool:
+    return (
+        str(getattr(formula, "display_mode", "")) == "display"
+        or str(getattr(formula, "kind", "")) == "display"
+        or role == BlockRole.FORMULA
+    )
+
+
+def _formula_token_html(
+    formula: Any,
+    *,
+    document: DocumentIR,
+    display: bool,
+    render_defaults: RenderDefaults | None = None,
+) -> tuple[str, list[str]]:
+    source_asset_primary = _formula_has_source_asset_primary(formula, document)
+    if source_asset_primary and display:
+        fallback, fallback_flags = _formula_fallback_html(
+            formula,
+            document,
+            fallback_reason="formula_asset_image",
+            allow_latex_retry=False,
+            display=display,
+            render_defaults=render_defaults,
+        )
+        return (
+            _formula_ir_span(
+                formula,
+                fallback,
+                display=display,
+                include_latex=False,
+            ),
+            fallback_flags,
+        )
+
+    pdf_formula_html, pdf_formula_flags = _pdf_formula_replay_html(
+        formula,
+        document,
+        display=display,
+        render_defaults=render_defaults,
+    )
+    if pdf_formula_html is not None:
+        return (
+            _formula_ir_span(
+                formula,
+                pdf_formula_html,
+                display=display,
+                include_latex=False,
+                extra_attrs=_pdf_formula_replay_attrs(formula),
+            ),
+            pdf_formula_flags,
+        )
+
+    if source_asset_primary:
+        fallback, fallback_flags = _formula_fallback_html(
+            formula,
+            document,
+            fallback_reason="formula_asset_image",
+            allow_latex_retry=not _formula_source_replay_suppresses_latex_retry(formula),
+            display=display,
+            render_defaults=render_defaults,
+        )
+        return (
+            _formula_ir_span(
+                formula,
+                fallback,
+                display=display,
+                include_latex=False,
+                extra_attrs=_pdf_formula_replay_attrs(formula),
+            ),
+            fallback_flags,
+        )
+
+    rendered = None
+    latex = getattr(formula, "latex", "")
+    if display:
+        latex, _tag_number = _strip_latex_equation_tag(latex)
+    validation = _validate_formula_latex(
+        latex,
+        source_text=getattr(formula, "source_text", ""),
+        display=display,
+    )
+    force_image_fallback = display and bool(
+        set(getattr(formula, "quality_flags", []))
+        & _FORMULA_CORRUPTION_FALLBACK_FLAGS
+        and validation.fallback_reason == "formula_asset_image"
+    )
+    if (
+        not force_image_fallback
+        and validation.accepted
+        and latex.strip()
+        and _latex_looks_renderable(latex)
+    ):
+        rendered = _katex_html(latex, display=display)
+
+    if rendered is None:
+        fallback, fallback_flags = _formula_fallback_html(
+            formula,
+            document,
+            fallback_reason="formula_asset_image"
+            if source_asset_primary or force_image_fallback
+            else validation.fallback_reason,
+            display=display,
+            render_defaults=render_defaults,
+        )
+        return (
+            _formula_ir_span(
+                formula,
+                fallback,
+                display=display,
+                include_latex=_should_include_formula_latex_for_browser_retry(
+                    latex,
+                    fallback_flags,
+                ),
+                latex_override=latex,
+                extra_attrs=_pdf_formula_replay_attrs(formula),
+            ),
+            fallback_flags,
+        )
+
+    return (
+        _formula_ir_span(
+            formula,
+            rendered,
+            display=display,
+            latex_override=latex,
+            extra_attrs=_pdf_formula_replay_attrs(formula),
+        ),
+        [],
+    )
+
+
+def _pdf_formula_replay_html(
+    formula: Any,
+    document: DocumentIR,
+    *,
+    display: bool,
+    render_defaults: RenderDefaults | None = None,
+) -> tuple[str | None, list[str]]:
+    pdf_formula = getattr(formula, "pdf_formula", None)
+    replay_kind = str(getattr(pdf_formula, "replay_kind", "primitives") or "primitives")
+    if replay_kind == "source_clip":
+        width = float(getattr(pdf_formula, "width_pt", 0) or 0)
+        height = float(getattr(pdf_formula, "height_pt", 0) or 0)
+        if width <= 0 or height <= 0:
+            source_bbox = getattr(pdf_formula, "source_bbox", None)
+            if source_bbox is not None:
+                width = float(getattr(source_bbox, "x1", 0) or 0) - float(getattr(source_bbox, "x0", 0) or 0)
+                height = float(getattr(source_bbox, "y1", 0) or 0) - float(getattr(source_bbox, "y0", 0) or 0)
+        if width <= 0 or height <= 0:
+            return None, ["formula_source_clip_invalid_bounds"]
+        slot_width, slot_height, slot_flags = _formula_replay_slot_size(
+            document,
+            width_pt=width,
+            height_pt=height,
+            display=display,
+            render_defaults=render_defaults,
+            preserve_display_source=True,
+        )
+        latex = (getattr(formula, "latex", "") or getattr(formula, "source_text", "") or "").strip()
+        preview_html = _katex_html(latex, display=display) if latex else None
+        if preview_html is None:
+            preview_html = _formula_plaintext_fallback_html(
+                _formula_plaintext_fallback_text(
+                    latex,
+                    formula_id=getattr(formula, "formula_id", ""),
+                )
+            )
+        css_kind = "display" if display else "inline"
+        return (
+            (
+                f'<span class="formula-pdf-source-clip-replay '
+                f'formula-pdf-source-clip-{css_kind}" '
+                f'style="width:{_fmt_pt(slot_width)}pt;height:{_fmt_pt(slot_height)}pt">'
+                f"{preview_html}</span>"
+            ),
+            ["formula_source_clip_replay", "formula_source_clip_primary", *slot_flags],
+        )
+    primitives = list(getattr(pdf_formula, "primitives", []) or []) if pdf_formula is not None else []
+    if not primitives:
+        return None, []
+    width = float(getattr(pdf_formula, "width_pt", 0) or 0)
+    height = float(getattr(pdf_formula, "height_pt", 0) or 0)
+    if width <= 0 or height <= 0:
+        width, height = _pdf_formula_bounds(primitives)
+    if width <= 0 or height <= 0:
+        return None, ["formula_pdf_primitive_invalid_bounds"]
+    primitive_html = []
+    for primitive in primitives:
+        kind = getattr(primitive, "kind", "")
+        if kind == "glyph":
+            glyph = _pdf_formula_glyph_svg(primitive)
+            if glyph:
+                primitive_html.append(glyph)
+        elif kind == "line":
+            line = _pdf_formula_line_svg(primitive)
+            if line:
+                primitive_html.append(line)
+    if not primitive_html:
+        return None, ["formula_pdf_primitive_empty"]
+    css_kind = "display" if display else "inline"
+    slot_width, slot_height, slot_flags = _formula_replay_slot_size(
+        document,
+        width_pt=width,
+        height_pt=height,
+        display=display,
+        render_defaults=render_defaults,
+        preserve_display_source=True,
+    )
+    replay_style = (
+        f' style="width:{_fmt_pt(slot_width)}pt;height:{_fmt_pt(slot_height)}pt"'
+        if slot_height > 0
+        else ""
+    )
+    return (
+        (
+            f'<span class="formula-pdf-primitive-replay formula-pdf-primitive-{css_kind}"'
+            f"{replay_style}>"
+            f'<svg class="formula-pdf-primitive-svg" '
+            f'viewBox="0 0 {_fmt_pt(width)} {_fmt_pt(height)}" '
+            f'width="{_fmt_pt(width)}pt" height="{_fmt_pt(height)}pt" '
+            f'role="img" aria-label="{escape(_formula_pdf_label(formula), quote=True)}">'
+            f'{"".join(primitive_html)}</svg></span>'
+        ),
+        ["formula_pdf_primitive_replay", "formula_pdf_primitive_primary", *slot_flags],
+    )
+
+
+def _formula_replay_slot_size(
+    document: DocumentIR,
+    *,
+    width_pt: float,
+    height_pt: float,
+    display: bool,
+    render_defaults: RenderDefaults | None,
+    preserve_display_source: bool = False,
+) -> tuple[float, float, list[str]]:
+    replay = (
+        render_defaults.formula_replay
+        if render_defaults is not None
+        else _SCHEMA_RENDER_DEFAULTS.formula_replay
+    )
+    if display and (
+        replay.display_slot_policy == "source"
+        or (preserve_display_source and replay.display_slot_height_pt is None)
+    ):
+        return width_pt, height_pt, []
+    slot_height = (
+        _article_display_formula_slot_height(document, replay)
+        if display
+        else replay.inline_slot_height_pt
+    )
+    if slot_height <= 0 or height_pt <= 0:
+        return width_pt, height_pt, []
+    scale = slot_height / height_pt
+    flags: list[str] = []
+    if display and abs(slot_height - height_pt) > _LAYOUT_EPSILON_PT:
+        flags.append("formula_replay_article_uniform_height")
+    return max(1.0, width_pt * scale), slot_height, flags
+
+
+def _article_display_formula_slot_height(
+    document: DocumentIR,
+    replay: FormulaReplayDefaults,
+) -> float:
+    if replay.display_slot_height_pt is not None:
+        return _clamp(
+            replay.display_slot_height_pt,
+            replay.min_display_slot_height_pt,
+            replay.max_display_slot_height_pt,
+        )
+    heights = sorted(
+        height
+        for formula in document.formulas
+        if formula.display_mode == "display"
+        for height in [_pdf_formula_height(getattr(formula, "pdf_formula", None))]
+        if height > 0
+    )
+    if heights:
+        midpoint = len(heights) // 2
+        if len(heights) % 2:
+            estimated = heights[midpoint]
+        else:
+            estimated = (heights[midpoint - 1] + heights[midpoint]) / 2.0
+    else:
+        estimated = replay.font_size_pt * 2.2
+    return _clamp(
+        estimated,
+        replay.min_display_slot_height_pt,
+        replay.max_display_slot_height_pt,
+    )
+
+
+def _default_display_formula_slot_height(replay: FormulaReplayDefaults) -> float:
+    return _clamp(
+        replay.font_size_pt * 2.2,
+        replay.min_display_slot_height_pt,
+        replay.max_display_slot_height_pt,
+    )
+
+
+def _pdf_formula_height(pdf_formula: Any) -> float:
+    if pdf_formula is None:
+        return 0.0
+    height = float(getattr(pdf_formula, "height_pt", 0) or 0)
+    if height > 0:
+        return height
+    source_bbox = getattr(pdf_formula, "source_bbox", None)
+    if source_bbox is None:
+        return 0.0
+    return max(
+        0.0,
+        float(getattr(source_bbox, "y1", 0) or 0)
+        - float(getattr(source_bbox, "y0", 0) or 0),
+    )
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return min(max(value, minimum), maximum)
+
+
+def _pdf_formula_glyph_svg(primitive: Any) -> str:
+    text = str(getattr(primitive, "text", "") or "")
+    bbox = getattr(primitive, "bbox", None)
+    if not text or bbox is None:
+        return ""
+    origin = getattr(primitive, "origin", None)
+    if origin and len(origin) >= 2:
+        x = float(origin[0])
+        y = float(origin[1])
+    else:
+        x = float(getattr(bbox, "x0", 0) or 0)
+        y = float(getattr(bbox, "y1", 0) or 0)
+    font_size = float(
+        getattr(primitive, "font_size_pt", None)
+        or max(1.0, float(getattr(bbox, "y1", 0) or 0) - float(getattr(bbox, "y0", 0) or 0))
+    )
+    font_name = str(getattr(primitive, "font_name", "") or "Times New Roman")
+    color = _safe_svg_color(getattr(primitive, "color", None))
+    return (
+        f'<text x="{_fmt_pt(x)}" y="{_fmt_pt(y)}" '
+        f'font-family="{escape(font_name, quote=True)}" '
+        f'font-size="{_fmt_pt(font_size)}" fill="{color}">'
+        f"{escape(text)}</text>"
+    )
+
+
+def _pdf_formula_line_svg(primitive: Any) -> str:
+    points = list(getattr(primitive, "points", []) or [])
+    bbox = getattr(primitive, "bbox", None)
+    if len(points) >= 2:
+        x1, y1 = points[0]
+        x2, y2 = points[1]
+    elif bbox is not None:
+        x0 = float(getattr(bbox, "x0", 0) or 0)
+        y0 = float(getattr(bbox, "y0", 0) or 0)
+        x1_bbox = float(getattr(bbox, "x1", 0) or 0)
+        y1_bbox = float(getattr(bbox, "y1", 0) or 0)
+        if (x1_bbox - x0) >= (y1_bbox - y0):
+            x1, y1 = x0, (y0 + y1_bbox) / 2
+            x2, y2 = x1_bbox, (y0 + y1_bbox) / 2
+        else:
+            x1, y1 = (x0 + x1_bbox) / 2, y0
+            x2, y2 = (x0 + x1_bbox) / 2, y1_bbox
+    else:
+        return ""
+    stroke_width = max(0.1, float(getattr(primitive, "stroke_width_pt", 0.5) or 0.5))
+    color = _safe_svg_color(getattr(primitive, "color", None))
+    return (
+        f'<line x1="{_fmt_pt(float(x1))}" y1="{_fmt_pt(float(y1))}" '
+        f'x2="{_fmt_pt(float(x2))}" y2="{_fmt_pt(float(y2))}" '
+        f'stroke="{color}" stroke-width="{_fmt_pt(stroke_width)}" '
+        f'stroke-linecap="round" />'
+    )
+
+
+def _pdf_formula_replay_attrs(formula: Any) -> dict[str, str]:
+    pdf_formula = getattr(formula, "pdf_formula", None)
+    if pdf_formula is None:
+        return {}
+    replay_kind = str(getattr(pdf_formula, "replay_kind", "primitives") or "primitives")
+    if replay_kind != "source_clip":
+        return {}
+    attrs: dict[str, str] = {
+        "data-pdf-formula": "true",
+        "data-pdf-formula-replay-kind": replay_kind,
+    }
+    source_page_index = getattr(pdf_formula, "source_page_index", None)
+    if source_page_index is not None:
+        attrs["data-pdf-formula-source-page-index"] = str(source_page_index)
+    source_bbox = getattr(pdf_formula, "source_bbox", None)
+    if source_bbox is not None:
+        attrs["data-pdf-formula-source-bbox"] = ",".join(
+            _fmt_pt(value)
+            for value in (
+                getattr(source_bbox, "x0", 0),
+                getattr(source_bbox, "y0", 0),
+                getattr(source_bbox, "x1", 0),
+                getattr(source_bbox, "y1", 0),
+            )
+        )
+    return attrs
+
+
+def _pdf_formula_bounds(primitives: list[Any]) -> tuple[float, float]:
+    x_values: list[float] = []
+    y_values: list[float] = []
+    for primitive in primitives:
+        bbox = getattr(primitive, "bbox", None)
+        if bbox is not None:
+            x_values.extend([float(getattr(bbox, "x0", 0) or 0), float(getattr(bbox, "x1", 0) or 0)])
+            y_values.extend([float(getattr(bbox, "y0", 0) or 0), float(getattr(bbox, "y1", 0) or 0)])
+        for point in getattr(primitive, "points", []) or []:
+            if len(point) >= 2:
+                x_values.append(float(point[0]))
+                y_values.append(float(point[1]))
+    if not x_values or not y_values:
+        return 0.0, 0.0
+    return max(x_values), max(y_values)
+
+
+def _formula_pdf_label(formula: Any) -> str:
+    return f"formula {getattr(formula, 'formula_id', '')}".strip()
+
+
+def _safe_svg_color(value: Any) -> str:
+    text = str(value or "#111111").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?", text):
+        return text
+    if re.fullmatch(r"rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)", text):
+        return escape(text, quote=True)
+    return "#111111"
+
+
+def _fmt_pt(value: float | int) -> str:
+    return f"{float(value):.3f}".rstrip("0").rstrip(".")
 
 
 def _formula_plaintext_fallback_text(
@@ -396,6 +894,17 @@ def _formula_plaintext_fallback_text(
 
 def _formula_plaintext_fallback_html(text: str) -> str:
     return f'<span class="formula-plaintext-fallback">{escape(text)}</span>'
+
+
+def _should_include_formula_latex_for_browser_retry(
+    latex: str,
+    fallback_flags: list[str],
+) -> bool:
+    if not latex.strip():
+        return False
+    if not _uses_formula_image_fallback(fallback_flags):
+        return True
+    return _latex_looks_renderable(latex)
 
 
 def _non_formula_text_html(text: str) -> tuple[str, list[str]]:
@@ -419,6 +928,183 @@ def _non_formula_text_html(text: str) -> tuple[str, list[str]]:
         changed = True
     parts.append(escape(text[cursor:]))
     return "".join(parts), ["text_script_marker_rendered"] if changed else []
+
+
+@dataclass(frozen=True)
+class _RawTexSpan:
+    start: int
+    end: int
+    raw: str
+    latex: str
+    display: bool
+
+
+def _raw_tex_html_for_text(
+    text: str,
+    *,
+    role: BlockRole,
+    formulas: dict[str, Any] | None = None,
+) -> tuple[str | None, list[str]]:
+    spans = _raw_tex_spans(
+        text,
+        display_default=role == BlockRole.FORMULA,
+        formulas=formulas,
+    )
+    if not spans:
+        return None, []
+    flags: list[str] = []
+    parts: list[str] = []
+    cursor = 0
+    for span in spans:
+        raw_html, raw_flags = _non_formula_text_html(text[cursor : span.start])
+        parts.append(raw_html)
+        flags.extend(raw_flags)
+        span_html, span_flags = _raw_tex_span_html(span, formulas=formulas)
+        parts.append(span_html)
+        flags.extend(span_flags)
+        cursor = span.end
+    raw_html, raw_flags = _non_formula_text_html(text[cursor:])
+    parts.append(raw_html)
+    flags.extend(raw_flags)
+    return "".join(parts), _unique_flags(flags)
+
+
+def _raw_tex_spans(
+    text: str,
+    *,
+    display_default: bool,
+    formulas: dict[str, Any] | None = None,
+) -> list[_RawTexSpan]:
+    spans: list[_RawTexSpan] = []
+
+    def add_span(start: int, end: int, raw: str, latex: str, display: bool) -> None:
+        if start >= end or not latex.strip():
+            return
+        if any(start < existing.end and end > existing.start for existing in spans):
+            return
+        resolved_latex = _resolve_formula_refs_in_latex(latex, formulas)
+        if not _raw_tex_candidate_looks_math(resolved_latex, delimited=raw != latex):
+            return
+        spans.append(
+            _RawTexSpan(
+                start=start,
+                end=end,
+                raw=raw,
+                latex=latex.strip(),
+                display=display,
+            )
+        )
+
+    for pattern, display in (
+        (_RAW_TEX_DISPLAY_DOLLAR_PATTERN, True),
+        (_RAW_TEX_BRACKET_PATTERN, True),
+        (_RAW_TEX_PAREN_PATTERN, False),
+        (_RAW_TEX_DOLLAR_PATTERN, False),
+    ):
+        for match in pattern.finditer(text):
+            add_span(
+                match.start(),
+                match.end(),
+                match.group(0),
+                match.group("latex"),
+                display or display_default,
+            )
+
+    for match in _RAW_TEX_COMMAND_SPAN_PATTERN.finditer(text):
+        add_span(
+            match.start(),
+            match.end(),
+            match.group("latex"),
+            match.group("latex"),
+            display_default,
+        )
+    return sorted(spans, key=lambda span: span.start)
+
+
+def _resolve_formula_refs_in_latex(
+    latex: str,
+    formulas: dict[str, Any] | None,
+) -> str:
+    if not formulas or not _FORMULA_REF_PATTERN.search(latex):
+        return latex
+
+    def replace(match: re.Match[str]) -> str:
+        formula = formulas.get(match.group(1))
+        if formula is None:
+            return match.group(0)
+        replacement = (getattr(formula, "latex", "") or getattr(formula, "source_text", "")).strip()
+        if getattr(formula, "display_mode", "") == "display":
+            replacement, _tag_number = _strip_latex_equation_tag(replacement)
+        return replacement or match.group(0)
+
+    return _FORMULA_REF_PATTERN.sub(replace, latex)
+
+
+def _raw_tex_candidate_looks_math(latex: str, *, delimited: bool) -> bool:
+    normalized = _normalized_text(latex)
+    if not normalized:
+        return False
+    if _FORMULA_REF_PATTERN.search(normalized) or _FORMULA_PLACEHOLDER_PATTERN.search(normalized):
+        return False
+    if "\\" in normalized:
+        return True
+    if delimited and _FORMULA_RENDER_MATH_SIGNAL_PATTERN.search(normalized):
+        return True
+    if delimited and re.search(r"\b[A-Za-z]\s*(?:[=≤≥<>]|\^|_)", normalized):
+        return True
+    return False
+
+
+def _raw_tex_span_html(
+    span: _RawTexSpan,
+    *,
+    formulas: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
+    resolved_latex = _resolve_formula_refs_in_latex(span.latex, formulas)
+    latex = _repair_raw_tex_latex(resolved_latex)
+    flags: list[str] = []
+    if latex != span.latex:
+        flags.append("raw_tex_repaired")
+    validation = _validate_formula_latex(
+        latex,
+        source_text=span.raw,
+        display=span.display,
+    )
+    rendered = None
+    if validation.accepted and _latex_looks_renderable(latex):
+        rendered = _katex_html(latex, display=span.display)
+    if rendered is None:
+        rendered = _formula_plaintext_fallback_html(span.raw)
+        status = "unrendered"
+        flags.extend(["raw_tex_unrendered", "formula_plaintext_fallback"])
+    else:
+        status = "rendered"
+        flags.append("raw_tex_rendered")
+    css_kind = "display" if span.display else "inline"
+    html = (
+        f'<span class="formula formula-{css_kind} formula-raw-tex" '
+        f'data-display="{"true" if span.display else "false"}" '
+        f'data-raw-tex="{escape(span.raw, quote=True)}" '
+        f'data-raw-tex-status="{status}" '
+        f'data-latex="{escape(latex, quote=True)}">'
+        f"{rendered}</span>"
+    )
+    return html, _unique_flags(flags)
+
+
+def _non_formula_segment_html(text: str, *, role: BlockRole) -> tuple[str, list[str]]:
+    raw_tex_html, raw_tex_flags = _raw_tex_html_for_text(text, role=role)
+    if raw_tex_html is not None:
+        return raw_tex_html, raw_tex_flags
+    return _non_formula_text_html(text)
+
+
+def _repair_raw_tex_latex(latex: str) -> str:
+    repaired = latex.strip()
+    repaired = repaired.replace("−", "-")
+    repaired = _RAW_TEX_GREEK_COMMAND_JOIN_PATTERN.sub(r"\\\1 ", repaired)
+    repaired = re.sub(r"\\partial(?=\\?[A-Za-z])", r"\\partial ", repaired)
+    return _normalized_text(repaired)
 
 
 def _unresolved_formula_html(formula_id: str, *, display: bool) -> str:
@@ -522,6 +1208,9 @@ def _formula_fallback_html(
     document: DocumentIR,
     *,
     fallback_reason: str | None = None,
+    allow_latex_retry: bool = True,
+    display: bool | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> tuple[str, list[str]]:
     latex = getattr(formula, "latex", "") or ""
     formula_id = getattr(formula, "formula_id", "")
@@ -539,15 +1228,137 @@ def _formula_fallback_html(
                         formula_id=formula_id,
                         asset_alt_text=getattr(asset, "alt_text", None),
                     )
+                    retry_latex_attr = (
+                        f' data-latex="{escape(latex, quote=True)}"'
+                        if allow_latex_retry and latex.strip() and _latex_looks_renderable(latex)
+                        else ""
+                    )
+                    display_attr = (
+                        "true"
+                        if getattr(formula, "display_mode", "") == "display"
+                        else "false"
+                    )
+                    is_display = display if display is not None else display_attr == "true"
+                    style_attr, size_flags = _formula_image_fallback_style(
+                        formula,
+                        asset,
+                        display=is_display,
+                        render_defaults=render_defaults,
+                    )
+                    crop_flags = _formula_image_fallback_crop_flags(formula, asset)
+                    if asset.path.lower().endswith(".svg"):
+                        crop_flags.append("formula_svg_fallback")
                     return (
                         f'<span class="formula-image-fallback" '
-                        f'data-fallback-formula-id="{escape(formula_id, quote=True)}">'
+                        f'data-fallback-formula-id="{escape(formula_id, quote=True)}" '
+                        f'data-display="{display_attr}"'
+                        f"{retry_latex_attr}{style_attr}>"
                         f'<img src="{escape(asset.path, quote=True)}" '
                         f'alt="{escape(alt_text, quote=True)}" />'
                         f"</span>",
-                        ["formula_image_fallback"],
+                        ["formula_image_fallback", *crop_flags, *size_flags],
                     )
+        return (
+            _formula_plaintext_fallback_html(fallback_text),
+            ["formula_plaintext_fallback", "formula_source_asset_missing"],
+        )
     return _formula_plaintext_fallback_html(fallback_text), ["formula_plaintext_fallback"]
+
+
+def _formula_image_fallback_style(
+    formula: Any,
+    asset: Asset,
+    *,
+    display: bool,
+    render_defaults: RenderDefaults | None,
+) -> tuple[str, list[str]]:
+    width, height = _formula_source_visual_size(formula, asset)
+    if width <= 0 or height <= 0:
+        return "", []
+    if display:
+        return (
+            f' style="width:{_fmt_pt(width)}pt;height:{_fmt_pt(height)}pt"',
+            ["formula_source_asset_size_preserved"],
+        )
+    replay = (
+        render_defaults.formula_replay
+        if render_defaults is not None
+        else _SCHEMA_RENDER_DEFAULTS.formula_replay
+    )
+    slot_height = replay.inline_slot_height_pt
+    if slot_height <= 0:
+        return "", []
+    scale = slot_height / height
+    return (
+        f' style="width:{_fmt_pt(max(1.0, width * scale))}pt;'
+        f'height:{_fmt_pt(slot_height)}pt"',
+        ["formula_inline_slot_height"],
+    )
+
+
+def _formula_source_visual_size(formula: Any, asset: Asset) -> tuple[float, float]:
+    pdf_formula = getattr(formula, "pdf_formula", None)
+    width = float(getattr(pdf_formula, "width_pt", 0) or 0)
+    height = float(getattr(pdf_formula, "height_pt", 0) or 0)
+    if width > 0 and height > 0:
+        return width, height
+    return max(0.0, asset.bbox.x1 - asset.bbox.x0), max(0.0, asset.bbox.y1 - asset.bbox.y0)
+
+
+def _formula_image_fallback_crop_flags(formula: Any, asset: Asset) -> list[str]:
+    flags: list[str] = []
+    formula_flags = set(getattr(formula, "quality_flags", []) or [])
+    if "formula_source_asset_primary" in formula_flags:
+        flags.append("formula_source_asset_primary")
+    if "formula_source_preserved" in formula_flags:
+        flags.append("formula_source_preserved")
+    if formula_flags & {
+        "formula_text_truncated",
+        "formula_low_confidence",
+        "formula_display_cluster",
+        "formula_validator_rejected",
+    }:
+        flags.append("formula_image_crop_suspect")
+    source_text = _normalized_text(getattr(formula, "source_text", "") or "")
+    latex = _normalized_text(getattr(formula, "latex", "") or "")
+    if source_text and latex and len(source_text) >= 80 and len(latex) < len(source_text) * 0.65:
+        flags.append("formula_image_crop_suspect")
+    alt_text = getattr(asset, "alt_text", None)
+    if isinstance(alt_text, str) and alt_text.strip():
+        if _looks_like_corrupt_text_layer_formula(alt_text, source_text=alt_text):
+            flags.append("formula_image_dirty_crop_suspect")
+    confidence = getattr(formula, "ocr_confidence", None)
+    if isinstance(confidence, (int, float)) and confidence < 0.45:
+        flags.append("formula_image_crop_suspect")
+    return _unique_flags(flags)
+
+
+def _formula_has_source_asset_primary(formula: Any, document: DocumentIR) -> bool:
+    formula_flags = set(getattr(formula, "quality_flags", []) or [])
+    if "formula_source_asset_primary" not in formula_flags:
+        return False
+    asset_id = getattr(formula, "asset_id", None)
+    if not asset_id:
+        return False
+    return any(
+        asset.asset_id == asset_id and bool(asset.path)
+        for page in document.pages
+        for asset in page.assets
+    )
+
+
+def _formula_source_replay_suppresses_latex_retry(formula: Any) -> bool:
+    if getattr(formula, "pdf_formula", None) is not None:
+        return True
+    formula_flags = set(getattr(formula, "quality_flags", []) or [])
+    return bool(
+        formula_flags
+        & {
+            "formula_pdf_primitive_primary",
+            "formula_source_clip_replay",
+            "formula_source_clip_primary",
+        }
+    )
 
 
 def _formula_image_fallback_alt_text(
@@ -598,8 +1409,7 @@ def _validate_formula_latex(
 
 _RAW_FORMULA_CORRUPTION_MARKER_PATTERN = re.compile(r"[\x01-\x04¼þðÞÐ]|@[A-Za-z]")
 _FORMULA_SLASH_GLYPH_SUSPECT_PATTERN = re.compile(
-    r"(?:\\partial\s+[A-Za-z]{2,}|[A-Za-z]_?[A-Za-z]\s*=\s*k(?:\^?\d|\{\d\})|"
-    r"[A-Za-z]\s*0\s*[A-Za-z])"
+    r"(?:[A-Za-z]_?[A-Za-z]\s*=\s*k(?:\^?\d|\{\d\})|@\s*\()"
 )
 _FORMULA_PRIME_GLYPH_SUSPECT_PATTERN = re.compile(r"\b[fqmn]\s*0\s*[sn]\b|\b[fqmn]0[sn]\b")
 
@@ -795,6 +1605,7 @@ def _estimated_content_height(
     line_height: float,
     document: DocumentIR,
     block: DocumentBlock,
+    render_defaults: RenderDefaults | None = None,
 ) -> float:
     return _estimated_formula_aware_height(
         text,
@@ -803,6 +1614,7 @@ def _estimated_content_height(
         line_height,
         document=document,
         block=block,
+        render_defaults=render_defaults,
     )
 
 
@@ -814,6 +1626,7 @@ def _estimated_formula_aware_height(
     *,
     document: DocumentIR | None = None,
     block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> float:
     estimation_text = (
         _formula_visual_estimation_text(text, document, block)
@@ -841,6 +1654,7 @@ def _estimated_formula_aware_height(
         document,
         block,
         font_size_pt=font_size_pt,
+        render_defaults=render_defaults,
     )
     has_formula_only_content = not _normalized_text(
         _FORMULA_REF_PATTERN.sub(" ", _FORMULA_PLACEHOLDER_PATTERN.sub(" ", text))
@@ -875,33 +1689,45 @@ def _display_formula_visual_heights(
     block: DocumentBlock,
     *,
     font_size_pt: float,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[float]:
     heights: list[float] = []
+    replay = (
+        render_defaults.formula_replay
+        if render_defaults is not None
+        else _SCHEMA_RENDER_DEFAULTS.formula_replay
+    )
+    display_slot_height = _article_display_formula_slot_height(document, replay)
     formulas_by_id = document.formulas_by_id()
     for match in _FORMULA_REF_PATTERN.finditer(text):
         formula = formulas_by_id.get(match.group(1))
         if formula is None:
             if block.role == BlockRole.FORMULA:
-                heights.append(_formula_latex_heuristic_height(match.group(0), font_size_pt))
+                heights.append(display_slot_height)
             continue
         if formula.display_mode != "display" and block.role != BlockRole.FORMULA:
             continue
-        heights.append(_formula_rendered_or_heuristic_height(formula.latex, font_size_pt))
+        heights.append(_display_formula_visual_height(formula, display_slot_height))
 
     legacy_formulas = {formula.placeholder: formula for formula in block.formulas}
     for match in _FORMULA_PLACEHOLDER_PATTERN.finditer(text):
         formula = legacy_formulas.get(match.group(0))
         if formula is None:
             if block.role == BlockRole.FORMULA:
-                heights.append(_formula_latex_heuristic_height(match.group(0), font_size_pt))
+                heights.append(display_slot_height)
             continue
         if formula.kind != "display":
             continue
-        heights.append(_formula_rendered_or_heuristic_height(formula.latex, font_size_pt))
+        heights.append(_display_formula_visual_height(formula, display_slot_height))
 
     if not heights and block.role == BlockRole.FORMULA and text.strip():
-        heights.append(_formula_latex_heuristic_height(text, font_size_pt))
+        heights.append(display_slot_height)
     return heights
+
+
+def _display_formula_visual_height(formula: Any, fallback_height: float) -> float:
+    pdf_formula_height = _pdf_formula_height(getattr(formula, "pdf_formula", None))
+    return pdf_formula_height if pdf_formula_height > 0 else fallback_height
 
 
 def _formula_rendered_or_heuristic_height(latex: str, font_size_pt: float) -> float:
@@ -960,6 +1786,7 @@ def _estimated_formula_aware_line_count(
     *,
     document: DocumentIR | None = None,
     block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> int:
     if font_size_pt <= 0 or line_height <= 0:
         return 1
@@ -970,6 +1797,7 @@ def _estimated_formula_aware_line_count(
         line_height,
         document=document,
         block=block,
+        render_defaults=render_defaults,
     )
     return max(
         1,
@@ -984,9 +1812,18 @@ def _content_overflows(
     line_height: float,
     document: DocumentIR,
     block: DocumentBlock,
+    render_defaults: RenderDefaults | None = None,
 ) -> bool:
     return (
-        _estimated_content_height(text, bbox, font_size_pt, line_height, document, block)
+        _estimated_content_height(
+            text,
+            bbox,
+            font_size_pt,
+            line_height,
+            document,
+            block,
+            render_defaults=render_defaults,
+        )
         > _bbox_height(bbox) + _LAYOUT_EPSILON_PT
     )
 
@@ -1321,6 +2158,7 @@ def _expand_bbox_to_fit(
     line_height: float,
     document: DocumentIR,
     block: DocumentBlock,
+    render_defaults: RenderDefaults | None = None,
 ) -> BoundingBox | None:
     needed_height = _estimated_content_height(
         text,
@@ -1329,6 +2167,7 @@ def _expand_bbox_to_fit(
         line_height,
         document,
         block,
+        render_defaults=render_defaults,
     )
     if needed_height <= _bbox_height(bbox) + _LAYOUT_EPSILON_PT:
         return bbox
@@ -1394,6 +2233,17 @@ class RenderDocument:
     target_lang: str
     pages: list[RenderPage]
     font_stack: list[str] = field(default_factory=lambda: _SCHEMA_RENDER_DEFAULTS.font_stack.copy())
+    formula_font_stack: list[str] = field(
+        default_factory=lambda: _SCHEMA_RENDER_DEFAULTS.formula_replay.font_stack.copy()
+    )
+    formula_font_size_pt: float = _SCHEMA_RENDER_DEFAULTS.formula_replay.font_size_pt
+    formula_line_height: float = _SCHEMA_RENDER_DEFAULTS.formula_replay.line_height
+    formula_inline_slot_height_pt: float = (
+        _SCHEMA_RENDER_DEFAULTS.formula_replay.inline_slot_height_pt
+    )
+    formula_display_slot_height_pt: float = _default_display_formula_slot_height(
+        _SCHEMA_RENDER_DEFAULTS.formula_replay
+    )
     line_height: float = _SCHEMA_RENDER_DEFAULTS.line_height
     paragraph_spacing_em: float = _SCHEMA_RENDER_DEFAULTS.paragraph_spacing_em
     layout_mode: str = _enum_value(_SCHEMA_RENDER_DEFAULTS.layout_mode)
@@ -1507,6 +2357,9 @@ class RenderDocument:
         formula_height_adjusted_count = 0
         formula_multi_display_block_count = 0
         unresolved_formula_placeholders: list[dict[str, str]] = []
+        raw_tex_nodes: list[dict[str, str]] = []
+        raw_tex_rendered_count = 0
+        raw_tex_unrendered_count = 0
         page_utilization: list[dict[str, Any]] = []
         low_utilization_pages: list[str] = []
         underfilled_reflow_pages: list[str] = []
@@ -1544,6 +2397,21 @@ class RenderDocument:
                             "block_id": block.block_id,
                             "formula_id": formula_id,
                             "placeholder": f"{{{{formula:{formula_id}}}}}",
+                        }
+                    )
+                for raw_match in _RAW_TEX_NODE_ATTR_PATTERN.finditer(block_html):
+                    status = unescape(raw_match.group("status"))
+                    if status == "rendered":
+                        raw_tex_rendered_count += 1
+                    elif status == "unrendered":
+                        raw_tex_unrendered_count += 1
+                    raw_tex_nodes.append(
+                        {
+                            "page_id": page.page_id,
+                            "block_id": block.block_id,
+                            "raw": unescape(raw_match.group("raw")),
+                            "latex": unescape(raw_match.group("latex")),
+                            "status": status,
                         }
                     )
                 for flag in block.quality_flags:
@@ -1695,6 +2563,9 @@ class RenderDocument:
             "formula_reflow_cluster_count": quality_flag_counts.get("formula_reflow_clustered", 0),
             "formula_reflow_compacted_count": quality_flag_counts.get("formula_like_compacted", 0),
             "unresolved_formula_placeholders": unresolved_formula_placeholders,
+            "raw_tex_nodes": raw_tex_nodes,
+            "raw_tex_rendered_count": raw_tex_rendered_count,
+            "raw_tex_unrendered_count": raw_tex_unrendered_count,
             "page_utilization": page_utilization,
             "low_utilization_pages": low_utilization_pages,
             "underfilled_reflow_pages": underfilled_reflow_pages,
@@ -1828,6 +2699,7 @@ class RenderDocument:
                     line_height,
                     document,
                     block,
+                    render_defaults=defaults,
                 ):
                     if (
                         should_expand_before_scaling
@@ -1842,6 +2714,7 @@ class RenderDocument:
                             line_height,
                             document,
                             block,
+                            render_defaults=defaults,
                         )
                         if expanded_bbox is not None:
                             render_bbox = expanded_bbox
@@ -1854,6 +2727,7 @@ class RenderDocument:
                             line_height,
                             document,
                             block,
+                            render_defaults=defaults,
                         )
                         and font_scale > min_font_scale
                         and overflow_policy.strategy != "continue_without_scaling"
@@ -1868,6 +2742,7 @@ class RenderDocument:
                         line_height,
                         document,
                         block,
+                        render_defaults=defaults,
                     ):
                         expanded_bbox = (
                             _expand_bbox_to_fit(
@@ -1878,6 +2753,7 @@ class RenderDocument:
                                 line_height,
                                 document,
                                 block,
+                                render_defaults=defaults,
                             )
                             if overflow_policy.allow_box_expansion
                             and overflow_policy.strategy == "scale_then_expand_then_continue"
@@ -1893,6 +2769,7 @@ class RenderDocument:
                         line_height,
                         document,
                         block,
+                        render_defaults=defaults,
                     ):
                         if overflow_policy.allow_continuation_page:
                             visible_text, overflow_text = _split_text_to_fit(
@@ -1917,6 +2794,7 @@ class RenderDocument:
                                         700 if style.bold else 400,
                                         "italic" if style.italic else "normal",
                                         line_height,
+                                        defaults,
                                     )
                                 )
                                 html = None
@@ -1925,7 +2803,12 @@ class RenderDocument:
                         else:
                             quality_flags.append("overflow_clipped")
 
-                html, formula_flags = _formula_html_for_text(text, document, block)
+                html, formula_flags = _formula_html_for_text(
+                    text,
+                    document,
+                    block,
+                    render_defaults=defaults,
+                )
                 quality_flags.extend(formula_flags)
 
                 render_blocks.append(
@@ -1972,6 +2855,14 @@ class RenderDocument:
             target_lang=target_lang,
             pages=pages,
             font_stack=defaults.font_stack,
+            formula_font_stack=defaults.formula_replay.font_stack,
+            formula_font_size_pt=defaults.formula_replay.font_size_pt,
+            formula_line_height=defaults.formula_replay.line_height,
+            formula_inline_slot_height_pt=defaults.formula_replay.inline_slot_height_pt,
+            formula_display_slot_height_pt=_article_display_formula_slot_height(
+                document,
+                defaults.formula_replay,
+            ),
             line_height=defaults.line_height,
             paragraph_spacing_em=defaults.paragraph_spacing_em,
             layout_mode=_enum_value(defaults.layout_mode),
@@ -2239,6 +3130,7 @@ def _from_ir_and_plans_continuous_reflow(
                     caption_prepared.style,
                     document=document,
                     source_block=caption,
+                    render_defaults=defaults,
                 )
                 caption_required_height = measured_height_for_signature(
                     _layout_signature(caption.block_id, caption_prepared.text),
@@ -2357,6 +3249,7 @@ def _from_ir_and_plans_continuous_reflow(
                         first_max_height_pt=first_caption_height,
                         document=document,
                         source_block=caption,
+                        render_defaults=defaults,
                     )
                     caption_fragments = caption_fragments or [caption_prepared.text]
                     caption_split = len(caption_fragments) > 1
@@ -2386,6 +3279,7 @@ def _from_ir_and_plans_continuous_reflow(
                     caption_prepared.style,
                     document=document,
                     source_block=caption,
+                    render_defaults=defaults,
                 )
                 caption_required_height = measured_height_for_signature(
                     _layout_signature(
@@ -2418,7 +3312,12 @@ def _from_ir_and_plans_continuous_reflow(
                 caption_fragment_html = (
                     caption_prepared.html
                     if caption_fragment_count == 1
-                    else _formula_html_for_text(caption_fragment, document, caption)[0]
+                    else _formula_html_for_text(
+                        caption_fragment,
+                        document,
+                        caption,
+                        render_defaults=defaults,
+                    )[0]
                 )
                 caption_block, caption_trace, cursor_y = _render_reflow_fragment(
                     prepared=fragment_prepared,
@@ -2437,6 +3336,7 @@ def _from_ir_and_plans_continuous_reflow(
                     measured_preferred_heights=measured_preferred_heights,
                     column_count=column_count,
                     span="full_width",
+                    render_defaults=defaults,
                 )
                 current_blocks.append(caption_block)
                 rendered_source_ids.add(caption.block_id)
@@ -2631,6 +3531,7 @@ def _from_ir_and_plans_continuous_reflow(
             prepared.style,
             document=document,
             source_block=block,
+            render_defaults=defaults,
         )
         keep_with_next = block.role in {BlockRole.TITLE, BlockRole.HEADING}
         if (
@@ -2678,6 +3579,7 @@ def _from_ir_and_plans_continuous_reflow(
                 first_max_height_pt=first_fragment_height if current_blocks else None,
                 document=document,
                 source_block=block,
+                render_defaults=defaults,
             )
         else:
             fragments = _split_reflow_text(
@@ -2688,6 +3590,7 @@ def _from_ir_and_plans_continuous_reflow(
                 first_max_height_pt=first_fragment_height if current_blocks else None,
                 document=document,
                 source_block=block,
+                render_defaults=defaults,
             )
         fragment_index = 0
         while fragment_index < len(fragments):
@@ -2697,7 +3600,12 @@ def _from_ir_and_plans_continuous_reflow(
             fragment_html = (
                 prepared.html
                 if fragment_count == 1
-                else _formula_html_for_text(fragment, document, block)[0]
+                else _formula_html_for_text(
+                    fragment,
+                    document,
+                    block,
+                    render_defaults=defaults,
+                )[0]
             )
             fragment_required_height = _reflow_required_height(
                 fragment,
@@ -2705,6 +3613,7 @@ def _from_ir_and_plans_continuous_reflow(
                 prepared.style,
                 document=document,
                 source_block=block,
+                render_defaults=defaults,
             )
             fragment_required_height = measured_height_for_signature(
                 _layout_signature(block.block_id, fragment, fragment_number),
@@ -2734,6 +3643,7 @@ def _from_ir_and_plans_continuous_reflow(
                         prepared.style,
                         document=document,
                         source_block=block,
+                        render_defaults=defaults,
                     )
                 else:
                     split_fragments = _split_reflow_text_for_measured_height(
@@ -2745,6 +3655,7 @@ def _from_ir_and_plans_continuous_reflow(
                         prepared.style,
                         document=document,
                         source_block=block,
+                        render_defaults=defaults,
                     )
                 if (
                     len(split_fragments) > 1
@@ -2755,13 +3666,19 @@ def _from_ir_and_plans_continuous_reflow(
                     fragment = fragments[fragment_index]
                     fragment_number = fragment_index + 1
                     fragment_count = len(fragments)
-                    fragment_html = _formula_html_for_text(fragment, document, block)[0]
+                    fragment_html = _formula_html_for_text(
+                        fragment,
+                        document,
+                        block,
+                        render_defaults=defaults,
+                    )[0]
                     fragment_required_height = _reflow_required_height(
                         fragment,
                         active_content_width,
                         prepared.style,
                         document=document,
                         source_block=block,
+                        render_defaults=defaults,
                     )
                     fragment_required_height = measured_height_for_signature(
                         _layout_signature(
@@ -2827,6 +3744,7 @@ def _from_ir_and_plans_continuous_reflow(
                 column_count=column_count,
                 column_index=active_trace_column_index,
                 span=span,
+                render_defaults=defaults,
             )
             current_blocks.append(render_block)
             rendered_source_ids.add(block.block_id)
@@ -2865,6 +3783,14 @@ def _from_ir_and_plans_continuous_reflow(
         target_lang=target_lang,
         pages=pages,
         font_stack=defaults.font_stack,
+        formula_font_stack=defaults.formula_replay.font_stack,
+        formula_font_size_pt=defaults.formula_replay.font_size_pt,
+        formula_line_height=defaults.formula_replay.line_height,
+        formula_inline_slot_height_pt=defaults.formula_replay.inline_slot_height_pt,
+        formula_display_slot_height_pt=_article_display_formula_slot_height(
+            document,
+            defaults.formula_replay,
+        ),
         line_height=defaults.line_height,
         paragraph_spacing_em=defaults.paragraph_spacing_em,
         layout_mode=_enum_value(defaults.layout_mode),
@@ -2960,15 +3886,17 @@ def _prepare_reflow_block(
         text,
         document,
         block,
+        render_defaults=defaults,
     )
     flags.extend(formula_flags)
 
-    estimated_height = _estimated_reflow_height(
+    estimated_height = _reflow_required_height(
         text,
         content_width,
         style,
         document=document,
         source_block=block,
+        render_defaults=defaults,
     )
     if estimated_height > original_height + _LAYOUT_EPSILON_PT:
         flags.append("formula_height_adjusted")
@@ -2999,6 +3927,7 @@ def _reflow_required_height(
     *,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> float:
     base_height = _estimated_reflow_height(
         text,
@@ -3006,6 +3935,7 @@ def _reflow_required_height(
         style,
         document=document,
         source_block=source_block,
+        render_defaults=render_defaults,
     )
     return base_height + _reflow_height_safety(text, style, source_block)
 
@@ -3042,6 +3972,7 @@ def _render_reflow_fragment(
     caption_for_asset_id: str | None = None,
     measured_min_heights: dict[str, float] | None = None,
     measured_preferred_heights: dict[str, float] | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> tuple[RenderBlock, dict[str, Any], float]:
     block = prepared.block
     style = prepared.style
@@ -3052,6 +3983,7 @@ def _render_reflow_fragment(
         style,
         document=document,
         source_block=block,
+        render_defaults=render_defaults,
     )
     if measured_min_heights:
         required_height = max(
@@ -3129,6 +4061,7 @@ def _render_reflow_fragment(
             style.line_height,
             document=document,
             block=block,
+            render_defaults=render_defaults,
         ),
         "bbox": bbox.model_dump(),
         "allocated_height_pt": round(allocated_height, 4),
@@ -3195,6 +4128,16 @@ def _formula_like_style(style: RoleStyleDefaults) -> RoleStyleDefaults:
     )
 
 
+def _is_independent_formula_replay_block(block: DocumentBlock, text: str) -> bool:
+    if block.role != BlockRole.FORMULA:
+        return False
+    stripped = _normalized_text(text)
+    return bool(
+        _FORMULA_REF_PATTERN.fullmatch(stripped)
+        or _FORMULA_PLACEHOLDER_PATTERN.fullmatch(stripped)
+    )
+
+
 def _merge_formula_like_ordered_items(
     ordered_items: list[tuple[str, DocumentBlock | Asset | _ReflowFigureGroup]],
     document: DocumentIR,
@@ -3214,6 +4157,10 @@ def _merge_formula_like_ordered_items(
             if plan is not None and isinstance(getattr(plan, "translated_text", None), str)
             else (item.text_for_translation or item.source_text)
         )
+        if _is_independent_formula_replay_block(item, seed_text):
+            merged.append((kind, item))
+            index += 1
+            continue
         if not _is_formula_like_reflow_block(item, seed_text, plan):
             merged.append((kind, item))
             index += 1
@@ -3232,6 +4179,8 @@ def _merge_formula_like_ordered_items(
                 and isinstance(getattr(next_plan, "translated_text", None), str)
                 else (next_item.text_for_translation or next_item.source_text)
             )
+            if _is_independent_formula_replay_block(next_item, next_text):
+                break
             if not _is_formula_like_reflow_block(next_item, next_text, next_plan):
                 break
             gap = next_item.bbox.y0 - cluster[-1].bbox.y1
@@ -3314,12 +4263,27 @@ def _formula_html_for_text(
     text: str,
     document: DocumentIR,
     block: DocumentBlock,
+    render_defaults: RenderDefaults | None = None,
 ) -> tuple[str | None, list[str]]:
     if _FORMULA_PLACEHOLDER_PATTERN.search(text):
-        return _formula_placeholder_html_for_text(text, block.formulas)
-    html, flags = _formula_ir_html_for_text(text, document, role=block.role)
+        return _formula_placeholder_html_for_text(
+            text,
+            document,
+            block.formulas,
+            role=block.role,
+            render_defaults=render_defaults,
+        )
+    html, flags = _formula_ir_html_for_text(
+        text,
+        document,
+        role=block.role,
+        render_defaults=render_defaults,
+    )
     if html is not None:
         return html, flags
+    raw_tex_html, raw_tex_flags = _raw_tex_html_for_text(text, role=block.role)
+    if raw_tex_html is not None:
+        return raw_tex_html, raw_tex_flags
     script_html, script_flags = _non_formula_text_html(text)
     if script_flags:
         return script_html, script_flags
@@ -3328,33 +4292,48 @@ def _formula_html_for_text(
 
 def _formula_placeholder_html_for_text(
     text: str,
+    document: DocumentIR,
     formulas: list[Formula],
+    *,
+    role: BlockRole,
+    render_defaults: RenderDefaults | None = None,
 ) -> tuple[str, list[str]]:
     formulas_by_placeholder = {formula.placeholder: formula for formula in formulas}
+    formulas_by_id = document.formulas_by_id()
     flags: list[str] = []
     parts: list[str] = []
     cursor = 0
     for match in _FORMULA_PLACEHOLDER_PATTERN.finditer(text):
-        raw_html, raw_flags = _non_formula_text_html(text[cursor : match.start()])
+        raw_html, raw_flags = _non_formula_segment_html(
+            text[cursor : match.start()],
+            role=role,
+        )
         parts.append(raw_html)
         flags.extend(raw_flags)
         placeholder = match.group(0)
-        formula = formulas_by_placeholder.get(placeholder)
+        formula_id = _legacy_formula_id_from_placeholder(placeholder)
+        formula = formulas_by_id.get(formula_id) or formulas_by_placeholder.get(placeholder)
         if formula is None:
             parts.append(
                 _unresolved_formula_html(
-                    _legacy_formula_id_from_placeholder(placeholder),
+                    formula_id,
                     display=False,
                 )
             )
             flags.append("unresolved_formula_placeholder")
         else:
-            html, formula_flags = _formula_span(formula)
+            display = _formula_display_mode(formula, role=role)
+            html, formula_flags = _formula_token_html(
+                formula,
+                document=document,
+                display=display,
+                render_defaults=render_defaults,
+            )
             parts.append(html)
             flags.append("formula_placeholder_resolved")
             flags.extend(formula_flags)
         cursor = match.end()
-    raw_html, raw_flags = _non_formula_text_html(text[cursor:])
+    raw_html, raw_flags = _non_formula_segment_html(text[cursor:], role=role)
     parts.append(raw_html)
     flags.extend(raw_flags)
     return "".join(parts), _unique_flags(flags)
@@ -3606,6 +4585,7 @@ def _estimated_reflow_height(
     *,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> float:
     text_width = max(1.0, width_pt - style.first_line_indent_em * style.font_size_pt)
     return max(
@@ -3617,6 +4597,7 @@ def _estimated_reflow_height(
             style.line_height,
             document=document,
             block=source_block,
+            render_defaults=render_defaults,
         ),
     )
 
@@ -3630,6 +4611,7 @@ def _split_reflow_text(
     first_max_height_pt: float | None = None,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[str]:
     text = _normalized_text(text)
     if not text:
@@ -3663,6 +4645,7 @@ def _split_reflow_text(
                 height_for_fragment,
                 document=document,
                 source_block=source_block,
+                render_defaults=render_defaults,
             ),
         )
         if len(remaining) <= chars_for_fragment:
@@ -3798,6 +4781,7 @@ def _split_formula_reflow_text(
     first_max_height_pt: float | None = None,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[str]:
     text = _normalized_text(text)
     if not text:
@@ -3825,6 +4809,7 @@ def _split_formula_reflow_text(
                 height_for_fragment,
                 document=document,
                 source_block=source_block,
+                render_defaults=render_defaults,
             ),
         )
         if len(remaining) <= chars_for_fragment:
@@ -3862,6 +4847,7 @@ def _split_reflow_text_for_measured_height(
     *,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[str]:
     fragments = _split_reflow_text(
         text,
@@ -3871,6 +4857,7 @@ def _split_reflow_text_for_measured_height(
         first_max_height_pt=available_height_pt,
         document=document,
         source_block=source_block,
+        render_defaults=render_defaults,
     )
     normalized_text = _normalized_text(text)
     if (
@@ -3912,6 +4899,7 @@ def _split_reflow_text_for_measured_height(
         style,
         document=document,
         source_block=source_block,
+        render_defaults=render_defaults,
     )
     return [first, *rest_fragments]
 
@@ -3926,6 +4914,7 @@ def _split_formula_reflow_text_for_measured_height(
     *,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[str]:
     fragments = _split_formula_reflow_text(
         text,
@@ -3935,6 +4924,7 @@ def _split_formula_reflow_text_for_measured_height(
         first_max_height_pt=available_height_pt,
         document=document,
         source_block=source_block,
+        render_defaults=render_defaults,
     )
     normalized_text = _normalized_text(text)
     if (
@@ -3976,6 +4966,7 @@ def _split_formula_reflow_text_for_measured_height(
         style,
         document=document,
         source_block=source_block,
+        render_defaults=render_defaults,
     )
     return [first, *rest_fragments]
 
@@ -3992,6 +4983,7 @@ def _max_reflow_chars_to_fit(
     *,
     document: DocumentIR | None = None,
     source_block: DocumentBlock | None = None,
+    render_defaults: RenderDefaults | None = None,
 ) -> int:
     low = 1
     high = max(1, len(text))
@@ -4006,6 +4998,7 @@ def _max_reflow_chars_to_fit(
                 style,
                 document=document,
                 source_block=source_block,
+                render_defaults=render_defaults,
             )
             + _reflow_height_safety(candidate, style, source_block)
             <= height_pt
@@ -4050,6 +5043,34 @@ def _should_suppress_reflow_block(block: DocumentBlock) -> bool:
         return True
     if text.lower().startswith(("view online", "export citation", "crossmark")):
         return True
+    if _is_tiny_source_artifact_block(block, text=text, width=width, height=height):
+        return True
+    return False
+
+
+def _is_tiny_source_artifact_block(
+    block: DocumentBlock,
+    *,
+    text: str,
+    width: float,
+    height: float,
+) -> bool:
+    if block.role not in {BlockRole.PARAGRAPH, BlockRole.FOOTNOTE, BlockRole.UNKNOWN}:
+        return False
+    if block.text_for_translation.strip():
+        return False
+    if width > 16 or height > 24:
+        return False
+
+    normalized = text.replace("−", "-").replace("–", "-")
+    if re.fullmatch(r"[+-]?\d{1,4}", normalized):
+        return True
+
+    font_name = (block.style_seed.font_name or "").upper()
+    is_math_font = font_name.startswith(("CM", "MSAM", "MSBM", "STIX", "MTEX"))
+    if is_math_font and re.fullmatch(r"[+-]?[α-ωΑ-Ω]", normalized):
+        return True
+
     return False
 
 
@@ -4327,6 +5348,7 @@ def _make_continuation_blocks(
     font_weight: int,
     font_style: str,
     line_height: float,
+    render_defaults: RenderDefaults | None = None,
 ) -> list[RenderBlock]:
     bbox = _continuation_bbox(page_size)
     blocks: list[RenderBlock] = []
@@ -4351,7 +5373,12 @@ def _make_continuation_blocks(
                 role=source_block.role,
                 bbox=bbox,
                 text=visible_text,
-                html=_formula_html_for_text(visible_text, document, source_block)[0],
+                html=_formula_html_for_text(
+                    visible_text,
+                    document,
+                    source_block,
+                    render_defaults=render_defaults,
+                )[0],
                 style_seed=source_block.style_seed,
                 font_size_pt=font_size_pt,
                 font_scale=font_scale,

@@ -60,6 +60,15 @@ async def fake_article_brief(*_args, **_kwargs) -> ArticleBrief:
     )
 
 
+@pytest.fixture(autouse=True)
+def deterministic_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runtime_config,
+        "settings",
+        Settings(openai_api_key="", openai_api_key_from_env=False),
+    )
+
+
 def test_render_evaluation_blocks_browser_overflow() -> None:
     evaluation = render_evaluation_summary(
         {
@@ -684,11 +693,12 @@ def test_process_document_job_persists_chunk_progress_artifact(
     assert captured["renderer_render_defaults"].overflow_policy.min_font_scale == 0.77
     assert formula_recognition == []
     assert formula_diagnostics["kind"] == "formula_diagnostics"
-    assert formula_diagnostics["recognizer_type"] == "deterministic"
-    assert formula_diagnostics["visual_formula_recognition_enabled"] is True
+    assert formula_diagnostics["recognizer_type"] == "pdf_primitive_replay"
+    assert formula_diagnostics["formula_recognition_mode"] == "pdf_primitive_replay"
+    assert formula_diagnostics["visual_formula_recognition_enabled"] is False
     parser_diagnostics = storage.read_output_json("doc_1", "parser-diagnostics.json")
     assert "pdf_parse_ms" in parser_diagnostics
-    assert parser_diagnostics["formula_recognizer_type"] == "deterministic"
+    assert parser_diagnostics["formula_recognizer_type"] == "pdf_primitive_replay"
 
 
 def test_process_document_job_gbt_intent_uses_gbt_render_defaults(
@@ -1060,6 +1070,133 @@ def test_translate_chunks_reuses_cached_successes_on_continuation(
     assert "translation_cache_reused" in second_progress[0].quality_flags
 
 
+def test_process_document_continuation_reuses_saved_chunks_and_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(orchestrator, "storage", storage)
+    storage.write_runtime_config({"translation_concurrency": 1})
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    ),
+                    DocumentBlock(
+                        block_id="b2",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=50, x1=120, y1=80),
+                        reading_order=1,
+                        source_text="Beta",
+                    ),
+                ],
+            )
+        ],
+    )
+    storage.save_document_ir(document)
+    chunks = [
+        TranslationChunk(
+            chunk_id="saved_chunk_1",
+            target_lang="zh-CN",
+            source_blocks=[
+                SourceBlock(block_id="b1", role=BlockRole.PARAGRAPH, source_text="Alpha")
+            ],
+        ),
+        TranslationChunk(
+            chunk_id="saved_chunk_2",
+            target_lang="zh-CN",
+            source_blocks=[
+                SourceBlock(block_id="b2", role=BlockRole.PARAGRAPH, source_text="Beta")
+            ],
+        ),
+    ]
+
+    def plan_for(chunk: TranslationChunk) -> TranslationLayoutPlan:
+        block = chunk.source_blocks[0]
+        return TranslationLayoutPlan(
+            chunk_id=chunk.chunk_id,
+            target_lang=chunk.target_lang,
+            blocks=[
+                TranslationBlockPlan(
+                    source_block_id=block.block_id,
+                    translated_text=f"translated {block.source_text}",
+                    role=block.role,
+                )
+            ],
+        )
+
+    cache = {"kind": "translation_plan_cache", "entries": {}}
+    orchestrator._store_cached_plan(cache, chunks[0], plan_for(chunks[0]))
+    storage.write_json("doc_1", "translation-chunks.json", [chunk.model_dump() for chunk in chunks])
+    storage.write_json("doc_1", "translation-plan-cache.json", cache)
+
+    class RecordingTranslator:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def translate(self, chunk: TranslationChunk) -> TranslationLayoutPlan:
+            self.calls.append(chunk.chunk_id)
+            return plan_for(chunk)
+
+    translator = RecordingTranslator()
+
+    def fail_build_chunks(*_args, **_kwargs):
+        raise AssertionError("saved continuation chunks should be reused")
+
+    async def fail_article_brief(*_args, **_kwargs):
+        raise AssertionError("article brief should not be rebuilt for saved chunks")
+
+    async def fake_render_preview(doc_id, document, plans, *_args, **_kwargs):
+        assert [plan.chunk_id for plan in plans] == ["saved_chunk_1", "saved_chunk_2"]
+        storage.save_preview_html(doc_id, "<html>preview</html>")
+        return "<html>preview</html>", {
+            "quality_flag_counts": {},
+            "layout_issues": [],
+            "browser_block_overflow_count": 0,
+            "browser_validation_unavailable": False,
+        }
+
+    async def fake_render_pdf(html: str, output_path: Path, **_kwargs):
+        output_path.write_bytes(b"%PDF-1.4\n%%EOF")
+        return output_path
+
+    monkeypatch.setattr(orchestrator, "build_chunks", fail_build_chunks)
+    monkeypatch.setattr(orchestrator, "build_article_brief", fail_article_brief)
+    monkeypatch.setattr(orchestrator, "build_translator", lambda *_args: translator)
+    monkeypatch.setattr(orchestrator, "_render_preview_artifacts", fake_render_preview)
+    monkeypatch.setattr(orchestrator, "_render_pdf_with_optional_diagnostics", fake_render_pdf)
+
+    asyncio.run(
+        orchestrator.process_document_continuation_job(
+            "job_1",
+            "doc_1",
+            "paper.pdf",
+            None,
+            "zh-CN",
+            UserIntent(output_kind="translation"),
+        )
+    )
+
+    status = storage.load_status("job_1")
+    progress = storage.read_output_json("doc_1", "translation-progress.json")
+
+    assert status.status == JobState.COMPLETED
+    assert translator.calls == ["saved_chunk_2"]
+    assert progress[0]["message"] == "Reused"
+    assert "translation_cache_reused" in progress[0]["quality_flags"]
+
+
 def test_process_document_job_persists_pdf_export_diagnostics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1193,7 +1330,8 @@ def test_formula_enrichment_does_not_build_openai_formula_provider_unless_reques
 
     result = asyncio.run(orchestrator._enrich_document_formulas(document, doc_id="doc_1"))
 
-    assert result.diagnostics["recognizer_type"] == "deterministic"
+    assert result.diagnostics["recognizer_type"] == "pdf_primitive_replay"
+    assert result.diagnostics["formula_recognition_mode"] == "pdf_primitive_replay"
     assert result.diagnostics["visual_formula_recognition_enabled"] is False
     assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
 
@@ -1211,6 +1349,7 @@ def test_formula_enrichment_openai_formula_ocr_is_decoupled_from_agent_vision(
             "openai_model": "paper-model",
             "vision_analyzer_model": "vision-model",
             "agent_enable_vision_analysis": False,
+            "formula_recognition_mode": "visual_ocr",
             "ocr_provider_order": ["openai_vision", "deterministic"],
         }
     )
@@ -1275,6 +1414,7 @@ def test_formula_enrichment_reports_progress_and_falls_back_from_pix2text(
     )
     storage.write_runtime_config(
         {
+            "formula_recognition_mode": "visual_ocr",
             "ocr_provider_order": ["pix2text", "deterministic"],
             "ocr_provider_timeout_seconds": 1,
         }

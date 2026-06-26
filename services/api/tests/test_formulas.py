@@ -12,11 +12,17 @@ import pytest
 import app.pipeline.formulas.validation as formula_validation
 from app.pipeline.formulas import (
     DeterministicFormulaRecognizer,
+    FormulaCandidate,
     detect_formula_candidates,
     enrich_document_formulas,
 )
 from app.pipeline.formulas.normalization import formula_corruption_flags, latex_from_pdf_text
 from app.pipeline.formulas.recognizer import FormulaRecognitionError, _extract_json_object
+from app.pipeline.formulas.service import (
+    _formula_attachment_rejection_reason,
+    _should_escalate_text_candidate,
+    _should_attach_image_fallback_formula,
+)
 from app.pipeline.formulas.validation import validate_formula_latex
 from app.pipeline.ocr import (
     DeterministicOCRProvider,
@@ -25,6 +31,7 @@ from app.pipeline.ocr import (
     Pix2TextOCRProvider,
 )
 from app.pipeline.parser import parse_pdf
+from app.pipeline.workflow import normalized_input_payload, validate_translation_plan_formula_refs
 from pdf_renderer import RenderDocument, render_to_html
 from pdf_translator_schema import (
     Asset,
@@ -32,12 +39,18 @@ from pdf_translator_schema import (
     BoundingBox,
     DocumentIR,
     DocumentPage,
+    InlineItem,
     PageSize,
+    SourceBlock,
+    TranslationBlockPlan,
+    TranslationChunk,
+    TranslationLayoutPlan,
 )
 from pdf_translator_schema.models import (
     DocumentBlock,
     FormulaIR,
     FormulaRecognitionResult,
+    FormulaSourceKind,
     OCRRecognitionResult,
     TextLineIR,
     TextSpanIR,
@@ -167,6 +180,160 @@ def test_detector_finds_inline_formula_candidates_from_span_metadata() -> None:
     assert candidates[0].source_text_range == (6, 14)
 
 
+@pytest.mark.parametrize(
+    ("text", "font_name"),
+    [
+        ("x", "CMMI10"),
+        ("α", "Times New Roman"),
+        ("(cid:123)", "Times New Roman"),
+    ],
+)
+def test_detector_preserves_single_math_glyph_runs(text: str, font_name: str) -> None:
+    source_text = f"where {text} holds."
+    prefix_len = len("where ")
+    span = TextSpanIR(
+        span_id="s_formula",
+        page_id="p1",
+        block_id="b_inline",
+        line_id="l1",
+        text=text,
+        bbox=BoundingBox(x0=52, y0=60, x1=72, y1=72),
+        font_name=font_name,
+        font_size=10,
+    )
+    block = DocumentBlock(
+        block_id="b_inline",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=130, y1=80),
+        reading_order=0,
+        source_text=source_text,
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_inline",
+                text=source_text,
+                bbox=BoundingBox(x0=20, y0=60, x1=125, y1=72),
+                span_ids=["s_formula"],
+            )
+        ],
+        spans=[span],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert len(candidates) == 1
+    assert candidates[0].source_text == text
+    assert candidates[0].source_text_range == (prefix_len, prefix_len + len(text))
+    assert "formula_source_preserved" in candidates[0].quality_flags
+
+
+@pytest.mark.parametrize("text", ["γ", "−γ", "23"])
+def test_detector_rejects_standalone_inline_formula_fragments(text: str) -> None:
+    span = TextSpanIR(
+        span_id="s_fragment",
+        page_id="p1",
+        block_id="b_fragment",
+        line_id="l1",
+        text=text,
+        bbox=BoundingBox(x0=52, y0=60, x1=72, y1=72),
+        font_name="CMMI10",
+        font_size=10,
+    )
+    block = DocumentBlock(
+        block_id="b_fragment",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=52, y0=55, x1=72, y1=80),
+        reading_order=0,
+        source_text=text,
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_fragment",
+                text=text,
+                bbox=BoundingBox(x0=52, y0=60, x1=72, y1=72),
+                span_ids=[span.span_id],
+            )
+        ],
+        spans=[span],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    assert detect_formula_candidates(document) == []
+
+
+@pytest.mark.parametrize("text", ["define", "another example,", "field", "of kinetic", "decreasing:"])
+def test_detector_rejects_prose_only_math_font_runs(text: str) -> None:
+    source_text = f"We use {text} here."
+    start = source_text.index(text)
+    span = TextSpanIR(
+        span_id="s_prose_math_font",
+        page_id="p1",
+        block_id="b_inline",
+        line_id="l1",
+        text=text,
+        bbox=BoundingBox(x0=60, y0=60, x1=140, y1=72),
+        font_name="CMMI10",
+        font_size=10,
+    )
+    block = DocumentBlock(
+        block_id="b_inline",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=220, y1=80),
+        reading_order=0,
+        source_text=source_text,
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_inline",
+                text=source_text,
+                bbox=BoundingBox(x0=20, y0=60, x1=210, y1=72),
+                span_ids=[span.span_id],
+            )
+        ],
+        spans=[span],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert candidates == []
+    assert source_text[start : start + len(text)] == text
+
+
 def test_detector_keeps_inline_formula_boundary_before_explanation() -> None:
     block = DocumentBlock(
         block_id="b_inline_boundary",
@@ -195,6 +362,59 @@ def test_detector_keeps_inline_formula_boundary_before_explanation() -> None:
     assert len(candidates) == 1
     assert candidates[0].display_mode == "inline"
     assert candidates[0].source_text == "B=p"
+    assert candidates[0].bbox.x0 > block.bbox.x0
+    assert candidates[0].bbox.x1 < block.bbox.x1
+    assert "formula_estimated_bbox" in candidates[0].quality_flags
+
+
+def test_legacy_inline_formula_without_span_ids_gets_estimated_bbox() -> None:
+    source_text = "given by eta(t,x)=u(t,x)- R/R x is"
+    block = DocumentBlock(
+        block_id="b_legacy_inline",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=260, y1=80),
+        reading_order=0,
+        source_text=source_text,
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_legacy_inline",
+                text=source_text,
+                bbox=BoundingBox(x0=20, y0=60, x1=250, y1=72),
+                span_ids=[],
+            )
+        ],
+    )
+    formula = FormulaIR(
+        formula_id="legacy_inline",
+        page_id="p1",
+        anchor_block_id="b_legacy_inline",
+        latex="\\dot{R} Rx",
+        source_text="R/R x",
+        source_text_range=(27, 32),
+        display_mode="inline",
+        source_kind=FormulaSourceKind.INLINE_TEXT,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+        formulas=[formula],
+    )
+
+    candidates = detect_formula_candidates(document)
+
+    assert len(candidates) == 1
+    assert candidates[0].bbox.x0 > block.bbox.x0
+    assert candidates[0].bbox.x1 < block.bbox.x1
+    assert "formula_estimated_bbox" in candidates[0].quality_flags
 
 
 def test_legacy_formula_normalization_does_not_promote_sentence_formula_role_to_display() -> None:
@@ -231,6 +451,168 @@ def test_legacy_formula_normalization_does_not_promote_sentence_formula_role_to_
     assert normalized_block.text_for_translation == (
         f"We solve {{{{formula:{formula.formula_id}}}}} in the text and preserve it."
     )
+
+
+def test_legacy_formula_cluster_replaces_already_kept_weak_fragment() -> None:
+    weak_fragment = DocumentBlock(
+        block_id="weak_fragment",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=80, y0=72, x1=102, y1=82),
+        reading_order=0,
+        source_text="vn",
+    )
+    inline_formula = DocumentBlock(
+        block_id="inline_formula",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=96, y0=74, x1=240, y1=96),
+        reading_order=1,
+        source_text="{{formula:Finline}}",
+        text_for_translation="{{formula:Finline}}",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[weak_fragment, inline_formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="Finline",
+                page_id="p1",
+                anchor_block_id="inline_formula",
+                latex="x = y + 1",
+                source_text="x = y + 1",
+                display_mode="inline",
+                source_kind="inline_text",
+                quality_flags=["latex_heuristic"],
+            )
+        ],
+    )
+
+    normalized = __import__(
+        "app.pipeline.formula_processing",
+        fromlist=["normalize_document_formulas"],
+    ).normalize_document_formulas(document)
+
+    block_ids = [block.block_id for block in normalized.pages[0].blocks]
+    assert len(block_ids) == len(set(block_ids))
+    assert block_ids == ["weak_fragment"]
+    assert normalized.pages[0].blocks[0].source_text == "vn {{formula:Finline}}"
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [
+        r"d \ge 2",
+        r"h \ge 1",
+        r"\le 0",
+        r"2 dx \le C",
+        r"\infty",
+    ],
+)
+def test_formula_validator_accepts_short_latex_relation_commands(
+    latex: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(formula_validation, "_katex_render_error", lambda _latex: None)
+
+    result = validate_formula_latex(latex)
+
+    assert result.accepted
+
+
+def test_inline_formula_detector_rejects_prose_and_address_fragments() -> None:
+    detector = __import__(
+        "app.pipeline.formulas.detector",
+        fromlist=["_looks_like_inline_formula_text"],
+    )
+
+    assert not detector._looks_like_inline_formula_text("D-80333")
+    assert not detector._looks_like_inline_formula_text("x-variable")
+    assert not detector._looks_like_inline_formula_text(r"\infty and")
+    assert detector._looks_like_inline_formula_text("d≥3")
+
+
+def test_inline_formula_detector_uses_text_boundaries_for_false_positive_guards() -> None:
+    spans = [
+        TextSpanIR(
+            span_id="s_math",
+            page_id="p1",
+            block_id="b_inline",
+            line_id="l1",
+            text="∞",
+            bbox=BoundingBox(x0=20, y0=60, x1=28, y1=72),
+            font_name="Cambria Math",
+            font_size=10,
+        ),
+        TextSpanIR(
+            span_id="s_tail",
+            page_id="p1",
+            block_id="b_inline",
+            line_id="l1",
+            text="and the limit holds.",
+            bbox=BoundingBox(x0=28, y0=60, x1=130, y1=72),
+            font_name="Times New Roman",
+            font_size=10,
+        ),
+    ]
+    block = DocumentBlock(
+        block_id="b_inline",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=55, x1=140, y1=80),
+        reading_order=0,
+        source_text="∞and the limit holds.",
+        lines=[
+            TextLineIR(
+                line_id="l1",
+                page_id="p1",
+                block_id="b_inline",
+                text="∞and the limit holds.",
+                bbox=BoundingBox(x0=20, y0=60, x1=130, y1=72),
+                span_ids=[span.span_id for span in spans],
+            )
+        ],
+        spans=spans,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[block],
+            )
+        ],
+    )
+
+    assert detect_formula_candidates(document) == []
+
+
+def test_pdf_formula_normalization_repairs_common_vlasov_poisson_glyphs() -> None:
+    latex, flags = latex_from_pdf_text("△U = ερ, ρ(t,x)= Z IR_d f(t,x,v)dv (1.1)")
+
+    assert r"\Delta" in latex
+    assert r"\epsilon" in latex
+    assert r"\rho" in latex
+    assert r"\int_{\mathbb{R}^{d}}" in latex
+    assert r"\tag{1.1}" in latex
+    assert "formula_pdf_math_degradation_repaired" in flags
+    assert "formula_equation_number_preserved" in flags
+
+
+def test_pdf_formula_normalization_repairs_compact_partial_derivatives() -> None:
+    latex, flags = latex_from_pdf_text("∂tf + ∂xU - ∂ξW")
+
+    assert r"\partial_{t} f" in latex
+    assert r"\partial_{x} U" in latex
+    assert r"\partial_{\xi} W" in latex
+    assert "formula_compact_partial_repaired" in flags
 
 
 def test_formula_validation_handles_empty_stderr_without_crashing(
@@ -577,6 +959,7 @@ def test_aip_pdf_page_one_regression_when_fixture_available(
             ocr_service=OCRService(
                 providers=[Pix2TextFixtureProvider(), DeterministicOCRProvider()]
             ),
+            formula_recognition_mode="visual_ocr",
         )
     )
     display_formulas = [
@@ -760,6 +1143,39 @@ def test_ocr_service_falls_back_to_deterministic_provider() -> None:
     diagnostics = service.diagnostics()
     assert diagnostics["record_count"] == 1
     assert diagnostics["active_provider_order"] == ["empty", "deterministic"]
+
+
+def test_ocr_service_reports_visual_candidate_limit(tmp_path: Path) -> None:
+    png_path = tmp_path / "formula.png"
+    png_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
+        b"\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x01\x01\x01\x00"
+        b"\x18\xdd\x8d\xb0\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    candidate = replace(
+        detect_formula_candidates(_document())[1],
+        image_path=str(png_path),
+    )
+    service = OCRService(
+        providers=[DeterministicOCRProvider()],
+        max_visual_candidates=0,
+    )
+
+    result = asyncio.run(service.recognize_formula(candidate, prefer_visual=True))
+    diagnostics = service.diagnostics()
+
+    assert result.provider == "deterministic"
+    assert "formula_visual_ocr_skipped_by_cap" in result.quality_flags
+    assert diagnostics["records"][0]["visual_status"] == "skipped_by_cap"
+    assert diagnostics["records"][0]["fallback_status"] == (
+        "deterministic_fallback_after_visual_skip"
+    )
+    assert diagnostics["visual_skipped_by_cap_count"] == 1
+    assert diagnostics["deterministic_fallback_after_visual_failure_count"] == 1
+    assert diagnostics["visual_skipped_count"] == 1
+    assert diagnostics["visual_failure_count"] == 1
+    assert diagnostics["max_visual_candidates"] == 0
 
 
 def test_ocr_service_times_out_slow_provider_and_falls_back_to_deterministic() -> None:
@@ -969,16 +1385,141 @@ def test_formula_service_updates_document_ir_and_diagnostics(tmp_path) -> None:
         )
     )
 
-    assert len(result.formulas) == 1
-    assert result.document.formulas_by_id()[result.formulas[0].formula_id].latex == "E = mc^2"
+    assert len(result.formulas) == 2
+    text_formula = next(formula for formula in result.formulas if formula.latex == "E = mc^2")
+    assert result.document.formulas_by_id()[text_formula.formula_id].latex == "E = mc^2"
     assert result.document.pages[0].blocks[0].source_text.startswith("{{formula:")
-    assert result.document.pages[0].blocks[0].formula_id == result.formulas[0].formula_id
+    assert result.document.pages[0].blocks[0].formula_id == text_formula.formula_id
     assert result.diagnostics["candidate_count"] == 2
-    assert result.diagnostics["accepted_count"] == 1
-    assert result.diagnostics["rejected_count"] == 1
-    assert "formula_visual_mock_rejected" in result.diagnostics["quality_flags"]
+    assert result.diagnostics["accepted_count"] == 2
+    assert result.diagnostics["rejected_count"] == 0
+    assert any("formula_source_preserved" in formula.quality_flags for formula in result.formulas)
+    assert "formula_visual_mock_rejected" not in result.diagnostics["quality_flags"]
     assert "visual_formula_recognition_disabled" in result.diagnostics["quality_flags"]
     assert result.diagnostics["recognizer_type"] == "deterministic"
+
+
+def test_formula_service_creates_source_assets_for_inline_and_display_formulas(tmp_path) -> None:
+    import fitz
+
+    pdf_path = tmp_path / "formulas.pdf"
+    pdf = fitz.open()
+    page = pdf.new_page(width=300, height=220)
+    page.insert_text((20, 60), "where E = mc^2 holds.")
+    page.insert_text((80, 130), "a^2 + b^2 = c^2 (1)")
+    pdf.save(pdf_path)
+    pdf.close()
+
+    inline_spans = [
+        TextSpanIR(
+            span_id="s_text",
+            page_id="p1",
+            block_id="b_inline",
+            line_id="l_inline",
+            text="where ",
+            bbox=BoundingBox(x0=20, y0=50, x1=52, y1=64),
+            font_name="Times New Roman",
+            font_size=10,
+        ),
+        TextSpanIR(
+            span_id="s_formula",
+            page_id="p1",
+            block_id="b_inline",
+            line_id="l_inline",
+            text="E = mc^2",
+            bbox=BoundingBox(x0=52, y0=50, x1=96, y1=64),
+            font_name="Cambria Math",
+            font_size=10,
+        ),
+        TextSpanIR(
+            span_id="s_tail",
+            page_id="p1",
+            block_id="b_inline",
+            line_id="l_inline",
+            text=" holds.",
+            bbox=BoundingBox(x0=96, y0=50, x1=132, y1=64),
+            font_name="Times New Roman",
+            font_size=10,
+        ),
+    ]
+    inline_block = DocumentBlock(
+        block_id="b_inline",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=20, y0=48, x1=140, y1=68),
+        reading_order=0,
+        source_text="where E = mc^2 holds.",
+        lines=[
+            TextLineIR(
+                line_id="l_inline",
+                page_id="p1",
+                block_id="b_inline",
+                text="where E = mc^2 holds.",
+                bbox=BoundingBox(x0=20, y0=50, x1=132, y1=64),
+                span_ids=[span.span_id for span in inline_spans],
+            )
+        ],
+        spans=inline_spans,
+    )
+    display_block = DocumentBlock(
+        block_id="b_display",
+        page_id="p1",
+        role=BlockRole.FORMULA,
+        bbox=BoundingBox(x0=78, y0=116, x1=220, y1=138),
+        reading_order=1,
+        source_text="a^2 + b^2 = c^2 (1)",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=220),
+                blocks=[inline_block, display_block],
+            )
+        ],
+    )
+
+    class FailingOCRProvider:
+        name = "pix2text"
+
+        async def recognize_formula(self, candidate, *, image_path=None):
+            raise AssertionError("default primitive replay must not invoke OCR")
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            pdf_path=pdf_path,
+            recognizer=DeterministicFormulaRecognizer(),
+            ocr_service=OCRService(providers=[FailingOCRProvider()]),
+        )
+    )
+
+    assert len(result.formulas) == 2
+    assert all(formula.asset_id for formula in result.formulas)
+    assert all(formula.pdf_formula is not None for formula in result.formulas)
+    assert all("formula_pdf_primitive_primary" in formula.quality_flags for formula in result.formulas)
+    assert all("formula_source_preserved" in formula.quality_flags for formula in result.formulas)
+    assert all("formula_source_asset_primary" in formula.quality_flags for formula in result.formulas)
+    assert result.diagnostics["formula_recognition_mode"] == "pdf_primitive_replay"
+    assert result.diagnostics["primitive_formula_count"] == 2
+    assert result.diagnostics["performance"]["visual_attempt_count"] == 0
+    assert result.ocr_records == []
+    assert len([asset for asset in result.document.pages[0].assets if asset.kind == "formula"]) == 2
+    assert len(list(tmp_path.glob("*.svg"))) == 2
+    assert not list(tmp_path.glob("*.png"))
+    assert all("formula_source_asset_svg" in formula.quality_flags for formula in result.formulas)
+    assert all(
+        asset.path and asset.path.endswith(".svg")
+        for asset in result.document.pages[0].assets
+        if asset.kind == "formula"
+    )
+    for svg_path in tmp_path.glob("*.svg"):
+        svg = svg_path.read_text(encoding="utf-8")
+        assert "<path" in svg
+        assert "<text" not in svg
 
 
 def test_formula_service_keeps_many_clean_text_formulas_on_fast_path(tmp_path) -> None:
@@ -1091,6 +1632,7 @@ def test_formula_service_parallelizes_slow_visual_candidates(tmp_path) -> None:
             ),
             formula_recognition_concurrency=concurrency,
             formula_visual_ocr_concurrency=concurrency,
+            formula_recognition_mode="visual_ocr",
         )
         return time.perf_counter() - started, result
 
@@ -1122,6 +1664,7 @@ def test_formula_service_reports_active_ocr_provider_order(tmp_path) -> None:
             ocr_service=OCRService(
                 providers=[EmptyPix2TextProvider(), DeterministicOCRProvider()]
             ),
+            formula_recognition_mode="visual_ocr",
         )
     )
 
@@ -1186,6 +1729,7 @@ def test_formula_service_accepts_minimax_latex_for_renderer(tmp_path) -> None:
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
             ocr_service=OCRService(providers=[MiniMaxProvider(), DeterministicOCRProvider()]),
+            formula_recognition_mode="visual_ocr",
             visual_formula_recognition_enabled=True,
         )
     )
@@ -1258,6 +1802,7 @@ def test_formula_service_migrates_legacy_display_formula_cluster(tmp_path) -> No
             doc_id="doc_1",
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
+            formula_recognition_mode="text_latex",
         )
     )
 
@@ -1271,6 +1816,292 @@ def test_formula_service_migrates_legacy_display_formula_cluster(tmp_path) -> No
     assert result.diagnostics["parser_cluster_count"] == 1
     assert result.diagnostics["display_cluster_promoted_count"] == 1
     assert result.diagnostics["legacy_formula_migrated_count"] >= 1
+
+
+def test_formula_service_flags_retained_legacy_formula_after_promoted_cluster_rejection(
+    tmp_path,
+) -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b_cluster",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+                        reading_order=0,
+                        source_text="{{formula:Flegacy_bad}}",
+                        text_for_translation="{{formula:Flegacy_bad}}",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="Flegacy_bad",
+                page_id="p1",
+                source_block_id="b_cluster",
+                latex="for (VP) or",
+                source_text="for (VP) or",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=["formula_display_cluster"],
+            )
+        ],
+    )
+    setattr(
+        document,
+        "_formula_fragment_cluster_diagnostics",
+        {
+            "formula_fragment_cluster_count": 1,
+            "formula_fragment_clusters": [
+                {
+                    "cluster_id": "cluster_bad",
+                    "page_id": "p1",
+                    "primary_block_id": "b_cluster",
+                    "merged_block_ids": ["b_cluster"],
+                    "formula_ids": ["Flegacy_bad"],
+                    "display_mode": "display",
+                    "combined_text": "{{formula:Flegacy_bad}}",
+                }
+            ],
+        },
+    )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            recognizer=DeterministicFormulaRecognizer(),
+            formula_recognition_mode="text_latex",
+        )
+    )
+
+    retained = result.document.formulas_by_id()["Flegacy_bad"]
+    assert result.formulas == []
+    assert "legacy_formula_retained_after_rejection" in retained.quality_flags
+    assert result.diagnostics["legacy_retained_count"] == 1
+    assert result.diagnostics["stale_formula_ref_count"] == 1
+    assert result.diagnostics["unknown_formula_ref_count"] == 0
+    assert "legacy_formula_retained_after_rejection" in result.diagnostics["quality_flags"]
+
+
+def test_formula_diagnostics_do_not_mark_stable_existing_refs_stale(tmp_path: Path) -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b_formula",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+                        reading_order=0,
+                        source_text="{{formula:f_existing}}",
+                        text_for_translation="{{formula:f_existing}}",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_existing",
+                page_id="p1",
+                source_block_id="b_formula",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    result = asyncio.run(
+        enrich_document_formulas(
+            document,
+            doc_id="doc_1",
+            asset_output_dir=tmp_path,
+            recognizer=DeterministicFormulaRecognizer(),
+        )
+    )
+
+    assert result.diagnostics["stale_formula_ref_count"] == 0
+    assert result.diagnostics["legacy_retained_count"] == 0
+    assert result.diagnostics["unknown_formula_ref_count"] == 0
+
+
+def test_display_cluster_crop_asset_keeps_image_fallback_after_text_rejection() -> None:
+    candidate = FormulaCandidate(
+        candidate_id="p0005_display_cluster_deadbeef",
+        page_id="p1",
+        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+        source_kind=FormulaSourceKind.TEXT_LAYER,
+        source_block_id="b_cluster",
+        source_text="for (VP) or",
+        display_mode="display",
+        quality_flags=("formula_display_cluster",),
+    )
+    validator = validate_formula_latex(
+        "for (VP) or",
+        source_text=candidate.source_text,
+        display_mode="display",
+    )
+    formula = FormulaIR(
+        formula_id=candidate.candidate_id,
+        page_id="p1",
+        source_block_id="b_cluster",
+        asset_id=candidate.candidate_id,
+        latex="for (VP) or",
+        source_text=candidate.source_text,
+        display_mode="display",
+        source_kind="text_layer",
+        quality_flags=[
+            "formula_display_cluster",
+            *validator.quality_flags,
+        ],
+    )
+
+    assert validator.status in {"prose_like", "not_math"}
+    assert _should_attach_image_fallback_formula(
+        candidate,
+        validator,
+        candidate_asset_id=candidate.candidate_id,
+    )
+    assert _formula_attachment_rejection_reason(candidate, formula, validator) is None
+
+
+def test_translation_plan_formula_ref_diagnostics_rejects_unknown_refs_and_raw_tex() -> None:
+    token = "{{formula:Fknown}}"
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=20, y0=55, x1=280, y1=90),
+                        reading_order=0,
+                        source_text=f"The relation {token} holds.",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="Fknown",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="d \\ge 3",
+                source_text="d≥3",
+                display_mode="inline",
+                source_kind="inline_text",
+            )
+        ],
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=f"The relation {token} holds.",
+                preserve_tokens=[token],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        target_lang="zh-CN",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=(
+                    "关系 {{formula:Fknown}} 与 {{formula:Fmissing}} and $t\\ge 0$."
+                ),
+                inline_items=[
+                    InlineItem(kind="formula", text=token, source_token=token),
+                ],
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    diagnostics = validate_translation_plan_formula_refs(
+        document=document,
+        chunks=[chunk],
+        plans=[plan],
+    )
+
+    assert diagnostics["status"] == "invalid"
+    assert diagnostics["unknown_formula_ref_count"] == 1
+    assert diagnostics["unknown_plan_formula_refs"][0]["formula_id"] == "Fmissing"
+    assert diagnostics["raw_tex_detected_count"] == 1
+    assert diagnostics["raw_tex_unrendered_count"] == 0
+    assert "raw_tex_detected" in diagnostics["quality_flags"]
+
+
+def test_normalized_input_reports_formula_asset_counts() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b_formula",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+                        reading_order=0,
+                        source_text="{{formula:F1}}",
+                        formula_id="F1",
+                    )
+                ],
+                assets=[
+                    Asset(
+                        asset_id="a_formula",
+                        page_id="p1",
+                        kind="formula",
+                        bbox=BoundingBox(x0=20, y0=80, x1=280, y1=120),
+                        path="/api/documents/doc_1/assets/a_formula.png",
+                        formula_id="F1",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="F1",
+                page_id="p1",
+                source_block_id="b_formula",
+                asset_id="a_formula",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+            )
+        ],
+    )
+
+    payload = normalized_input_payload(input_sources=[], document=document)
+
+    assert payload["document_asset_count"] == 1
+    assert payload["formula_asset_count"] == 1
+    assert payload["normalized_input_formula_asset_count"] == 1
+    assert payload["document_formula_count"] == 1
 
 
 def test_formula_service_keeps_clean_complex_display_formula_on_text_layer(tmp_path) -> None:
@@ -1316,6 +2147,7 @@ def test_formula_service_keeps_clean_complex_display_formula_on_text_layer(tmp_p
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
             ocr_service=OCRService(providers=[FailingVisualProvider(), DeterministicOCRProvider()]),
+            formula_recognition_mode="text_latex",
         )
     )
 
@@ -1323,6 +2155,39 @@ def test_formula_service_keeps_clean_complex_display_formula_on_text_layer(tmp_p
     assert result.formulas[0].ocr_provider == "text_layer_normalizer"
     assert "formula_visual_escalated" not in result.diagnostics["records"][0]["quality_flags"]
     assert result.diagnostics["records"][0]["status"] == "recognized"
+
+
+def test_formula_service_escalates_promoted_display_cluster_even_when_text_is_accepted() -> None:
+    candidate = FormulaCandidate(
+        candidate_id="p0016_formula_baacb8365adb",
+        page_id="p0016",
+        bbox=BoundingBox(x0=330, y0=577, x1=443, y1=609),
+        source_kind=FormulaSourceKind.TEXT_LAYER,
+        source_block_id="p0016_ba67e157c3022",
+        source_text=r"|x|2 - 2 \dot{R} R| \eta |2F dxd \eta . \dot{R} R",
+        display_mode="display",
+        quality_flags=("formula_display_cluster", "legacy_formula_migrated"),
+    )
+    latex = r"|x|2 - 2 \dot{R} R| \eta |2F dxd \eta . \dot{R} R"
+    validator = validate_formula_latex(
+        latex,
+        source_text=candidate.source_text,
+        display_mode="display",
+    )
+    result = FormulaRecognitionResult(
+        latex=latex,
+        display_mode="display",
+        confidence=0.92,
+        accepted_provider="text_layer_normalizer",
+        accepted_confidence=0.92,
+        validator_status=validator.status,
+        source_kind=FormulaSourceKind.TEXT_LAYER,
+    )
+
+    assert validator.accepted
+    assert _should_escalate_text_candidate(candidate, result, validator)
+    clean_candidate = replace(candidate, quality_flags=("formula_display_cluster",))
+    assert not _should_escalate_text_candidate(clean_candidate, result, validator)
 
 
 def test_formula_service_prefers_visual_provider_for_corrupt_display_text_layer(tmp_path) -> None:
@@ -1375,6 +2240,7 @@ def test_formula_service_prefers_visual_provider_for_corrupt_display_text_layer(
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
             ocr_service=OCRService(providers=[VisualProvider(), DeterministicOCRProvider()]),
+            formula_recognition_mode="visual_ocr",
         )
     )
 
@@ -1473,6 +2339,7 @@ def test_formula_service_attaches_image_fallback_when_corrupt_display_ocr_fails(
             asset_output_dir=tmp_path,
             recognizer=DeterministicFormulaRecognizer(),
             ocr_service=OCRService(providers=[EmptyVisualProvider(), DeterministicOCRProvider()]),
+            formula_recognition_mode="visual_ocr",
         )
     )
 
@@ -1516,6 +2383,7 @@ def test_formula_service_rejects_prose_display_formula_without_rewriting_block(t
             doc_id="doc_1",
             asset_output_dir=tmp_path,
             ocr_service=OCRService(providers=[DeterministicOCRProvider()]),
+            formula_recognition_mode="text_latex",
         )
     )
 
@@ -1575,6 +2443,7 @@ def test_formula_service_keeps_deterministic_display_fallback_when_visual_ocr_is
             doc_id="doc_1",
             asset_output_dir=tmp_path,
             ocr_service=OCRService(providers=[ProseOCRProvider()]),
+            formula_recognition_mode="visual_ocr",
         )
     )
 

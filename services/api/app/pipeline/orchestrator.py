@@ -41,9 +41,11 @@ from .docx import DocxConversionError, convert_docx_to_pdf
 from .formula_processing import build_formula_diagnostics
 from .formulas import (
     DeterministicFormulaRecognizer,
+    FormulaEnrichmentResult,
     OpenAIFormulaRecognizer,
     enrich_document_formulas,
 )
+from .mineru_adapter import MinerUAdapterError, parse_pdf_with_mineru
 from .ocr import (
     DeterministicOCRProvider,
     MiniMaxVisionOCRProvider,
@@ -69,6 +71,7 @@ from .workflow import (
     render_evaluation_summary,
     safe_validate_layout_intent_plan,
     source_preserving_summary,
+    validate_translation_plan_formula_refs,
 )
 
 
@@ -83,6 +86,12 @@ def update_status(
     error: str | None = None,
     chunks: list[ChunkProgress] | None = None,
 ) -> None:
+    try:
+        current = storage.load_status(job_id)
+    except FileNotFoundError:
+        current = None
+    if current is not None and current.status == JobState.CANCELED and status != JobState.CANCELED:
+        return
     storage.save_status(
         JobStatus(
             job_id=job_id,
@@ -676,7 +685,7 @@ def _graph_context() -> TypesettingGraphContext:
         mark_failed=_mark_failed,
         save_workflow=_save_workflow,
         load_saved_workflow=_load_saved_workflow,
-        parse_pdf=parse_pdf,
+        parse_pdf=_parse_pdf_with_config,
         build_parser_diagnostics=build_parser_diagnostics,
         enrich_document_formulas=_enrich_document_formulas,
         build_formula_diagnostics=build_formula_diagnostics,
@@ -702,8 +711,72 @@ def _graph_context() -> TypesettingGraphContext:
             "render_evaluation_summary": render_evaluation_summary,
             "safe_validate_layout_intent_plan": safe_validate_layout_intent_plan,
             "source_preserving_summary": source_preserving_summary,
+            "validate_translation_plan_formula_refs": validate_translation_plan_formula_refs,
         },
     )
+
+
+def _parse_pdf_with_config(
+    pdf_path: Path,
+    doc_id: str,
+    asset_output_dir: Path | None = None,
+) -> DocumentIR:
+    runtime_config = effective_runtime_config(storage)
+    extraction_backend = str(runtime_config.get("extraction_backend", "mineru"))
+    if extraction_backend != "mineru":
+        return parse_pdf(pdf_path, doc_id, asset_output_dir)
+
+    try:
+        result = parse_pdf_with_mineru(
+            pdf_path,
+            doc_id,
+            asset_output_dir=asset_output_dir,
+            output_dir=storage.output_dir(doc_id) / "mineru",
+            backend=str(runtime_config.get("mineru_backend", "pipeline")),
+            method=str(runtime_config.get("mineru_method", "auto")),
+            formula_enabled=bool(runtime_config.get("mineru_formula_enabled", True)),
+            table_enabled=bool(runtime_config.get("mineru_table_enabled", True)),
+            timeout_seconds=int(runtime_config.get("mineru_timeout_seconds", 3600) or 3600),
+        )
+        storage.write_json(doc_id, "mineru-diagnostics.json", result.diagnostics)
+        for artifact_name, payload in result.artifacts.items():
+            if payload is not None:
+                storage.write_json(doc_id, f"{artifact_name}.json", payload)
+        return result.document
+    except (MinerUAdapterError, OSError, ValueError) as exc:
+        adapter_diagnostics = (
+            getattr(exc, "diagnostics", {}) if isinstance(exc, MinerUAdapterError) else {}
+        )
+        if not isinstance(adapter_diagnostics, dict):
+            adapter_diagnostics = {}
+        storage.write_json(
+            doc_id,
+            "mineru-diagnostics.json",
+            {
+                "kind": "mineru_diagnostics",
+                "status": "fallback_to_pymupdf",
+                "backend": runtime_config.get("mineru_backend", "pipeline"),
+                "method": runtime_config.get("mineru_method", "auto"),
+                "error": str(exc),
+                "fallback_backend": "pymupdf",
+                "quality_flags": ["mineru_extraction_failed", "pymupdf_fallback_used"],
+                **adapter_diagnostics,
+            },
+        )
+        fallback = parse_pdf(pdf_path, doc_id, asset_output_dir)
+        return fallback.model_copy(
+            update={
+                "extraction_backend": "pymupdf",
+                "quality_flags": _unique_strings(
+                    [
+                        *fallback.quality_flags,
+                        "mineru_extraction_failed",
+                        "pymupdf_fallback_used",
+                    ]
+                ),
+            },
+            deep=True,
+        )
 
 
 async def _enrich_document_formulas(
@@ -716,19 +789,93 @@ async def _enrich_document_formulas(
     target_lang: str = "",
 ) -> Any:
     runtime_config = effective_runtime_config(storage)
+    if document.extraction_backend == "mineru":
+        records = [
+            {
+                "formula_id": formula.formula_id,
+                "status": "source_clip_replay",
+                "latex": formula.latex,
+                "accepted_provider": formula.ocr_provider or "mineru",
+                "accepted_confidence": formula.confidence,
+                "validator_status": "source_preserved",
+                "fallback_reason": None,
+                "source_kind": formula.source_kind.value,
+                "quality_flags": formula.quality_flags,
+            }
+            for formula in document.formulas
+        ]
+        diagnostics = {
+            "kind": "formula_diagnostics",
+            "parser_cluster_count": 0,
+            "enrichment_candidate_count": len(document.formulas),
+            "candidate_count": len(document.formulas),
+            "document_formula_count": len(document.formulas),
+            "recognized_count": len(document.formulas),
+            "accepted_count": len(document.formulas),
+            "rejected_count": 0,
+            "primitive_formula_count": 0,
+            "source_clip_formula_count": sum(
+                1
+                for formula in document.formulas
+                if formula.pdf_formula is not None
+                and formula.pdf_formula.replay_kind == "source_clip"
+            ),
+            "quality_flags": ["mineru_formula_source_preserved"],
+            "records": records,
+            "rejected_records": [],
+            "source_counts": {"mineru": len(document.formulas)},
+            "recognizer_type": "mineru",
+            "formula_recognition_mode": "mineru_source_clip",
+            "visual_formula_recognition_enabled": False,
+            "performance": {
+                "kind": "formula_performance",
+                "candidate_count": len(document.formulas),
+                "crop_count": 0,
+                "text_recognition_ms": 0.0,
+                "visual_ocr_ms": 0.0,
+                "visual_ocr_ms_by_provider": {},
+                "validation_ms": 0.0,
+                "crop_ms": 0.0,
+                "cache_hit_count": 0,
+                "visual_attempt_count": 0,
+                "skipped_visual_count": 0,
+                "primitive_replay_ms": 0.0,
+                "total_ms": 0.0,
+            },
+            "ocr": {"status": "not_requested", "provider_order": []},
+        }
+        return FormulaEnrichmentResult(
+            document=document,
+            formulas=list(document.formulas),
+            diagnostics=diagnostics,
+            recognition_records=records,
+            candidates=records,
+            ocr_records=[],
+        )
+    formula_recognition_mode = str(
+        runtime_config.get("formula_recognition_mode", "pdf_primitive_replay")
+    )
     provider_order = [str(provider) for provider in runtime_config.get("ocr_provider_order", [])]
+    visual_ocr_enabled = formula_recognition_mode == "visual_ocr"
+    active_provider_order = provider_order if visual_ocr_enabled else ["deterministic"]
     formula_openai_enabled = bool(
-        runtime_config["openai_api_key"]
-        and "openai_vision" in provider_order
+        visual_ocr_enabled
+        and runtime_config["openai_api_key"]
+        and "openai_vision" in active_provider_order
     )
     formula_minimax_enabled = bool(
-        runtime_config.get("minimax_api_key")
-        and "minimax_vision" in provider_order
+        visual_ocr_enabled
+        and runtime_config.get("minimax_api_key")
+        and "minimax_vision" in active_provider_order
     )
     openai_ocr_provider: Any | None = None
     minimax_ocr_provider: Any | None = None
     recognizer = DeterministicFormulaRecognizer()
-    recognizer_type = "deterministic"
+    recognizer_type = (
+        "pdf_primitive_replay"
+        if formula_recognition_mode == "pdf_primitive_replay"
+        else "deterministic"
+    )
     if formula_openai_enabled:
         openai_ocr_provider = OpenAIVisionOCRProvider(
             OpenAIFormulaRecognizer(
@@ -752,7 +899,7 @@ async def _enrich_document_formulas(
         "deterministic": DeterministicOCRProvider,
     }
     ocr_providers: list[Any] = []
-    for provider_name in provider_order:
+    for provider_name in active_provider_order:
         if provider_name == "openai_vision":
             if openai_ocr_provider is not None:
                 ocr_providers.append(openai_ocr_provider)
@@ -775,13 +922,18 @@ async def _enrich_document_formulas(
     def update_formula_progress(index: int, total: int, _candidate: Any) -> None:
         if not job_id:
             return
+        progress_verb = (
+            "Preserving formulas"
+            if formula_recognition_mode == "pdf_primitive_replay"
+            else "Recognizing formulas"
+        )
         update_status(
             job_id,
             filename,
             target_lang,
             JobState.PARSING,
             0.17,
-            f"Recognizing formulas {index}/{total}",
+            f"{progress_verb} {index}/{total}",
             doc_id,
         )
 
@@ -809,7 +961,9 @@ async def _enrich_document_formulas(
             "formula_visual_ocr_concurrency",
             2,
         ),
-        visual_formula_recognition_enabled=any(
+        formula_recognition_mode=formula_recognition_mode,
+        visual_formula_recognition_enabled=visual_ocr_enabled
+        and any(
             getattr(provider, "name", "") in {"pix2text", "openai_vision", "minimax_vision"}
             for provider in ocr_providers
         ),
@@ -890,8 +1044,9 @@ async def _run_workflow_from_document(
         intent.workflow_mode == WorkflowMode.TYPESET_ONLY
         or intent.output_kind == OutputKind.TYPESET_DOCUMENT
     )
+    chunks = _load_saved_translation_chunks(doc_id, document, target_lang)
     article_brief = None
-    if not translation_skipped:
+    if not translation_skipped and chunks is None:
         update_status(
             job_id,
             filename,
@@ -914,17 +1069,31 @@ async def _run_workflow_from_document(
             "article-brief.json",
             article_brief.model_dump(mode="json"),
         )
-    chunks = build_chunks(
-        document,
-        target_lang=target_lang,
-        max_chars=runtime_config["translation_chunk_max_chars"],
-        render_defaults=render_defaults,
-        article_brief=article_brief,
-    )
+    if chunks is None:
+        chunks = build_chunks(
+            document,
+            target_lang=target_lang,
+            max_chars=runtime_config["translation_chunk_max_chars"],
+            render_defaults=render_defaults,
+            article_brief=article_brief,
+        )
     if not chunks:
         raise ValueError("Document has no translatable chunks")
     storage.write_json(doc_id, "translation-chunks.json", [chunk.model_dump() for chunk in chunks])
-    storage.write_json(doc_id, "formula-diagnostics.json", build_formula_diagnostics(document))
+    formula_summary = build_formula_diagnostics(document)
+    existing_formula_diagnostics: dict[str, Any] = {}
+    if storage.output_json_path(doc_id, "formula-diagnostics.json").exists():
+        try:
+            existing = storage.read_output_json(doc_id, "formula-diagnostics.json")
+        except Exception:
+            existing = {}
+        if isinstance(existing, dict):
+            existing_formula_diagnostics = existing
+    storage.write_json(
+        doc_id,
+        "formula-diagnostics.json",
+        {**existing_formula_diagnostics, **formula_summary},
+    )
     if translation_skipped:
         plans = build_source_preserving_layout_plans(
             document=document,
@@ -957,6 +1126,21 @@ async def _run_workflow_from_document(
         if retypeset_source:
             summary = {**summary, **retypeset_source}
         storage.write_json(doc_id, "retypeset-source.json", summary)
+        formula_ref_diagnostics = validate_translation_plan_formula_refs(
+            document=document,
+            chunks=chunks,
+            plans=plans,
+        )
+        storage.write_json(
+            doc_id,
+            "translation-formula-ref-diagnostics.json",
+            formula_ref_diagnostics,
+        )
+        if formula_ref_diagnostics["status"] != "valid":
+            raise ValueError(
+                "source-preserving plan contains unresolved formula refs; see "
+                "translation-formula-ref-diagnostics.json"
+            )
         workflow = append_workflow_step(
             workflow,
             make_workflow_step(
@@ -968,6 +1152,7 @@ async def _run_workflow_from_document(
                 output_artifacts=[
                     "translation-plans",
                     "translation-progress",
+                    "translation-formula-ref-diagnostics",
                     "edit-scope",
                     "retypeset-source",
                 ],
@@ -1000,7 +1185,11 @@ async def _run_workflow_from_document(
                 progress=0.36,
                 message=f"Translating 0 of {len(chunks)} chunks",
                 input_artifacts=["translation-chunks"],
-                output_artifacts=["translation-plans", "translation-progress"],
+                output_artifacts=[
+                    "translation-plans",
+                    "translation-progress",
+                    "translation-formula-ref-diagnostics",
+                ],
             ),
         )
         _save_workflow(doc_id, workflow)
@@ -1025,6 +1214,21 @@ async def _run_workflow_from_document(
             translation_concurrency=runtime_config["translation_concurrency"],
             reuse_cached_plans=True,
         )
+        formula_ref_diagnostics = validate_translation_plan_formula_refs(
+            document=document,
+            chunks=chunks,
+            plans=plans,
+        )
+        storage.write_json(
+            doc_id,
+            "translation-formula-ref-diagnostics.json",
+            formula_ref_diagnostics,
+        )
+        if formula_ref_diagnostics["status"] != "valid":
+            raise ValueError(
+                "translation plan contains unresolved formula refs; see "
+                "translation-formula-ref-diagnostics.json"
+            )
         workflow = append_workflow_step(
             workflow,
             make_workflow_step(
@@ -1033,7 +1237,11 @@ async def _run_workflow_from_document(
                 progress=0.78,
                 message=f"Translated {len(chunks)} chunks",
                 input_artifacts=["translation-chunks"],
-                output_artifacts=["translation-plans", "translation-progress"],
+                output_artifacts=[
+                    "translation-plans",
+                    "translation-progress",
+                    "translation-formula-ref-diagnostics",
+                ],
             ),
         )
         _save_workflow(doc_id, workflow)
@@ -1161,6 +1369,7 @@ async def _run_workflow_from_document(
         pdf_output,
         diagnostics_path=pdf_diagnostics_path,
         asset_base_path=storage.asset_dir(doc_id),
+        source_pdf_path=storage.find_upload(doc_id, role="content"),
     )
     if not pdf_diagnostics_path.exists():
         storage.write_json(
@@ -1490,15 +1699,17 @@ async def _render_pdf_with_optional_diagnostics(
     *,
     diagnostics_path: Path,
     asset_base_path: Path,
+    source_pdf_path: Path | None = None,
 ) -> Path:
     signature = inspect.signature(render_to_pdf)
     if "diagnostics_path" in signature.parameters:
-        return await render_to_pdf(
-            html,
-            output_path,
-            diagnostics_path=diagnostics_path,
-            asset_base_path=asset_base_path,
-        )
+        kwargs: dict[str, Any] = {
+            "diagnostics_path": diagnostics_path,
+            "asset_base_path": asset_base_path,
+        }
+        if "source_pdf_path" in signature.parameters:
+            kwargs["source_pdf_path"] = source_pdf_path
+        return await render_to_pdf(html, output_path, **kwargs)
     return await render_to_pdf(html, output_path)
 
 
@@ -1607,6 +1818,40 @@ def _load_saved_chunk_progress(doc_id: str) -> list[ChunkProgress]:
         except Exception:
             continue
     return progress
+
+
+def _load_saved_translation_chunks(
+    doc_id: str,
+    document: DocumentIR,
+    target_lang: str,
+) -> list[TranslationChunk] | None:
+    try:
+        payload = storage.read_output_json(doc_id, "translation-chunks.json")
+    except Exception:
+        return None
+    if not isinstance(payload, list):
+        return None
+    document_block_ids = {
+        block.block_id
+        for page in document.pages
+        for block in page.blocks
+    }
+    chunks: list[TranslationChunk] = []
+    seen_chunk_ids: set[str] = set()
+    try:
+        for item in payload:
+            chunk = TranslationChunk.model_validate(item)
+            if chunk.target_lang != target_lang:
+                return None
+            if chunk.chunk_id in seen_chunk_ids:
+                return None
+            if not chunk.source_block_ids().issubset(document_block_ids):
+                return None
+            seen_chunk_ids.add(chunk.chunk_id)
+            chunks.append(chunk)
+    except Exception:
+        return None
+    return chunks or None
 
 
 def _save_workflow(doc_id: str, workflow: WorkflowRun) -> None:

@@ -48,7 +48,7 @@ import {
   verifyDownload,
   verifyPreview
 } from "./api";
-import type { ArtifactSummary, JobLogEvent, RuntimeConfig } from "./api";
+import type { ArtifactSummary, FormulaRecognitionMode, JobLogEvent, RuntimeConfig } from "./api";
 import "./styles.css";
 
 type UploadIssue = {
@@ -197,6 +197,7 @@ function App() {
     ocr_min_confidence: 0.35,
     ocr_provider_timeout_seconds: 12,
     ocr_max_visual_candidates: 4,
+    formula_recognition_mode: "pdf_primitive_replay" as FormulaRecognitionMode,
     formula_recognition_concurrency: 8,
     formula_visual_ocr_concurrency: 2
   });
@@ -361,6 +362,7 @@ function App() {
         ocr_min_confidence: config.ocr_min_confidence,
         ocr_provider_timeout_seconds: config.ocr_provider_timeout_seconds,
         ocr_max_visual_candidates: config.ocr_max_visual_candidates,
+        formula_recognition_mode: config.formula_recognition_mode,
         formula_recognition_concurrency: config.formula_recognition_concurrency,
         formula_visual_ocr_concurrency: config.formula_visual_ocr_concurrency
       });
@@ -963,6 +965,16 @@ function App() {
     setIsContinuingJob(true);
     try {
       const payload = await continueJob(job.job_id);
+      seenLogEventIdsRef.current.clear();
+      hiddenLogEventIdsRef.current.clear();
+      setLogEvents([]);
+      setLogIssue(null);
+      setLastLogEventAt(null);
+      setNowMs(Date.now());
+      setLogState("loading");
+      setPreviewIssue(null);
+      setPreviewState("idle");
+      setRenderEvaluationWarning(null);
       setDocId(payload.doc_id);
       await refreshJob(payload.job_id);
       await refreshHistory();
@@ -1049,6 +1061,7 @@ function App() {
         ocr_min_confidence: configDraft.ocr_min_confidence,
         ocr_provider_timeout_seconds: configDraft.ocr_provider_timeout_seconds,
         ocr_max_visual_candidates: configDraft.ocr_max_visual_candidates,
+        formula_recognition_mode: configDraft.formula_recognition_mode,
         formula_recognition_concurrency: configDraft.formula_recognition_concurrency,
         formula_visual_ocr_concurrency: configDraft.formula_visual_ocr_concurrency
       });
@@ -2178,6 +2191,7 @@ function RuntimeConfigCard({
     ocr_min_confidence: number;
     ocr_provider_timeout_seconds: number;
     ocr_max_visual_candidates: number;
+    formula_recognition_mode: FormulaRecognitionMode;
     formula_recognition_concurrency: number;
     formula_visual_ocr_concurrency: number;
   };
@@ -2195,6 +2209,7 @@ function RuntimeConfigCard({
     ocr_min_confidence: number;
     ocr_provider_timeout_seconds: number;
     ocr_max_visual_candidates: number;
+    formula_recognition_mode: FormulaRecognitionMode;
     formula_recognition_concurrency: number;
     formula_visual_ocr_concurrency: number;
   }>>;
@@ -2224,7 +2239,7 @@ function RuntimeConfigCard({
           <strong>{issue ? issue : provider === "deterministic" ? "Deterministic 本地模式" : config?.openai_model}</strong>
           <small>
             {config
-              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 并发 ${config.translation_concurrency} · Chunk ${config.translation_chunk_max_chars} · OCR ${config.ocr_provider_order.join(">")} · ${config.ocr_provider_timeout_seconds}s/${config.ocr_max_visual_candidates} · 公式 ${config.formula_recognition_concurrency}/${config.formula_visual_ocr_concurrency}`
+              ? `${config.openai_base_url} · ${formatFileSize(config.max_upload_bytes)} · 抽取 ${config.extraction_backend}/${config.mineru_backend}/${config.mineru_method} · 并发 ${config.translation_concurrency} · Chunk ${config.translation_chunk_max_chars} · OCR ${config.ocr_provider_order.join(">")} · ${config.ocr_provider_timeout_seconds}s/${config.ocr_max_visual_candidates} · 公式 ${config.formula_recognition_mode} ${config.formula_recognition_concurrency}/${config.formula_visual_ocr_concurrency}`
               : "读取后端配置中"}
           </small>
         </div>
@@ -2320,6 +2335,23 @@ function RuntimeConfigCard({
         </label>
       </div>
       <div className="ocr-provider-panel" aria-label="Formula OCR provider order">
+        <label>
+          <span>公式模式</span>
+          <select
+            name="formula_recognition_mode"
+            value={draft.formula_recognition_mode}
+            onChange={(event) =>
+              onDraftChange((current) => ({
+                ...current,
+                formula_recognition_mode: event.target.value as FormulaRecognitionMode
+              }))
+            }
+          >
+            <option value="pdf_primitive_replay">PDF primitive replay</option>
+            <option value="text_latex">Text LaTeX</option>
+            <option value="visual_ocr">Visual OCR</option>
+          </select>
+        </label>
         <span>公式 OCR</span>
         <label className="toggle-field">
           <input

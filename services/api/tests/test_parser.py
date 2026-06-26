@@ -11,12 +11,14 @@ from app.pipeline.parser import (
     _reading_sort_key,
     _stable_asset_id,
     _stable_block_id,
+    _unique_block_id,
     classify_role,
 )
 from app.pipeline.formulas.normalization import normalize_pdf_text
 from app.pipeline.formula_processing import build_formula_diagnostics, normalize_document_formulas
 from pdf_translator_schema import (
     Asset,
+    FormulaIR,
     BlockRole,
     BoundingBox,
     DocumentIR,
@@ -104,6 +106,22 @@ def test_stable_block_id_is_independent_of_extraction_index() -> None:
     second = _stable_block_id("p0001", "Alpha   beta", (10.02, 20.01, 100.02, 40.01))
 
     assert first == second
+
+
+def test_unique_block_id_disambiguates_stable_id_collisions() -> None:
+    seen: set[str] = set()
+    bbox = (10.0, 20.0, 100.0, 40.0)
+    near_bbox = (10.02, 20.01, 100.02, 40.01)
+    base_block_id = _stable_block_id("p0001", "Alpha beta", bbox)
+
+    first = _unique_block_id(base_block_id, "Alpha beta", bbox, seen)
+    second = _unique_block_id(base_block_id, "Alpha beta", near_bbox, seen)
+    third = _unique_block_id(base_block_id, "Alpha beta", near_bbox, seen)
+
+    assert first == base_block_id
+    assert second.startswith(f"{base_block_id}_d")
+    assert third.startswith(f"{base_block_id}_d")
+    assert len({first, second, third}) == 3
 
 
 def test_reading_sort_key_is_top_to_bottom_then_left_to_right() -> None:
@@ -505,6 +523,87 @@ def test_formula_normalization_merges_adjacent_formula_fragments_into_cluster() 
         len("@fs=@t") + 1 + len("f = 0"),
     )
     assert normalized.pages[0].blocks[0].source_text == "@fs=@t f = 0"
+
+
+def test_formula_normalization_keeps_independent_formula_placeholders_separate() -> None:
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="formula_a",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=40, y0=90, x1=120, y1=108),
+                        reading_order=0,
+                        source_text="{{formula:formula_a}}",
+                        text_for_translation="{{formula:formula_a}}",
+                    ),
+                    DocumentBlock(
+                        block_id="formula_b",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=128, y0=92, x1=260, y1=110),
+                        reading_order=1,
+                        source_text="{{formula:formula_b}}",
+                        text_for_translation="{{formula:formula_b}}",
+                    ),
+                    DocumentBlock(
+                        block_id="formula_c",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=128, y0=128, x1=260, y1=146),
+                        reading_order=2,
+                        source_text="{{formula:formula_c}}",
+                        text_for_translation="{{formula:formula_c}}",
+                    ),
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_a",
+                page_id="p1",
+                source_block_id="formula_a",
+                latex="x_1",
+                source_text="x_1",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+            FormulaIR(
+                formula_id="formula_b",
+                page_id="p1",
+                source_block_id="formula_b",
+                latex="x_2",
+                source_text="x_2",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+            FormulaIR(
+                formula_id="formula_c",
+                page_id="p1",
+                source_block_id="formula_c",
+                latex="x_3",
+                source_text="x_3",
+                display_mode="display",
+                source_kind="text_layer",
+            ),
+        ],
+    )
+
+    normalized = normalize_document_formulas(document)
+    diagnostics = build_formula_diagnostics(normalized)
+
+    assert len(normalized.pages[0].blocks) == 3
+    assert diagnostics["formula_fragment_cluster_count"] == 0
+    assert [block.block_id for block in normalized.pages[0].blocks] == [
+        "formula_a",
+        "formula_b",
+        "formula_c",
+    ]
 
 
 def test_formula_normalization_consumes_nonadjacent_fragments_in_equation_band() -> None:

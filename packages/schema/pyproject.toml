@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Shared schemas for PDF translation and typesetting."
 requires-python = ">=3.11"
 dependencies = [
-  "pydantic>=2.8"
+  "pydantic>=2.8,<3"
 ]
 
 [build-system]

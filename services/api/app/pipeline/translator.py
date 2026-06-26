@@ -435,13 +435,17 @@ class OpenAICompatibleTranslator(Translator):
                 if item.get("kind") != "text"
             }
             for token in source.preserve_tokens:
+                if FORMULA_REF_PATTERN.fullmatch(token):
+                    if token not in translated_text:
+                        translated_text = _append_missing_preserve_token(
+                            translated_text,
+                            token,
+                        )
+                        repaired_flags.append("formula_placeholder_repaired")
+                    continue
                 if token not in translated_text and token not in planned_tokens:
                     inline_items.append(_inline_item_for_token(token).model_dump())
-                    repaired_flags.append(
-                        "formula_placeholder_repaired"
-                        if FORMULA_REF_PATTERN.fullmatch(token)
-                        else "preserve_token_repaired"
-                    )
+                    repaired_flags.append("preserve_token_repaired")
 
             if (
                 role == BlockRole.PARAGRAPH.value
@@ -731,7 +735,8 @@ class OpenAICompatibleTranslator(Translator):
             "Return one valid JSON object matching TranslationLayoutPlan schema_version 0.1. "
             "Cover every input block exactly once. Do not include coordinates or page fields. "
             "Do not translate, delete, rewrite, or move canonical formula refs matching "
-            "{{formula:formula_id}}; copy them exactly into translated_text or inline_items. "
+            "{{formula:formula_id}}; copy them exactly into translated_text. "
+            "Do not put formula refs only in inline_items. "
             "Use glossary entries consistently when they are provided.\n\n"
             f"Expected JSON shape:\n{json.dumps(schema_hint, ensure_ascii=False)}\n\n"
             f"Chunk JSON:\n{chunk.model_dump_json()}"
@@ -1355,6 +1360,15 @@ def _repair_inline_items(value: Any) -> list[dict[str, Any]]:
             }
         )
     return repaired
+
+
+def _append_missing_preserve_token(text: str, token: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return token
+    if stripped.endswith(token):
+        return stripped
+    return f"{stripped} {token}"
 
 
 def _string_list(value: Any) -> list[str]:

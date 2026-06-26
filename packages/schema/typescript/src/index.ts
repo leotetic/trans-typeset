@@ -117,11 +117,13 @@ export type FormulaSourceKind =
   | "inline_text"
   | "vector_candidate"
   | "image_candidate"
+  | "mineru"
   | "ocr"
   | "mock"
   | "unknown";
 
 export type FormulaDisplayMode = "inline" | "display";
+export type FormulaDisplaySlotPolicy = "source" | "article_uniform";
 export type OCRRegionKind = "formula" | "text" | "page";
 export type ColumnLayoutScope = "document" | "body";
 
@@ -187,6 +189,33 @@ export interface Formula {
   quality_flags?: string[];
 }
 
+export interface PdfFormulaPrimitive {
+  primitive_id: string;
+  kind?: "glyph" | "line";
+  text?: string;
+  font_name?: string | null;
+  font_size_pt?: number | null;
+  bbox?: BoundingBox | null;
+  origin?: [number, number] | null;
+  points?: Array<[number, number]>;
+  stroke_width_pt?: number;
+  color?: string | null;
+  quality_flags?: string[];
+}
+
+export interface PdfFormula {
+  coordinate_space?: "formula_local";
+  replay_kind?: "primitives" | "source_clip";
+  source_page_id?: string | null;
+  source_page_index?: number | null;
+  source_bbox?: BoundingBox | null;
+  width_pt?: number | null;
+  height_pt?: number | null;
+  baseline_offset_pt?: number | null;
+  primitives?: PdfFormulaPrimitive[];
+  quality_flags?: string[];
+}
+
 export interface DocumentBlock {
   block_id: string;
   page_id: string;
@@ -229,6 +258,7 @@ export interface FormulaIR {
   ocr_provider?: string | null;
   ocr_confidence?: number | null;
   source_kind?: FormulaSourceKind;
+  pdf_formula?: PdfFormula | null;
   quality_flags?: string[];
 }
 
@@ -265,6 +295,9 @@ export interface DocumentIR {
   doc_id: string;
   pages: DocumentPage[];
   formulas?: FormulaIR[];
+  extraction_backend?: string;
+  extraction_version?: string | null;
+  quality_flags?: string[];
 }
 
 export interface InputSource {
@@ -656,6 +689,17 @@ export interface RoleStyleDefaults {
 /** GB/T 7713.1 display formula numbering: sequential right-aligned "(n)". */
 export type FormulaNumbering = "none" | "parenthesized";
 
+export interface FormulaReplayDefaults {
+  font_stack?: string[];
+  font_size_pt?: number;
+  line_height?: number;
+  inline_slot_height_pt?: number;
+  display_slot_policy?: FormulaDisplaySlotPolicy;
+  display_slot_height_pt?: number | null;
+  min_display_slot_height_pt?: number;
+  max_display_slot_height_pt?: number;
+}
+
 export interface RoleStyles {
   title?: RoleStyleDefaults;
   abstract?: RoleStyleDefaults;
@@ -677,6 +721,7 @@ export interface RenderDefaults {
   paragraph_spacing_em?: number;
   layout_mode?: LayoutMode;
   formula_numbering?: FormulaNumbering;
+  formula_replay?: FormulaReplayDefaults;
   column_layout?: ColumnLayoutDefaults;
   page_layout?: PageLayoutDefaults;
   role_styles?: RoleStyles;

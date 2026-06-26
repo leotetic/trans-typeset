@@ -6,6 +6,7 @@
         "inline_text",
         "vector_candidate",
         "image_candidate",
+        "mineru",
         "ocr",
         "mock",
         "unknown"

@@ -16,9 +16,12 @@ _FORMULA_PROSE_FRAGMENT = re.compile(
     r"\b(?:defined\s+as|equation|into\s+the|where|while|with|holds?|shown|represents?)\b",
     re.IGNORECASE,
 )
-_EQUATION_NUMBER_SUFFIX = re.compile(r"(?:[,;:]\s*)?(\(\d+\))\s*$")
+_EQUATION_NUMBER_SUFFIX = re.compile(
+    r"(?:[,;:]\s*)?(\([A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?\))\s*$"
+)
 _EQUATION_NUMBER_WITH_SHORT_TAIL = re.compile(
-    r"(?:[,;:]\s*)?(\(\d+\))(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'+\-*/=:.,\s]{1,24})$"
+    r"(?:[,;:]\s*)?(\([A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?\))"
+    r"(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\\\'+\-*/=:.,\s]{1,24})$"
 )
 _TRAILING_SCRIPT_OPERATOR = re.compile(r"(?:[_^]\s*)+$")
 _HYPHEN_SPLIT_WORD = re.compile(r"\b([A-Za-z]{2,})-\s+([A-Za-z]{2,})\b")
@@ -59,6 +62,8 @@ PDF_TEXT_REPLACEMENTS = {
     "\uf0b7": " · ",
     "Ð": "∫",
     "Þ": "∂",
+    "ℏ": r" \hbar ",
+    "ℝ": r" \mathbb{R} ",
 }
 
 GREEK_TO_LATEX = {
@@ -67,17 +72,35 @@ GREEK_TO_LATEX = {
     "γ": r"\gamma",
     "δ": r"\delta",
     "ε": r"\epsilon",
+    "ϵ": r"\epsilon",
+    "η": r"\eta",
+    "ζ": r"\zeta",
     "θ": r"\theta",
+    "κ": r"\kappa",
     "λ": r"\lambda",
     "μ": r"\mu",
     "ν": r"\nu",
+    "ξ": r"\xi",
+    "π": r"\pi",
     "ρ": r"\rho",
     "σ": r"\sigma",
     "τ": r"\tau",
     "φ": r"\phi",
+    "ψ": r"\psi",
+    "χ": r"\chi",
     "ω": r"\omega",
+    "ϕ": r"\varphi",
+    "ϱ": r"\varrho",
     "Ω": r"\Omega",
     "Δ": r"\Delta",
+    "Γ": r"\Gamma",
+    "Θ": r"\Theta",
+    "Λ": r"\Lambda",
+    "Ξ": r"\Xi",
+    "Π": r"\Pi",
+    "Ψ": r"\Psi",
+    "Σ": r"\Sigma",
+    "Φ": r"\Phi",
 }
 
 SYMBOL_TO_LATEX = {
@@ -91,6 +114,17 @@ SYMBOL_TO_LATEX = {
     "∞": r"\infty",
     "∂": r"\partial",
     "∇": r"\nabla",
+    "→": r"\to",
+    "↦": r"\mapsto",
+    "←": r"\leftarrow",
+    "±": r"\pm",
+    "∓": r"\mp",
+    "∈": r"\in",
+    "∉": r"\notin",
+    "⊂": r"\subset",
+    "⊆": r"\subseteq",
+    "△": r"\Delta",
+    "∆": r"\Delta",
     "×": r"\times",
     "÷": r"\div",
     "·": r"\cdot",
@@ -107,6 +141,11 @@ def normalize_pdf_text_fragment(text: str) -> str:
     normalized = text
     for source, replacement in PDF_TEXT_REPLACEMENTS.items():
         normalized = normalized.replace(source, replacement)
+    normalized = re.sub(r"\b([A-Za-z])\u0304", r" \\bar{\1} ", normalized)
+    normalized = re.sub(r"¯\s*([A-Za-z])\b", r" \\bar{\1} ", normalized)
+    normalized = re.sub(r"\b([A-Za-z])\s*¯", r" \\bar{\1} ", normalized)
+    normalized = re.sub(r"\u02d9\s*([A-Za-z])\b", r" \\dot{\1} ", normalized)
+    normalized = re.sub(r"\b([A-Za-z])\u0307", r" \\dot{\1} ", normalized)
     return _CONTROL_CHARS.sub(" ", normalized)
 
 
@@ -196,8 +235,7 @@ def truncate_at_language_boundary(text: str) -> tuple[str, bool]:
         if _NATURAL_LANGUAGE_BOUNDARY.search(" " + suffix.strip()):
             candidate = prefix
     candidate = candidate.strip(" \t\n\r,;。；")
-    if candidate.endswith(".") and not re.search(r"\d\.$", candidate):
-        candidate = candidate[:-1].rstrip()
+    candidate = _strip_sentence_period(candidate)
     if re.search(r"\.\d{1,3}$", candidate) and re.search(r"[A-Za-z]\d*\.\d{1,3}$", candidate):
         candidate = re.sub(r"\.\d{1,3}$", "", candidate)
     candidate = _trim_formula_tail(candidate)
@@ -225,8 +263,7 @@ def truncate_raw_at_language_boundary(text: str) -> tuple[str, bool]:
         if _NATURAL_LANGUAGE_BOUNDARY.search(" " + suffix.strip()):
             candidate = prefix
     candidate = candidate.strip(" \t\n\r,;。；")
-    if candidate.endswith(".") and not re.search(r"\d\.$", candidate):
-        candidate = candidate[:-1].rstrip()
+    candidate = _strip_sentence_period(candidate)
     if re.search(r"\.\d{1,3}$", candidate) and re.search(r"[A-Za-z]\d*\.\d{1,3}$", candidate):
         candidate = re.sub(r"\.\d{1,3}$", "", candidate)
     candidate = _trim_formula_tail(candidate)
@@ -265,11 +302,15 @@ def latex_from_pdf_text(text: str) -> tuple[str, list[str]]:
     if equation_number is not None:
         latex = _strip_equation_number(latex, equation_number)
         flags.append("formula_equation_number_preserved")
+    latex, common_flags = repair_common_pdf_math_degradation(latex)
+    flags.extend(common_flags)
     for source, target in {**GREEK_TO_LATEX, **SYMBOL_TO_LATEX}.items():
         latex = latex.replace(source, f" {target} ")
     latex = re.sub(r"@([A-Za-z][A-Za-z0-9_]*)", r"\\partial \1", latex)
     latex = re.sub(r"\b([A-Za-z])\s+([0-9])\b", r"\1\2", latex)
     latex = re.sub(r"\b([0-9])\s+([A-Za-z])\b", r"\1\2", latex)
+    latex, partial_flags = repair_compact_partial_derivatives(latex)
+    flags.extend(partial_flags)
     latex, variable_flags = format_compact_formula_variables(latex)
     flags.extend(variable_flags)
     latex = re.sub(r"\s+", " ", latex).strip()
@@ -343,6 +384,73 @@ def repair_corrupt_formula_slash_glyphs(
     return repaired, flags
 
 
+def repair_common_pdf_math_degradation(text: str) -> tuple[str, list[str]]:
+    repaired = text
+    flags: list[str] = []
+
+    def replace_integral_domain(match: re.Match[str]) -> str:
+        exponent = match.group("exponent")
+        if exponent:
+            return rf"\int_{{\mathbb{{R}}^{{{exponent}}}}}"
+        return r"\int_{\mathbb{R}}"
+
+    repaired = re.sub(
+        r"\bZ\s+I\s*R(?:[_^]\{?(?P<exponent>[A-Za-z0-9+\-/]+)\}?)?",
+        replace_integral_domain,
+        repaired,
+    )
+
+    def replace_real_space(match: re.Match[str]) -> str:
+        exponent = match.group("exponent")
+        if exponent:
+            return rf"\mathbb{{R}}^{{{exponent}}}"
+        return r"\mathbb{R}"
+
+    repaired = re.sub(
+        r"\bI\s*R(?:\s*(?:\^|_)\s*\{?(?P<exponent>[A-Za-z0-9+\-/]+)\}?)?",
+        replace_real_space,
+        repaired,
+    )
+    repaired = re.sub(
+        r"\bZ\s+(?=(?:\\?[A-Za-zα-ωΑ-Ω])[^=]{0,64}(?:\(|d[A-Za-z]|\\,d))",
+        r"\\int ",
+        repaired,
+    )
+    if repaired != text:
+        flags.append("formula_pdf_math_degradation_repaired")
+    return repaired, flags
+
+
+def repair_compact_partial_derivatives(text: str) -> tuple[str, list[str]]:
+    repaired = text
+    flags: list[str] = []
+
+    def replace_plain(match: re.Match[str]) -> str:
+        variable = match.group("variable")
+        target = match.group("target")
+        return rf"\partial_{{{variable}}} {target}"
+
+    repaired = re.sub(
+        r"\\partial\s+(?P<variable>[txyvz])(?P<target>[A-Za-z])\b",
+        replace_plain,
+        repaired,
+    )
+
+    def replace_command(match: re.Match[str]) -> str:
+        variable = match.group("variable")
+        target = match.group("target")
+        return rf"\partial_{{\{variable}}} {target}"
+
+    repaired = re.sub(
+        r"\\partial\s+\\(?P<variable>alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|kappa|lambda|mu|nu|xi|pi|rho|varrho|sigma|tau|phi|varphi|chi|psi|omega)\s*(?P<target>[A-Za-z])\b",
+        replace_command,
+        repaired,
+    )
+    if repaired != text:
+        flags.append("formula_compact_partial_repaired")
+    return repaired, flags
+
+
 def format_compact_formula_variables(text: str) -> tuple[str, list[str]]:
     formatted = text
     formatted = re.sub(r"\b([fqmn])\s*0\s*([sn])\b", r"\1'_\2", formatted)
@@ -409,6 +517,21 @@ def _join_hyphen_split_words(text: str) -> str:
         previous = joined
         joined = _HYPHEN_SPLIT_WORD.sub(r"\1\2", joined)
     return joined
+
+
+def _strip_sentence_period(text: str) -> str:
+    candidate = text.rstrip()
+    if not candidate.endswith("."):
+        return text
+    if re.search(
+        r"(?:=|≤|≥|<|>|≠|≈|\\(?:le|leq|ge|geq|ne|neq|approx|sim))\s*"
+        r"[A-Za-z0-9α-ωΑ-Ω]+[)\]}]*\.$",
+        candidate,
+    ):
+        return candidate[:-1].rstrip()
+    if not re.search(r"\d\.$", candidate):
+        return candidate[:-1].rstrip()
+    return text
 
 
 def _extract_equation_number(text: str) -> str | None:

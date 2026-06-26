@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pdf_translator_schema import Asset, BoundingBox, DocumentIR, FormulaIR
 from pdf_translator_schema.models import (
@@ -21,10 +21,16 @@ from ..ocr import DeterministicOCRProvider, OCRService
 from .detector import FormulaCandidate, detect_formula_candidates
 from .deterministic import DeterministicFormulaRecognizer
 from .normalization import contains_natural_language, latex_from_pdf_text, normalize_pdf_text
+from .primitives import build_pdf_formula_for_candidate
 from .validation import prewarm_formula_latex_validation, validate_formula_latex
 
 _MATH_SIGNAL_PATTERN = re.compile(
-    r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|phi|omega|Delta|Omega|cdot|times)|"
+    r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|"
+    r"alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|lambda|mu|nu|xi|pi|rho|varrho|sigma|tau|"
+    r"phi|varphi|chi|psi|omega|Delta|Omega|Gamma|Phi|Pi|Sigma|"
+    r"Theta|Lambda|Xi|Psi|le|leq|ge|geq|ne|neq|approx|sim|simeq|equiv|propto|infty|to|rightarrow|leftarrow|mapsto|pm|mp|"
+    r"in|notin|subset|subseteq|supset|supseteq|cup|cap|cdot|times|"
+    r"div|mathbb|mathcal|mathrm|mathbf|operatorname|bar|dot|hat|vec|left|right)|"
     r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*[A-Za-z0-9α-ωΑ-Ω])"
 )
 _VISUAL_MOCK_FLAGS = {
@@ -52,6 +58,7 @@ _DISPLAY_COMPLEXITY_PATTERN = re.compile(
     r"(?:\\(?:frac|sum|int|partial|nabla|sqrt|left|right)|[∂∇∫∑]|[(){}\[\]])"
 )
 _VISUAL_PROVIDER_NAMES = {"pix2text", "openai_vision", "minimax_vision"}
+_FormulaSourceAssetFormat = Literal["png", "svg"]
 
 
 class FormulaRecognizer(Protocol):
@@ -181,6 +188,7 @@ async def enrich_document_formulas(
     recognizer_type: str = "deterministic",
     formula_recognition_concurrency: int = 8,
     formula_visual_ocr_concurrency: int = 2,
+    formula_recognition_mode: str = "pdf_primitive_replay",
     visual_formula_recognition_enabled: bool = False,
     on_progress: Callable[[int, int, FormulaCandidate], None] | None = None,
 ) -> FormulaEnrichmentResult:
@@ -200,11 +208,32 @@ async def enrich_document_formulas(
                     recognizer_type,
                 ),
                 "recognizer_type": recognizer_type,
+                "formula_recognition_mode": formula_recognition_mode,
                 "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
             },
             recognition_records=[],
             candidates=[],
             ocr_records=[],
+        )
+
+    candidates = _ensure_formula_candidate_assets(
+        document,
+        candidates,
+        doc_id=doc_id,
+        asset_output_dir=asset_output_dir,
+        pdf_path=pdf_path,
+        asset_format="svg"
+        if formula_recognition_mode == "pdf_primitive_replay"
+        else "png",
+    )
+    if formula_recognition_mode == "pdf_primitive_replay":
+        return _enrich_with_pdf_primitive_replay(
+            document,
+            candidates,
+            pdf_path=pdf_path,
+            recognizer_type=recognizer_type,
+            visual_formula_recognition_enabled=False,
+            on_progress=on_progress,
         )
 
     recognizer = recognizer or DeterministicFormulaRecognizer()
@@ -239,16 +268,28 @@ async def enrich_document_formulas(
                     visual_semaphore=visual_semaphore,
                     performance=performance,
                 )
+                recognized_asset_id = recognition_record.get("candidate_asset_id")
+                candidate_asset_id = recognized_asset_id or candidate.asset_id
+                latex_text = ocr_result.latex or ocr_result.text
+                has_source_preserved_asset = bool(candidate.image_path or recognized_asset_id)
+                source_preservation_flags = _source_preservation_flags(
+                    source_asset_available=has_source_preserved_asset,
+                    latex=latex_text,
+                )
                 formula = FormulaIR(
                     formula_id=candidate.candidate_id,
                     page_id=candidate.page_id,
                     source_block_id=candidate.source_block_id,
                     anchor_block_id=candidate.anchor_block_id,
-                    asset_id=recognition_record.get("candidate_asset_id")
-                    or candidate.asset_id,
-                    latex=(ocr_result.latex or ocr_result.text)
+                    asset_id=candidate_asset_id,
+                    latex=latex_text
                     if validator.accepted
-                    or _should_attach_image_fallback_formula(candidate, validator)
+                    or has_source_preserved_asset
+                    or _should_attach_image_fallback_formula(
+                        candidate,
+                        validator,
+                        candidate_asset_id=candidate_asset_id,
+                    )
                     else "",
                     source_text=candidate.source_text,
                     source_text_range=candidate.source_text_range,
@@ -263,6 +304,7 @@ async def enrich_document_formulas(
                             *candidate.quality_flags,
                             *ocr_result.quality_flags,
                             *validator.quality_flags,
+                            *source_preservation_flags,
                         ]
                     ),
                 )
@@ -357,12 +399,20 @@ async def enrich_document_formulas(
         outcome.legacy_formula_migrated_count for outcome in outcomes
     )
 
-    enriched = _attach_formulas(working_document, formulas)
+    enriched = _attach_formulas(
+        working_document,
+        formulas,
+        rejected_records=rejected_records,
+    )
     ocr_diagnostics = ocr_service.diagnostics()
     performance_summary = performance.summary(ocr_diagnostics)
     active_provider_order = [
         str(item) for item in ocr_diagnostics.get("active_provider_order", [])
     ]
+    formula_ref_diagnostics = _document_formula_ref_diagnostics(
+        enriched,
+        accepted_formula_ids={formula.formula_id for formula in formulas},
+    )
     diagnostics = {
         "kind": "formula_diagnostics",
         "parser_cluster_count": _parser_cluster_count(document),
@@ -370,6 +420,8 @@ async def enrich_document_formulas(
         "display_cluster_promoted_count": display_cluster_promoted_count,
         "legacy_formula_migrated_count": legacy_formula_migrated_count,
         "candidate_count": len(candidates),
+        "document_formula_count": len(enriched.formulas),
+        **formula_ref_diagnostics,
         "recognized_count": sum(1 for formula in formulas if formula.latex.strip()),
         "accepted_count": len(formulas),
         "rejected_count": len(rejected_records),
@@ -380,12 +432,14 @@ async def enrich_document_formulas(
                     recognizer_type,
                 ),
                 *diagnostic_flags,
+                *formula_ref_diagnostics.get("quality_flags", []),
             ]
         ),
         "records": records,
         "rejected_records": rejected_records,
         "source_counts": _source_counts(candidates),
         "recognizer_type": recognizer_type,
+        "formula_recognition_mode": formula_recognition_mode,
         "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
         "performance": performance_summary,
         "ocr_provider": _ocr_provider_status(active_provider_order),
@@ -403,6 +457,200 @@ async def enrich_document_formulas(
         recognition_records=records,
         candidates=[_candidate_record(candidate) for candidate in candidates],
         ocr_records=ocr_diagnostics["records"],
+    )
+
+
+def _enrich_with_pdf_primitive_replay(
+    document: DocumentIR,
+    candidates: list[FormulaCandidate],
+    *,
+    pdf_path: Path | None,
+    recognizer_type: str,
+    visual_formula_recognition_enabled: bool,
+    on_progress: Callable[[int, int, FormulaCandidate], None] | None,
+) -> FormulaEnrichmentResult:
+    started = time.perf_counter()
+    formulas: list[FormulaIR] = []
+    records: list[dict[str, Any]] = []
+    diagnostic_flags: list[str] = []
+    rejected_records: list[dict[str, Any]] = []
+    total = len(candidates)
+
+    for index, candidate in enumerate(candidates, start=1):
+        try:
+            source_replay_allowed = _candidate_source_replay_allowed(candidate)
+            pdf_formula = (
+                build_pdf_formula_for_candidate(
+                    document,
+                    candidate,
+                    pdf_path=pdf_path,
+                )
+                if source_replay_allowed
+                else None
+            )
+            latex_text, latex_flags = latex_from_pdf_text(candidate.source_text)
+            source_asset_available = bool(candidate.asset_id or candidate.image_path)
+            quality_flags = _unique(
+                [
+                    *candidate.quality_flags,
+                    *(pdf_formula.quality_flags if pdf_formula is not None else []),
+                    *latex_flags,
+                    "formula_latex_auxiliary" if latex_text.strip() else "",
+                    "formula_source_preserved"
+                    if (pdf_formula is not None or source_asset_available)
+                    else "",
+                    "formula_pdf_primitive_primary" if pdf_formula is not None else "",
+                    "formula_source_asset_primary" if source_asset_available else "",
+                    "formula_source_asset_fallback" if source_asset_available else "",
+                    "formula_pdf_primitive_missing" if pdf_formula is None else "",
+                    "formula_source_replay_skipped_broad_bbox"
+                    if not source_replay_allowed
+                    else "",
+                ]
+            )
+            if pdf_formula is None and not source_asset_available:
+                rejected_record = {
+                    "formula_id": candidate.candidate_id,
+                    "status": "rejected",
+                    "reason": "formula_pdf_primitive_missing",
+                    "latex": latex_text,
+                    "source_kind": candidate.source_kind.value,
+                    "quality_flags": quality_flags,
+                }
+                records.append(rejected_record)
+                rejected_records.append(rejected_record)
+                diagnostic_flags.extend(quality_flags)
+                continue
+            formula = FormulaIR(
+                formula_id=candidate.candidate_id,
+                page_id=candidate.page_id,
+                source_block_id=candidate.source_block_id,
+                anchor_block_id=candidate.anchor_block_id,
+                asset_id=candidate.asset_id,
+                latex=latex_text,
+                source_text=candidate.source_text,
+                source_text_range=candidate.source_text_range,
+                span_ids=list(candidate.span_ids),
+                display_mode=candidate.display_mode,
+                confidence=0.99 if pdf_formula is not None else 0.72,
+                ocr_provider="pdf_primitive_replay",
+                ocr_confidence=None,
+                source_kind=candidate.source_kind,
+                pdf_formula=pdf_formula,
+                quality_flags=quality_flags,
+            )
+            formulas.append(formula)
+            records.append(
+                {
+                    "formula_id": formula.formula_id,
+                    "status": "replayed" if pdf_formula is not None else "source_asset_fallback",
+                    "latex": formula.latex,
+                    "accepted_provider": formula.ocr_provider,
+                    "accepted_confidence": formula.confidence,
+                    "validator_status": "source_preserved",
+                    "fallback_reason": None if pdf_formula is not None else "formula_asset_image",
+                    "source_kind": formula.source_kind.value,
+                    "primitive_count": len(pdf_formula.primitives) if pdf_formula is not None else 0,
+                    "candidate_asset_id": candidate.asset_id,
+                    "quality_flags": quality_flags,
+                }
+            )
+            diagnostic_flags.extend(quality_flags)
+        except Exception as exc:
+            failed_record = {
+                "formula_id": candidate.candidate_id,
+                "status": "failed",
+                "error": str(exc),
+                "quality_flags": ["formula_pdf_primitive_replay_failed"],
+            }
+            records.append(failed_record)
+            diagnostic_flags.append("formula_pdf_primitive_replay_failed")
+        finally:
+            if on_progress is not None:
+                try:
+                    on_progress(index, total, candidate)
+                except Exception:
+                    pass
+
+    enriched = _attach_formulas(
+        document,
+        formulas,
+        rejected_records=rejected_records,
+    )
+    formula_ref_diagnostics = _document_formula_ref_diagnostics(
+        enriched,
+        accepted_formula_ids={formula.formula_id for formula in formulas},
+    )
+    primitive_count = sum(
+        len(formula.pdf_formula.primitives)
+        for formula in formulas
+        if formula.pdf_formula is not None
+    )
+    diagnostics = {
+        "kind": "formula_diagnostics",
+        "parser_cluster_count": _parser_cluster_count(document),
+        "enrichment_candidate_count": len(candidates),
+        "display_cluster_promoted_count": sum(1 for candidate in candidates if candidate.parser_cluster_id),
+        "legacy_formula_migrated_count": sum(len(candidate.legacy_formula_ids) for candidate in candidates),
+        "candidate_count": len(candidates),
+        "document_formula_count": len(enriched.formulas),
+        **formula_ref_diagnostics,
+        "recognized_count": len(formulas),
+        "accepted_count": len(formulas),
+        "rejected_count": len(rejected_records),
+        "primitive_formula_count": sum(1 for formula in formulas if formula.pdf_formula is not None),
+        "primitive_count": primitive_count,
+        "quality_flags": _unique(
+            [
+                *_formula_diagnostic_base_flags(False, recognizer_type),
+                "formula_pdf_primitive_replay_default",
+                *diagnostic_flags,
+                *formula_ref_diagnostics.get("quality_flags", []),
+            ]
+        ),
+        "records": records,
+        "rejected_records": rejected_records,
+        "source_counts": _source_counts(candidates),
+        "recognizer_type": recognizer_type,
+        "formula_recognition_mode": "pdf_primitive_replay",
+        "visual_formula_recognition_enabled": visual_formula_recognition_enabled,
+        "performance": {
+            "kind": "formula_performance",
+            "candidate_count": len(candidates),
+            "crop_count": 0,
+            "text_recognition_ms": 0.0,
+            "visual_ocr_ms": 0.0,
+            "visual_ocr_ms_by_provider": {},
+            "validation_ms": 0.0,
+            "crop_ms": 0.0,
+            "cache_hit_count": 0,
+            "visual_attempt_count": 0,
+            "skipped_visual_count": 0,
+            "primitive_replay_ms": round((time.perf_counter() - started) * 1000, 2),
+            "total_ms": round((time.perf_counter() - started) * 1000, 2),
+        },
+        "ocr_provider": _ocr_provider_status([]),
+        "ocr": {
+            "kind": "ocr_diagnostics",
+            "active_provider_order": [],
+            "records": [],
+            "cache_hit_count": 0,
+            "visual_attempt_count": 0,
+            "skipped_visual_count": 0,
+        },
+    }
+    setattr(
+        enriched,
+        _FORMULA_OCR_PROVIDER_DIAGNOSTICS_ATTR,
+        {"active_provider_order": []},
+    )
+    return FormulaEnrichmentResult(
+        document=enriched,
+        formulas=formulas,
+        diagnostics=diagnostics,
+        recognition_records=records,
+        candidates=[_candidate_record(candidate) for candidate in candidates],
+        ocr_records=[],
     )
 
 
@@ -452,6 +700,7 @@ async def _recognize_candidate(
             "validation_ms",
             (time.perf_counter() - started) * 1000,
         )
+        visual_fallback_flags: list[str] = []
         if _should_escalate_text_candidate(candidate, text_result, text_validator):
             visual_candidate, crop_elapsed_ms, cropped = _ensure_single_formula_candidate_asset(
                 candidate,
@@ -505,18 +754,40 @@ async def _recognize_candidate(
                             ),
                         },
                     )
+                visual_fallback_flags = _visual_fallback_flags(
+                    visual_result,
+                    visual_validator,
+                )
+            else:
+                visual_fallback_flags = [
+                    "formula_visual_ocr_failed",
+                    "formula_visual_ocr_asset_unavailable",
+                    "formula_text_layer_fallback_after_visual_failure",
+                ]
+        text_quality_flags = _unique([*text_result.quality_flags, *visual_fallback_flags])
+        status = "recognized" if text_validator.accepted else "rejected"
+        if visual_fallback_flags and text_validator.accepted:
+            status = "text_fallback_after_visual_ocr_failure"
         return (
             _recognition_result_from_formula_result(text_result),
             text_validator,
             {
                 "formula_id": candidate.candidate_id,
-                "status": "recognized" if text_validator.accepted else "rejected",
+                "status": status,
                 "accepted_provider": text_result.accepted_provider,
                 "accepted_confidence": text_result.accepted_confidence,
                 "validator_status": text_result.validator_status,
                 "fallback_reason": text_result.fallback_reason,
                 "source_kind": candidate.source_kind.value,
-                "quality_flags": list(text_result.quality_flags),
+                "quality_flags": _unique(
+                    [
+                        *text_quality_flags,
+                        *_source_preservation_flags(
+                            source_asset_available=bool(candidate.image_path),
+                            latex=text_result.latex,
+                        ),
+                    ]
+                ),
             },
         )
     started = time.perf_counter()
@@ -568,6 +839,19 @@ def _recognition_result_from_formula_result(result: FormulaRecognitionResult) ->
     )
 
 
+def _visual_fallback_flags(result: Any, validator: Any) -> list[str]:
+    flags = ["formula_visual_ocr_failed"]
+    result_flags = set(getattr(result, "quality_flags", []) or [])
+    if "ocr_visual_candidate_limit_reached" in result_flags:
+        flags.append("formula_visual_ocr_skipped_by_cap")
+    if result_flags & _VISUAL_MOCK_FLAGS:
+        flags.append("formula_visual_ocr_mock_or_unavailable")
+    if not getattr(validator, "accepted", False):
+        flags.append("formula_visual_ocr_rejected_by_validator")
+    flags.append("formula_text_layer_fallback_after_visual_failure")
+    return flags
+
+
 def _should_escalate_text_candidate(
     candidate: FormulaCandidate,
     result: FormulaRecognitionResult,
@@ -576,6 +860,8 @@ def _should_escalate_text_candidate(
     if candidate.display_mode == "inline":
         return False
     result_flags = set(result.quality_flags)
+    if _must_escalate_display_text_candidate(candidate):
+        return True
     if (
         validator.accepted
         and result.confidence >= 0.65
@@ -591,6 +877,22 @@ def _should_escalate_text_candidate(
     if result_flags & _TEXT_ESCALATION_FLAGS:
         return True
     return result.confidence < 0.65
+
+
+def _must_escalate_display_text_candidate(candidate: FormulaCandidate) -> bool:
+    if candidate.display_mode != "display":
+        return False
+    flags = set(candidate.quality_flags)
+    return bool(
+        flags.intersection(
+            {
+                "legacy_formula_migrated",
+                "formula_cluster_incomplete",
+                "formula_text_truncated",
+                "formula_delimiter_repaired",
+            }
+        )
+    )
 
 
 def _prefer_visual_formula_provider(candidate: FormulaCandidate) -> bool:
@@ -620,19 +922,21 @@ def _formula_attachment_rejection_reason(
     formula: FormulaIR,
     validator: Any | None = None,
 ) -> str | None:
-    flags = set(formula.quality_flags)
-    if "formula_prose_like" in flags or "formula_not_math" in flags:
-        return "formula_not_math_rejected"
-    if flags.intersection(_VISUAL_MOCK_FLAGS):
-        return "formula_visual_mock_rejected"
     validator = validator or validate_formula_latex(
         formula.latex,
         source_text=formula.source_text,
         display_mode=formula.display_mode,
     )
+    if _formula_has_source_preserved_asset(formula):
+        return None
+    if _formula_uses_image_fallback(formula, validator):
+        return None
+    flags = set(formula.quality_flags)
+    if "formula_prose_like" in flags or "formula_not_math" in flags:
+        return "formula_not_math_rejected"
+    if flags.intersection(_VISUAL_MOCK_FLAGS):
+        return "formula_visual_mock_rejected"
     if not validator.accepted:
-        if _formula_uses_image_fallback(formula, validator):
-            return None
         return (
             "formula_not_math_rejected"
             if validator.status in {"prose_like", "not_math"}
@@ -658,20 +962,47 @@ def _formula_attachment_rejection_reason(
 def _should_attach_image_fallback_formula(
     candidate: FormulaCandidate,
     validator: Any,
+    *,
+    candidate_asset_id: Any | None = None,
 ) -> bool:
+    has_asset = bool(candidate.asset_id or candidate.image_path or candidate_asset_id)
+    if not has_asset:
+        return False
+    if "formula_source_preserved" in set(candidate.quality_flags):
+        return True
+    if candidate.display_mode != "display":
+        return True
+    if validator.fallback_reason == "formula_asset_image":
+        return True
+    if (
+        "formula_display_cluster" in set(candidate.quality_flags)
+        and validator.status in {"prose_like", "not_math", "katex_error", "corrupt_text_layer"}
+    ):
+        return True
     return (
-        candidate.display_mode == "display"
-        and bool(candidate.asset_id or candidate.image_path)
-        and validator.fallback_reason == "formula_asset_image"
+        "formula_text_truncated" in set(candidate.quality_flags)
+        and validator.status in {"prose_like", "not_math"}
     )
 
 
 def _formula_uses_image_fallback(formula: FormulaIR, validator: Any) -> bool:
-    return (
-        formula.display_mode == "display"
-        and bool(formula.asset_id)
-        and validator.fallback_reason == "formula_asset_image"
-    )
+    if _formula_has_source_preserved_asset(formula):
+        return True
+    if not (formula.display_mode == "display" and bool(formula.asset_id)):
+        return False
+    if validator.fallback_reason == "formula_asset_image":
+        return True
+    flags = set(formula.quality_flags)
+    if (
+        "formula_display_cluster" in flags
+        and validator.status in {"prose_like", "not_math", "katex_error", "corrupt_text_layer"}
+    ):
+        return True
+    return "formula_text_truncated" in flags and validator.status in {"prose_like", "not_math"}
+
+
+def _formula_has_source_preserved_asset(formula: FormulaIR) -> bool:
+    return bool(formula.asset_id) and "formula_source_preserved" in set(formula.quality_flags)
 
 
 def _display_latex_has_math_signal(text: str) -> bool:
@@ -711,8 +1042,11 @@ def _ensure_single_formula_candidate_asset(
     doc_id: str,
     asset_output_dir: Path,
     pdf_path: Path | None,
+    asset_format: _FormulaSourceAssetFormat = "png",
 ) -> tuple[FormulaCandidate, float, bool]:
-    if pdf_path is None or candidate.image_path or candidate.display_mode == "inline":
+    if candidate.image_path:
+        return _candidate_with_source_preservation_flags(candidate), 0.0, False
+    if pdf_path is None:
         return candidate, 0.0, False
     started = time.perf_counter()
     try:
@@ -730,7 +1064,11 @@ def _ensure_single_formula_candidate_asset(
         page_index = _page_index_from_page_id(candidate.page_id)
         if page_index is None or page_index >= len(pdf):
             return candidate, (time.perf_counter() - started) * 1000, False
-        output_path = asset_output_dir / f"{candidate.candidate_id}.png"
+        if not _candidate_source_replay_allowed(candidate):
+            return candidate, (time.perf_counter() - started) * 1000, False
+        output_path = asset_output_dir / (
+            f"{candidate.candidate_id}.{_formula_source_asset_extension(asset_format)}"
+        )
         try:
             page = pdf[page_index]
             clip = _padded_formula_crop_rect(
@@ -739,8 +1077,16 @@ def _ensure_single_formula_candidate_asset(
                 page_width=page.rect.width,
                 page_height=page.rect.height,
             )
-            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
-            pixmap.save(output_path)
+            _write_formula_source_asset(
+                fitz,
+                pdf=pdf,
+                page=page,
+                page_index=page_index,
+                candidate=candidate,
+                clip=clip,
+                output_path=output_path,
+                asset_format=asset_format,
+            )
         except Exception:
             return candidate, (time.perf_counter() - started) * 1000, False
         asset_path = f"/api/documents/{doc_id}/assets/{output_path.name}"
@@ -749,6 +1095,8 @@ def _ensure_single_formula_candidate_asset(
             quality_flags.append("formula_crop_padded")
         if _equation_number_present(candidate.source_text):
             quality_flags.append("formula_equation_number_preserved")
+        if asset_format == "svg":
+            quality_flags.append("formula_source_asset_svg")
         return (
             FormulaCandidate(
                 candidate_id=candidate.candidate_id,
@@ -763,7 +1111,15 @@ def _ensure_single_formula_candidate_asset(
                 span_ids=candidate.span_ids,
                 display_mode=candidate.display_mode,
                 image_path=asset_path,
-                quality_flags=tuple(_unique(quality_flags)),
+                quality_flags=tuple(
+                    _unique(
+                        [
+                            *quality_flags,
+                            "formula_source_preserved",
+                            "formula_source_asset_primary",
+                        ]
+                    )
+                ),
                 legacy_formula_ids=candidate.legacy_formula_ids,
                 parser_cluster_id=candidate.parser_cluster_id,
             ),
@@ -791,35 +1147,38 @@ def _ensure_formula_candidate_assets(
     doc_id: str,
     asset_output_dir: Path,
     pdf_path: Path | None,
+    asset_format: _FormulaSourceAssetFormat = "png",
 ) -> list[FormulaCandidate]:
     if pdf_path is None:
-        return candidates
+        return [_candidate_with_source_preservation_flags(candidate) for candidate in candidates]
     try:
         import fitz
     except Exception:
-        return candidates
+        return [_candidate_with_source_preservation_flags(candidate) for candidate in candidates]
 
     asset_output_dir.mkdir(parents=True, exist_ok=True)
     try:
         pdf = fitz.open(pdf_path)
     except Exception:
-        return candidates
+        return [_candidate_with_source_preservation_flags(candidate) for candidate in candidates]
 
     try:
         page_indexes = {page.page_id: index for index, page in enumerate(document.pages)}
         updated: list[FormulaCandidate] = []
         for candidate in candidates:
             if candidate.image_path:
-                updated.append(candidate)
+                updated.append(_candidate_with_source_preservation_flags(candidate))
                 continue
-            if candidate.display_mode == "inline":
+            if not _candidate_source_replay_allowed(candidate):
                 updated.append(candidate)
                 continue
             page_index = page_indexes.get(candidate.page_id)
             if page_index is None or page_index >= len(pdf):
                 updated.append(candidate)
                 continue
-            output_path = asset_output_dir / f"{candidate.candidate_id}.png"
+            output_path = asset_output_dir / (
+                f"{candidate.candidate_id}.{_formula_source_asset_extension(asset_format)}"
+            )
             try:
                 page = pdf[page_index]
                 clip = _padded_formula_crop_rect(
@@ -828,8 +1187,16 @@ def _ensure_formula_candidate_assets(
                     page_width=page.rect.width,
                     page_height=page.rect.height,
                 )
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
-                pixmap.save(output_path)
+                _write_formula_source_asset(
+                    fitz,
+                    pdf=pdf,
+                    page=page,
+                    page_index=page_index,
+                    candidate=candidate,
+                    clip=clip,
+                    output_path=output_path,
+                    asset_format=asset_format,
+                )
             except Exception:
                 updated.append(candidate)
                 continue
@@ -839,6 +1206,8 @@ def _ensure_formula_candidate_assets(
                 quality_flags.append("formula_crop_padded")
             if _equation_number_present(candidate.source_text):
                 quality_flags.append("formula_equation_number_preserved")
+            if asset_format == "svg":
+                quality_flags.append("formula_source_asset_svg")
             updated.append(
                 FormulaCandidate(
                     candidate_id=candidate.candidate_id,
@@ -853,7 +1222,15 @@ def _ensure_formula_candidate_assets(
                     span_ids=candidate.span_ids,
                     display_mode=candidate.display_mode,
                     image_path=asset_path,
-                    quality_flags=tuple(_unique(quality_flags)),
+                    quality_flags=tuple(
+                        _unique(
+                            [
+                                *quality_flags,
+                                "formula_source_preserved",
+                                "formula_source_asset_primary",
+                            ]
+                        )
+                    ),
                     legacy_formula_ids=candidate.legacy_formula_ids,
                     parser_cluster_id=candidate.parser_cluster_id,
                 )
@@ -863,13 +1240,114 @@ def _ensure_formula_candidate_assets(
         pdf.close()
 
 
-def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> DocumentIR:
+def _formula_source_asset_extension(asset_format: _FormulaSourceAssetFormat) -> str:
+    return "svg" if asset_format == "svg" else "png"
+
+
+def _write_formula_source_asset(
+    fitz: Any,
+    *,
+    pdf: Any,
+    page: Any,
+    page_index: int,
+    candidate: FormulaCandidate,
+    clip: Any,
+    output_path: Path,
+    asset_format: _FormulaSourceAssetFormat,
+) -> None:
+    if asset_format == "svg":
+        vector_doc = fitz.open()
+        try:
+            vector_page = vector_doc.new_page(width=clip.width, height=clip.height)
+            vector_page.show_pdf_page(
+                fitz.Rect(0, 0, clip.width, clip.height),
+                pdf,
+                page_index,
+                clip=clip,
+            )
+            svg = vector_page.get_svg_image(text_as_path=1)
+            output_path.write_text(svg, encoding="utf-8")
+        finally:
+            vector_doc.close()
+        return
+
+    pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), clip=clip, alpha=False)
+    pixmap.save(output_path)
+
+
+def _candidate_with_source_preservation_flags(candidate: FormulaCandidate) -> FormulaCandidate:
+    if not candidate.image_path:
+        return candidate
+    quality_flags = _unique(
+        [
+            *candidate.quality_flags,
+            "formula_source_preserved",
+            "formula_source_asset_primary",
+        ]
+    )
+    if tuple(quality_flags) == candidate.quality_flags:
+        return candidate
+    return FormulaCandidate(
+        candidate_id=candidate.candidate_id,
+        page_id=candidate.page_id,
+        bbox=candidate.bbox,
+        source_kind=candidate.source_kind,
+        source_block_id=candidate.source_block_id,
+        anchor_block_id=candidate.anchor_block_id,
+        asset_id=candidate.asset_id,
+        source_text=candidate.source_text,
+        source_text_range=candidate.source_text_range,
+        span_ids=candidate.span_ids,
+        display_mode=candidate.display_mode,
+        image_path=candidate.image_path,
+        quality_flags=tuple(quality_flags),
+        legacy_formula_ids=candidate.legacy_formula_ids,
+        parser_cluster_id=candidate.parser_cluster_id,
+    )
+
+
+def _candidate_source_replay_allowed(candidate: FormulaCandidate) -> bool:
+    if candidate.display_mode != "inline":
+        return True
+    flags = set(candidate.quality_flags)
+    if "formula_inline_broad_bbox_unreplayable" in flags:
+        return False
+    if candidate.span_ids or "formula_estimated_bbox" in flags:
+        return True
+    return candidate.source_kind != FormulaSourceKind.INLINE_TEXT
+
+
+def _source_preservation_flags(
+    *,
+    source_asset_available: bool,
+    latex: str,
+) -> list[str]:
+    if not source_asset_available:
+        return ["formula_source_asset_missing"]
+    flags = ["formula_source_preserved", "formula_source_asset_primary"]
+    if latex.strip():
+        flags.append("formula_latex_auxiliary")
+    return flags
+
+
+def _attach_formulas(
+    document: DocumentIR,
+    formulas: list[FormulaIR],
+    *,
+    rejected_records: list[dict] | None = None,
+) -> DocumentIR:
     formulas_by_id = {formula.formula_id: formula for formula in formulas}
     legacy_formula_ids = {
         flag.split(":", 1)[1]
         for formula in formulas
         for flag in formula.quality_flags
         if flag.startswith("legacy_formula_replaced:")
+    }
+    rejected_legacy_formula_ids = {
+        flag.split(":", 1)[1]
+        for record in rejected_records or []
+        for flag in record.get("quality_flags", [])
+        if isinstance(flag, str) and flag.startswith("legacy_formula_replaced:")
     }
     existing_assets = {
         asset.asset_id
@@ -948,7 +1426,6 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
             if (
                 not formula.asset_id
                 or formula.asset_id in existing_assets
-                or formula.display_mode == "inline"
             ):
                 continue
             assets.append(
@@ -957,7 +1434,10 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
                     page_id=page.page_id,
                     kind="formula",
                     bbox=_bbox_for_formula(page, formula),
-                    path=f"/api/documents/{document.doc_id}/assets/{formula.asset_id}.png",
+                    path=(
+                        f"/api/documents/{document.doc_id}/assets/{formula.asset_id}"
+                        f".{_formula_asset_extension_for_formula(formula)}"
+                    ),
                     alt_text=formula.latex,
                     formula_id=formula.formula_id,
                 )
@@ -965,10 +1445,23 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
             existing_assets.add(formula.asset_id)
         pages.append(page.model_copy(update={"blocks": blocks, "assets": assets}, deep=True))
 
-    merged_formulas = {
-        formula.formula_id: formula for formula in document.formulas
-        if formula.formula_id not in legacy_formula_ids
-    }
+    merged_formulas: dict[str, FormulaIR] = {}
+    for formula in document.formulas:
+        if formula.formula_id in legacy_formula_ids:
+            continue
+        if formula.formula_id in rejected_legacy_formula_ids:
+            formula = formula.model_copy(
+                update={
+                    "quality_flags": _unique(
+                        [
+                            *formula.quality_flags,
+                            "legacy_formula_retained_after_rejection",
+                        ]
+                    )
+                },
+                deep=True,
+            )
+        merged_formulas[formula.formula_id] = formula
     merged_formulas.update(formulas_by_id)
     updated = document.model_copy(
         update={
@@ -981,15 +1474,21 @@ def _attach_formulas(document: DocumentIR, formulas: list[FormulaIR]) -> Documen
 
 
 def _bbox_for_formula(page: DocumentPage, formula: FormulaIR) -> BoundingBox:
-    if formula.source_block_id:
+    block_id = formula.source_block_id or formula.anchor_block_id
+    if block_id:
         for block in page.blocks:
-            if block.block_id == formula.source_block_id:
+            if block.block_id == block_id:
                 return block.bbox
     if formula.asset_id:
         for asset in page.assets:
             if asset.asset_id == formula.asset_id:
                 return asset.bbox
     return BoundingBox(x0=0, y0=0, x1=1, y1=1)
+
+
+def _formula_asset_extension_for_formula(formula: FormulaIR) -> str:
+    flags = set(formula.quality_flags or [])
+    return "svg" if "formula_source_asset_svg" in flags else "png"
 
 
 def _rewrite_inline_formula_refs(source_text: str, formulas: list[FormulaIR]) -> str:
@@ -1019,6 +1518,56 @@ def _source_counts(candidates: list[FormulaCandidate]) -> dict[str, int]:
     return counts
 
 
+def _document_formula_ref_diagnostics(
+    document: DocumentIR,
+    *,
+    accepted_formula_ids: set[str],
+) -> dict[str, Any]:
+    document_formula_ids = {formula.formula_id for formula in document.formulas}
+    referenced_formula_ids: set[str] = set()
+    for page in document.pages:
+        for block in page.blocks:
+            for text in (block.source_text, block.text_for_translation):
+                referenced_formula_ids.update(
+                    match.group(1)
+                    for match in re.finditer(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}", text or "")
+                )
+    unknown_formula_refs = referenced_formula_ids - document_formula_ids
+    retained_rejected_ids = {
+        formula.formula_id
+        for formula in document.formulas
+        if "legacy_formula_retained_after_rejection" in formula.quality_flags
+    }
+    stale_formula_refs = referenced_formula_ids & retained_rejected_ids
+    legacy_retained_ids = {
+        formula.formula_id
+        for formula in document.formulas
+        if formula.formula_id in stale_formula_refs
+        and (
+            formula.formula_id.startswith("F")
+            or "legacy_formula_retained_after_rejection" in formula.quality_flags
+        )
+    }
+    quality_flags: list[str] = []
+    if unknown_formula_refs:
+        quality_flags.append("unknown_formula_refs_in_document")
+    if stale_formula_refs:
+        quality_flags.append("stale_formula_refs_in_document")
+    if legacy_retained_ids:
+        quality_flags.append("legacy_formula_retained_after_rejection")
+    return {
+        "accepted_formula_count": len(accepted_formula_ids),
+        "referenced_formula_count": len(referenced_formula_ids),
+        "unknown_formula_ref_count": len(unknown_formula_refs),
+        "unknown_formula_refs": sorted(unknown_formula_refs),
+        "stale_formula_ref_count": len(stale_formula_refs),
+        "stale_formula_refs": sorted(stale_formula_refs),
+        "legacy_retained_count": len(legacy_retained_ids),
+        "legacy_retained_formula_ids": sorted(legacy_retained_ids),
+        "quality_flags": quality_flags,
+    }
+
+
 def _candidate_record(candidate: FormulaCandidate) -> dict:
     return {
         "candidate_id": candidate.candidate_id,
@@ -1034,6 +1583,8 @@ def _candidate_record(candidate: FormulaCandidate) -> dict:
         "span_ids": list(candidate.span_ids),
         "display_mode": candidate.display_mode,
         "image_path": candidate.image_path,
+        "legacy_formula_ids": list(candidate.legacy_formula_ids),
+        "parser_cluster_id": candidate.parser_cluster_id,
         "quality_flags": list(candidate.quality_flags),
     }
 
@@ -1061,14 +1612,26 @@ def _formula_diagnostic_base_flags(
 
 
 def _ocr_provider_status(active_provider_order: list[str]) -> dict:
+    installed_provider_availability: list[dict[str, Any]] = []
     try:
         import pix2text  # noqa: F401
     except Exception as exc:
-        status = {"name": "pix2text", "status": "unavailable", "error": str(exc)[:160]}
+        pix2text_status = {
+            "name": "pix2text",
+            "status": "unavailable",
+            "error": str(exc)[:160],
+        }
     else:
-        status = {"name": "pix2text", "status": "available"}
+        pix2text_status = {"name": "pix2text", "status": "available"}
+    installed_provider_availability.append(dict(pix2text_status))
+    status = dict(pix2text_status)
     status["active_provider_order"] = list(active_provider_order)
     status["active_provider_order_includes_pix2text"] = "pix2text" in active_provider_order
+    status["installed_provider_availability"] = installed_provider_availability
+    status["active_provider_statuses"] = [
+        {"name": provider_name, "active": True}
+        for provider_name in active_provider_order
+    ]
     return status
 
 
@@ -1089,8 +1652,12 @@ def _padded_formula_crop_rect(
 ) -> Any:
     width = max(1.0, candidate.bbox.x1 - candidate.bbox.x0)
     height = max(1.0, candidate.bbox.y1 - candidate.bbox.y0)
-    pad_x = min(max(width * 0.06, 8.0), 28.0)
-    pad_y = min(max(height * 0.22, 10.0), 36.0)
+    if candidate.display_mode == "inline":
+        pad_x = min(max(width * 0.025, 1.0), 4.0)
+        pad_y = min(max(height * 0.04, 1.0), 3.0)
+    else:
+        pad_x = min(max(width * 0.03, 3.0), 12.0)
+        pad_y = min(max(height * 0.04, 2.0), 8.0)
     right_pad = pad_x
     if _equation_number_present(candidate.source_text):
         right_pad = max(right_pad, width * 0.18, 22.0)
@@ -1104,10 +1671,11 @@ def _padded_formula_crop_rect(
 
 def _equation_number_present(text: str) -> bool:
     normalized = normalize_pdf_text(text)
-    if re.search(r"\(\d+\)\s*$", normalized):
+    if re.search(r"\([A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?\)\s*$", normalized):
         return True
     match = re.search(
-        r"\(\d+\)(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$",
+        r"\([A-Za-z]?\d+(?:[.\-]\d+)*[a-z]?\)"
+        r"(?P<tail>\s+[A-Za-z0-9α-ωΑ-Ω_{}^\\+\-*/.,\s]{1,24})$",
         normalized,
     )
     if match is None:

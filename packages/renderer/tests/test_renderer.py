@@ -31,7 +31,14 @@ from pdf_translator_schema import (
     TranslationBlockPlan,
     TranslationLayoutPlan,
 )
-from pdf_translator_schema.models import DocumentBlock, Formula, RenderDefaults, StyleSeed
+from pdf_translator_schema.models import (
+    DocumentBlock,
+    Formula,
+    PdfFormula,
+    PdfFormulaPrimitive,
+    RenderDefaults,
+    StyleSeed,
+)
 
 RENDERER_ROOT = Path(__file__).resolve().parents[1]
 
@@ -298,18 +305,26 @@ def test_pdf_export_inlines_api_asset_sources(tmp_path: Path) -> None:
     asset_dir = tmp_path / "assets"
     asset_dir.mkdir()
     (asset_dir / "asset_1.png").write_bytes(b"image-bytes")
+    (asset_dir / "formula_1.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1"/></svg>',
+        encoding="utf-8",
+    )
     diagnostics = {
         "asset_rewrites": {
             "inlined": 0,
             "missing": [],
         }
     }
-    html = '<img src="/api/documents/doc_1/assets/asset_1.png" alt="figure" />'
+    html = (
+        '<img src="/api/documents/doc_1/assets/asset_1.png" alt="figure" />'
+        '<img src="/api/documents/doc_1/assets/formula_1.svg" alt="formula" />'
+    )
 
     rewritten = renderer_module._inline_api_asset_sources(html, asset_dir, diagnostics)
 
     assert 'src="data:image/png;base64,' in rewritten
-    assert diagnostics["asset_rewrites"]["inlined"] == 1
+    assert 'src="data:image/svg+xml;base64,' in rewritten
+    assert diagnostics["asset_rewrites"]["inlined"] == 2
     assert diagnostics["asset_rewrites"]["missing"] == []
 
 
@@ -371,6 +386,8 @@ def test_pdf_export_page_diagnostics_collects_overflow_and_figure_checks() -> No
     assert "scrollHeight > clientHeight" in page.script
     assert "visibleTextRects" in page.script
     assert ".katex-mathml" in page.script
+    assert "formulaDiagnostics" in page.script
+    assert "data-browser-katex-status" in page.script
     assert "data-figure-group-id" in page.script
     assert "asset_caption_mismatch" in page.script
 
@@ -443,6 +460,72 @@ def test_browser_layout_iterations_apply_measured_height_override(
     assert diagnostics["browser_block_overflow_count"] == 0
     assert diagnostics["layout_iterations"][0]["browser_block_overflow_count"] == 1
     assert diagnostics["layout_iterations"][1]["measured_height_override_count"] == 1
+    assert render_document.pages[0].blocks[0].layout_signature is not None
+
+
+def test_browser_layout_rebuilds_after_final_iteration_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=250, y1=130),
+        source_text="Source paragraph.",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text="天地玄黄宇宙洪荒" * 18,
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+    calls: list[str] = []
+
+    def block_height(html: str) -> float:
+        block_html = html.split('data-block-id="p1_body"', 1)[1]
+        return float(block_html.split("--h-pt:", 1)[1].split("pt", 1)[0].strip())
+
+    async def fake_measure(html: str, *, asset_base_path=None) -> dict[str, object]:
+        calls.append(html)
+        signature = html.split('data-layout-signature="', 1)[1].split('"', 1)[0]
+        return {
+            "page": {
+                "block_overflow_count": 1,
+                "block_overflows": [
+                    {
+                        "block_id": "p1_body",
+                        "source_block_id": "p1_body",
+                        "layout_signature": signature,
+                        "page_id": "r0001",
+                        "scroll_height": 88,
+                        "client_height": 40,
+                        "scroll_width": 100,
+                        "client_width": 100,
+                    }
+                ],
+                "figure_group_issue_count": 0,
+                "figure_group_issues": [],
+            }
+        }
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure)
+
+    html, render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([paragraph]),
+            [plan],
+            "zh-CN",
+            render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+            max_iterations=1,
+        )
+    )
+
+    assert len(calls) == 1
+    assert block_height(html) > block_height(calls[0])
+    assert diagnostics["browser_layout_final_rebuild_applied"] is True
+    assert diagnostics["browser_layout_final_rebuild_measured"] is False
     assert render_document.pages[0].blocks[0].layout_signature is not None
 
 
@@ -1097,6 +1180,154 @@ def test_formula_block_renders_internal_latex_markup() -> None:
     assert "{{formula:formula_1}}" not in html
 
 
+def test_compact_partial_derivatives_render_without_corruption_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda latex, display=False: (
+            f'<span class="{"katex-display" if display else "katex"}">{latex}</span>'
+        ),
+    )
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=72, y0=200, x1=420, y1=230),
+        source_text="{{formula:formula_1}}",
+        reading_order=0,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_1",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex=r"\partial tf + \partial xU + \partial tu + \partial tF",
+                source_text=r"\partial tf + \partial xU + \partial tu + \partial tF",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-image-fallback" not in block_html
+    assert "formula-plaintext-fallback" not in block_html
+    assert "formula_image_fallback" not in diagnostics["quality_flag_counts"]
+    assert "formula_plaintext_fallback" not in diagnostics["quality_flag_counts"]
+
+
+def test_raw_tex_in_translated_text_is_rendered_and_diagnosed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda latex, display=False: (
+            f'<span class="{"katex-display" if display else "katex"}">{latex}</span>'
+        ),
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Here raw TeX appears.",
+        reading_order=0,
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=r"此处 $t\geq 0$ 且 \mathbb{R}^{d} 出现。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([paragraph]),
+        [plan],
+        "zh-CN",
+    )
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-raw-tex" in html
+    assert 'data-raw-tex-status="rendered"' in html
+    assert "formula-plaintext-fallback" not in block_html
+    assert diagnostics["raw_tex_rendered_count"] >= 2
+    assert diagnostics["raw_tex_unrendered_count"] == 0
+
+
+def test_display_raw_tex_with_formula_ref_is_rendered_as_one_formula(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        renderer_models,
+        "_katex_html",
+        lambda latex, display=False: (
+            f'<span class="{"katex-display" if display else "katex"}">{latex}</span>'
+        ),
+    )
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=210),
+        source_text="Jensen estimate.",
+        reading_order=0,
+    )
+    document = _document([paragraph])
+    document.formulas.append(
+        FormulaIR(
+            formula_id="F4782625f36a4",
+            page_id="p1",
+            source_block_id="p1_body",
+            latex=r"M^{2}",
+            source_text=r"M^{2}",
+            display_mode="display",
+            source_kind="text_layer",
+        )
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=(
+                "具体地，我们利用 $-\\log$ 的凸性：\n"
+                "$$\n"
+                r"-\log\!\int_{\mathbb{R}^{2}\times\mathbb{R}^{2}}"
+                r"\!\rho(t,x)\rho(t,y)\,dxdy \ge {{formula:F4782625f36a4}}"
+                "\n$$"
+            ),
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(document, [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert block_html.count("formula-raw-tex") == 2
+    assert 'data-display="true"' in block_html
+    assert 'data-latex="-\\log\\!\\int_{\\mathbb{R}^{2}\\times\\mathbb{R}^{2}}' in block_html
+    assert r"\ge M^{2}" in block_html
+    assert "formula-plaintext-fallback" not in block_html
+    assert diagnostics["raw_tex_unrendered_count"] == 0
+    assert "{{formula:F4782625f36a4}}" not in html.split('data-latex="', 2)[-1]
+
+
 def test_small_bbox_display_formula_expands_before_font_scaling() -> None:
     formula = _block(
         "p1_formula",
@@ -1488,7 +1719,7 @@ def test_corrupt_display_formula_prefers_image_fallback_even_if_latex_compiles()
                 source_text="f 0 s=k2",
                 display_mode="display",
                 source_kind="text_layer",
-                quality_flags=["formula_text_layer_corrupt"],
+                quality_flags=["formula_text_layer_corrupt", "formula_text_truncated"],
             )
         ],
     )
@@ -1507,6 +1738,612 @@ def test_corrupt_display_formula_prefers_image_fallback_even_if_latex_compiles()
     assert "formula-image-fallback" in html
     assert "formula_asset.png" in html
     assert diagnostics["quality_flag_counts"]["formula_image_fallback"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_image_crop_suspect"] == 1
+
+
+def test_source_preserved_formula_asset_overrides_valid_katex() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_source}}",
+    )
+    formula_asset = Asset(
+        asset_id="formula_source",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        path="/api/documents/doc_1/assets/formula_source.png",
+        formula_id="formula_source",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[formula_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_source",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_source",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=[
+                    "formula_source_preserved",
+                    "formula_source_asset_primary",
+                    "formula_latex_auxiliary",
+                ],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_source}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "formula-image-fallback" in html
+    assert "formula_source.png" in html
+    assert "formula_source_asset_primary" in diagnostics["quality_flag_counts"]
+
+
+def test_pdf_formula_source_asset_preview_beats_primitive_svg_for_display() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_pdf}}",
+    )
+    formula_asset = Asset(
+        asset_id="formula_pdf",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        path="/api/documents/doc_1/assets/formula_pdf.svg",
+        formula_id="formula_pdf",
+    )
+    pdf_formula = PdfFormula(
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=36, y0=72, x1=116, y1=94),
+        width_pt=80,
+        height_pt=22,
+        primitives=[
+            PdfFormulaPrimitive(
+                primitive_id="g0",
+                kind="glyph",
+                text="E = mc",
+                font_name="Cambria Math",
+                font_size_pt=12,
+                bbox=BoundingBox(x0=0, y0=0, x1=42, y1=14),
+                origin=(0, 12),
+            ),
+            PdfFormulaPrimitive(
+                primitive_id="g1",
+                kind="glyph",
+                text="2",
+                font_name="Cambria Math",
+                font_size_pt=8,
+                bbox=BoundingBox(x0=44, y0=0, x1=50, y1=8),
+                origin=(44, 7),
+            ),
+            PdfFormulaPrimitive(
+                primitive_id="l0",
+                kind="line",
+                points=[(54, 11), (76, 11)],
+                stroke_width_pt=0.5,
+            ),
+        ],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[formula_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_pdf",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_pdf",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+                pdf_formula=pdf_formula,
+                quality_flags=[
+                    "formula_pdf_primitive_primary",
+                    "formula_source_preserved",
+                    "formula_source_asset_primary",
+                    "formula_source_asset_svg",
+                    "formula_latex_auxiliary",
+                ],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_pdf}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-image-fallback" in block_html
+    assert "formula_pdf.svg" in html
+    assert "style=\"width:80pt;height:22pt\"" in html
+    assert "formula-pdf-primitive-replay" not in block_html
+    assert "data-pdf-formula=\"true\"" not in block_html
+    assert "data-latex=" not in html
+    assert diagnostics["quality_flag_counts"]["formula_image_fallback"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_svg_fallback"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_source_asset_primary"] == 1
+    assert diagnostics["quality_flag_counts"]["formula_source_asset_size_preserved"] == 1
+    assert "formula_pdf_primitive_replay" not in diagnostics["quality_flag_counts"]
+
+
+def test_pdf_formula_primitive_svg_used_without_source_asset() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_pdf}}",
+    )
+    pdf_formula = PdfFormula(
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=36, y0=72, x1=116, y1=94),
+        width_pt=80,
+        height_pt=22,
+        primitives=[
+            PdfFormulaPrimitive(
+                primitive_id="g0",
+                kind="glyph",
+                text="E = mc",
+                font_name="Cambria Math",
+                font_size_pt=12,
+                bbox=BoundingBox(x0=0, y0=0, x1=42, y1=14),
+                origin=(0, 12),
+            ),
+        ],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_pdf",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+                pdf_formula=pdf_formula,
+                quality_flags=["formula_pdf_primitive_primary", "formula_latex_auxiliary"],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_pdf}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = render_document.pages[0].blocks[0].html or ""
+
+    assert "formula-pdf-primitive-replay" in html
+    assert "data-pdf-formula=\"true\"" not in block_html
+    assert "data-pdf-formula-source-bbox=\"36,72,116,94\"" not in block_html
+    assert 'class="formula-image-fallback"' not in html
+    assert diagnostics["quality_flag_counts"]["formula_pdf_primitive_replay"] == 1
+
+
+def test_pdf_formula_source_clip_reserves_print_replay_slot() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_clip}}",
+    )
+    pdf_formula = PdfFormula(
+        replay_kind="source_clip",
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=36, y0=72, x1=156, y1=100),
+        width_pt=120,
+        height_pt=28,
+        primitives=[],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_clip",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="mineru",
+                pdf_formula=pdf_formula,
+                quality_flags=["formula_source_clip_replay"],
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text="{{formula:formula_clip}}",
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [plan], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "formula-pdf-source-clip-replay" in html
+    assert "data-pdf-formula=\"true\"" in html
+    assert "data-pdf-formula-replay-kind=\"source_clip\"" in html
+    assert "data-pdf-formula-source-bbox=\"36,72,156,100\"" in html
+    assert "{{formula:formula_clip}}" not in html
+    assert diagnostics["quality_flag_counts"]["formula_source_clip_replay"] >= 1
+
+
+def test_pdf_formula_source_clip_preserves_source_display_height() -> None:
+    formula_a = _block(
+        "p1_formula_a",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=180, y1=92),
+        source_text="{{formula:formula_a}}",
+        reading_order=0,
+    )
+    formula_b = _block(
+        "p1_formula_b",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=112, x1=180, y1=152),
+        source_text="{{formula:formula_b}}",
+        reading_order=1,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula_a, formula_b],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_a",
+                page_id="p1",
+                source_block_id="p1_formula_a",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="mineru",
+                pdf_formula=PdfFormula(
+                    replay_kind="source_clip",
+                    source_page_id="p1",
+                    source_page_index=0,
+                    source_bbox=BoundingBox(x0=36, y0=72, x1=156, y1=92),
+                    width_pt=120,
+                    height_pt=20,
+                    primitives=[],
+                ),
+            ),
+            FormulaIR(
+                formula_id="formula_b",
+                page_id="p1",
+                source_block_id="p1_formula_b",
+                latex=r"\frac{a}{b} = c",
+                source_text="a / b = c",
+                display_mode="display",
+                source_kind="mineru",
+                pdf_formula=PdfFormula(
+                    replay_kind="source_clip",
+                    source_page_id="p1",
+                    source_page_index=0,
+                    source_bbox=BoundingBox(x0=36, y0=112, x1=116, y1=152),
+                    width_pt=80,
+                    height_pt=40,
+                    primitives=[],
+                ),
+            ),
+        ],
+    )
+
+    render_document = _render_source_bbox(document)
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "width:120pt;height:20pt" in html
+    assert "width:80pt;height:40pt" in html
+    assert "formula_replay_article_uniform_height" not in diagnostics["quality_flag_counts"]
+
+
+def test_pdf_formula_primitive_svg_obeys_inline_slot_height() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=36, y0=72, x1=300, y1=108),
+        source_text="In-line {{formula:formula_inline}} with replay.",
+        reading_order=0,
+    )
+    pdf_formula = PdfFormula(
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=96, y0=72, x1=126, y1=82),
+        width_pt=30,
+        height_pt=10,
+        primitives=[
+            PdfFormulaPrimitive(
+                primitive_id="g0",
+                kind="glyph",
+                text="x",
+                font_name="Cambria Math",
+                font_size_pt=10,
+                bbox=BoundingBox(x0=0, y0=0, x1=30, y1=10),
+                origin=(0, 10),
+            ),
+        ],
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=[paragraph],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_inline",
+                page_id="p1",
+                source_block_id="p1_body",
+                latex=r"x",
+                source_text="x",
+                display_mode="inline",
+                source_kind="inline_text",
+                pdf_formula=pdf_formula,
+                quality_flags=["formula_pdf_primitive_primary", "formula_latex_auxiliary"],
+            )
+        ],
+    )
+    defaults = _source_bbox_defaults(formula_replay={"inline_slot_height_pt": 15.0})
+
+    html = render_to_html(
+        RenderDocument.from_ir_and_plans(document, [], "zh-CN", render_defaults=defaults)
+    )
+
+    assert "formula-pdf-primitive-replay" in html
+    assert "style=\"width:45pt;height:15pt\"" in html
+    assert 'class="formula-image-fallback"' not in html
+
+
+def test_pdf_formula_direct_replay_hides_preview_fallbacks_in_print_css() -> None:
+    html = render_to_html(_render_source_bbox(_document([])))
+
+    assert '.formula[data-pdf-formula="true"] > *' in html
+    assert "visibility: hidden !important;" in html
+
+
+def test_pdf_formula_replay_placement_prefers_primitive_before_image_fallback() -> None:
+    import asyncio
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.script = ""
+
+        async def evaluate(self, script: str) -> list[object]:
+            self.script = script
+            return []
+
+    page = FakePage()
+
+    placements = asyncio.run(renderer_module._collect_formula_replay_placements(page))
+
+    assert placements == []
+    assert "formula-pdf-source-clip-replay" in page.script
+    assert "formula-image-fallback" in page.script
+    assert page.script.index("formula-pdf-primitive-replay") < page.script.index(
+        "formula-image-fallback"
+    )
+    assert "replayNode.getBoundingClientRect" in page.script
+
+
+def test_formula_source_clip_overlay_rasterizes_without_text_layer(tmp_path: Path) -> None:
+    import fitz
+
+    source_path = tmp_path / "source.pdf"
+    target_path = tmp_path / "target.pdf"
+
+    source = fitz.open()
+    source_page = source.new_page(width=120, height=80)
+    source_page.insert_textbox(fitz.Rect(10, 20, 110, 50), "SECRET_FORMULA", fontsize=12)
+    source.save(source_path)
+    source.close()
+
+    target = fitz.open()
+    target.new_page(width=120, height=80)
+    target.save(target_path)
+    target.close()
+
+    diagnostics = renderer_module._overlay_formula_source_clips(
+        target_path,
+        source_path,
+        [
+            {
+                "formula_id": "f1",
+                "target_page_index": 0,
+                "source_page_index": 0,
+                "source_bbox": "10,20,110,50",
+                "x_px": 10 / renderer_module._PT_PER_CSS_PX,
+                "y_px": 20 / renderer_module._PT_PER_CSS_PX,
+                "width_px": 100 / renderer_module._PT_PER_CSS_PX,
+                "height_px": 30 / renderer_module._PT_PER_CSS_PX,
+            }
+        ],
+    )
+
+    rendered = fitz.open(target_path)
+    try:
+        assert diagnostics["status"] == "completed"
+        assert diagnostics["succeeded_count"] == 1
+        assert "SECRET_FORMULA" not in rendered[0].get_text("text")
+    finally:
+        rendered.close()
+
+
+def test_display_image_fallback_keeps_latex_retry_metadata() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text="{{formula:formula_corrupt}}",
+    )
+    formula_asset = Asset(
+        asset_id="formula_asset",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        path="/api/documents/doc_1/assets/formula_asset.png",
+        formula_id="formula_corrupt",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[formula],
+                assets=[formula_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_corrupt",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex=r"f_s = k^2",
+                source_text="f 0 s=k2",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=["formula_text_layer_corrupt"],
+            )
+        ],
+    )
+
+    html = render_to_html(RenderDocument.from_ir_and_plans(document, [], "zh-CN"))
+
+    assert ".formula-display .formula-image-fallback img" in html
+    assert 'class="formula formula-display formula-ir"' in html
+    assert 'data-latex="f_s = k^2"' in html
+    assert 'class="formula-image-fallback"' in html
+    assert 'data-display="true"' in html
+
+
+def test_display_image_fallback_uses_formula_slot_not_parent_block_height() -> None:
+    formula = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=420),
+        source_text="{{formula:formula_corrupt}}",
+    )
+    formula_asset = Asset(
+        asset_id="formula_asset",
+        page_id="p1",
+        kind="formula",
+        bbox=BoundingBox(x0=36, y0=72, x1=260, y1=420),
+        path="/api/documents/doc_1/assets/formula_asset.png",
+        formula_id="formula_corrupt",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=500),
+                blocks=[formula],
+                assets=[formula_asset],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="formula_corrupt",
+                page_id="p1",
+                source_block_id="p1_formula",
+                asset_id="formula_asset",
+                latex=r"f_s = k^2",
+                source_text="f 0 s=k2",
+                display_mode="display",
+                source_kind="text_layer",
+                quality_flags=["formula_text_layer_corrupt"],
+            )
+        ],
+    )
+    defaults = _source_bbox_defaults(
+        formula_replay={
+            "display_slot_height_pt": 24.0,
+            "inline_slot_height_pt": 13.0,
+        }
+    )
+
+    html = render_to_html(
+        RenderDocument.from_ir_and_plans(document, [], "zh-CN", render_defaults=defaults)
+    )
+
+    assert "--formula-display-slot-height-pt: 24.0pt;" in html
+    assert "--formula-inline-slot-height-pt: 13.0pt;" in html
+    assert "calc(var(--h-pt" not in html
+    assert ".formula-display .formula-image-fallback {\n        display: inline-flex;" in html
+    assert "height: var(--formula-display-slot-height-pt);" in html
 
 
 def test_corrupt_display_formula_uses_image_fallback_without_upstream_flags() -> None:
@@ -1563,7 +2400,10 @@ def test_corrupt_display_formula_uses_image_fallback_without_upstream_flags() ->
 
     assert "formula-image-fallback" in html
     assert "formula_asset.png" in html
-    assert r"\partial fs=k2" not in block_html
+    assert 'data-latex="\\partial fs=k2 @(kt)"' in block_html
+    assert "formula-plaintext-fallback" not in block_html
+    assert ".formula-display .formula-image-fallback img" in html
+    assert "height: 100%;" in html
     assert diagnostics["quality_flag_counts"]["formula_image_fallback"] == 1
 
 
@@ -1627,6 +2467,54 @@ def test_clean_visual_formula_renders_latex_despite_corrupt_source_text() -> Non
     assert "formula_asset.png" not in block_html
     assert "katex" in html
     assert "formula_image_fallback" not in diagnostics["quality_flag_counts"]
+
+
+def test_compact_partial_derivative_variants_render_without_corruption_fallback() -> None:
+    document = _display_formula_document(
+        [
+            ("p1_f1", "formula_1", r"\partial tf"),
+            ("p1_f2", "formula_2", r"\partial xU"),
+            ("p1_f3", "formula_3", r"\partial tu"),
+            ("p1_f4", "formula_4", r"\partial tF"),
+            ("p1_f5", "formula_5", r"\partial tw"),
+        ]
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = "\n".join(
+        block.html or "" for page in render_document.pages for block in page.blocks
+    )
+
+    assert html.count('class="formula formula-display formula-ir"') == 5
+    assert "formula-image-fallback" not in block_html
+    assert "formula-plaintext-fallback" not in block_html
+    assert "formula_image_fallback" not in diagnostics["quality_flag_counts"]
+    assert "formula_plaintext_fallback" not in diagnostics["quality_flag_counts"]
+
+
+def test_relation_latex_commands_count_as_renderer_math_signals() -> None:
+    document = _display_formula_document(
+        [
+            ("p1_f1", "formula_1", r"d \ge 2"),
+            ("p1_f2", "formula_2", r"h \ge 1"),
+            ("p1_f3", "formula_3", r"\le 0"),
+            ("p1_f4", "formula_4", r"2 dx \le C"),
+            ("p1_f5", "formula_5", r"t \to \infty"),
+        ]
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(document, [], "zh-CN")
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block_html = "\n".join(
+        block.html or "" for page in render_document.pages for block in page.blocks
+    )
+
+    assert html.count('class="formula formula-display formula-ir"') == 5
+    assert "formula-plaintext-fallback" not in block_html
+    assert "formula_plaintext_fallback" not in diagnostics["quality_flag_counts"]
 
 
 def test_missing_formula_ref_does_not_render_raw_placeholder() -> None:
@@ -1859,13 +2747,277 @@ def test_formula_placeholders_are_rendered_as_formula_nodes() -> None:
     diagnostics = render_document.diagnostics()
 
     assert "@@FORMULA_" not in html
-    assert 'class="formula formula-inline"' in html
+    assert 'class="formula formula-inline' in html
     assert 'data-formula-id="Fabc123"' in html
     assert r"\partial fs = \partial t" in html
     assert "window.katex" in html
     assert "katex.render" in html
     assert diagnostics["formula_rendered_count"] == 1
     assert diagnostics["unresolved_formula_placeholders"] == []
+
+
+def test_legacy_formula_placeholders_use_pdf_formula_replay() -> None:
+    placeholder = "@@FORMULA_Flegacy@@"
+    block = _block(
+        "p1_formula",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=260, y1=108),
+        source_text=placeholder,
+    ).model_copy(
+        update={
+            "text_for_translation": placeholder,
+            "formulas": [
+                Formula(
+                    formula_id="Flegacy",
+                    placeholder=placeholder,
+                    kind="display",
+                    source_text="E = mc^2",
+                    latex="E = mc^2",
+                )
+            ],
+        },
+        deep=True,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=200),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="Flegacy",
+                page_id="p1",
+                source_block_id="p1_formula",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+                pdf_formula=PdfFormula(
+                    source_page_id="p1",
+                    source_page_index=0,
+                    source_bbox=BoundingBox(x0=36, y0=72, x1=116, y1=94),
+                    width_pt=80,
+                    height_pt=20,
+                    primitives=[
+                        PdfFormulaPrimitive(
+                            primitive_id="g0",
+                            kind="glyph",
+                            text="E = mc^2",
+                            font_name="Cambria Math",
+                            font_size_pt=12,
+                            bbox=BoundingBox(x0=0, y0=0, x1=80, y1=20),
+                            origin=(0, 20),
+                        )
+                    ],
+                ),
+            )
+        ],
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula",
+            translated_text=placeholder,
+            role=BlockRole.FORMULA,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [plan],
+        "zh-CN",
+        render_defaults=_source_bbox_defaults(formula_replay={"display_slot_height_pt": 30.0}),
+    )
+    html = render_to_html(render_document)
+
+    assert "formula-pdf-primitive-replay" in html
+    assert "style=\"width:120pt;height:30pt\"" in html
+
+
+def test_legacy_formula_placeholders_preserve_source_display_height() -> None:
+    placeholder_a = "@@FORMULA_FA@@"
+    placeholder_b = "@@FORMULA_FB@@"
+    block_a = _block(
+        "p1_formula_a",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=72, x1=180, y1=92),
+        source_text=placeholder_a,
+    ).model_copy(
+        update={
+            "text_for_translation": placeholder_a,
+            "formulas": [
+                Formula(
+                    formula_id="FA",
+                    placeholder=placeholder_a,
+                    kind="display",
+                    source_text="E = mc^2",
+                    latex="E = mc^2",
+                )
+            ],
+        },
+        deep=True,
+    )
+    block_b = _block(
+        "p1_formula_b",
+        BlockRole.FORMULA,
+        BoundingBox(x0=36, y0=112, x1=180, y1=152),
+        source_text=placeholder_b,
+        reading_order=1,
+    ).model_copy(
+        update={
+            "text_for_translation": placeholder_b,
+            "formulas": [
+                Formula(
+                    formula_id="FB",
+                    placeholder=placeholder_b,
+                    kind="display",
+                    source_text=r"\frac{a}{b}",
+                    latex=r"\\frac{a}{b}",
+                )
+            ],
+        },
+        deep=True,
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=220),
+                blocks=[block_a, block_b],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="FA",
+                page_id="p1",
+                source_block_id="p1_formula_a",
+                latex="E = mc^2",
+                display_mode="display",
+                source_kind="text_layer",
+                pdf_formula=PdfFormula(
+                    replay_kind="source_clip",
+                    source_page_id="p1",
+                    source_page_index=0,
+                    source_bbox=BoundingBox(x0=36, y0=72, x1=156, y1=92),
+                    width_pt=120,
+                    height_pt=20,
+                ),
+            ),
+            FormulaIR(
+                formula_id="FB",
+                page_id="p1",
+                source_block_id="p1_formula_b",
+                latex=r"\\frac{a}{b}",
+                display_mode="display",
+                source_kind="text_layer",
+                pdf_formula=PdfFormula(
+                    replay_kind="source_clip",
+                    source_page_id="p1",
+                    source_page_index=0,
+                    source_bbox=BoundingBox(x0=36, y0=112, x1=116, y1=152),
+                    width_pt=80,
+                    height_pt=40,
+                ),
+            ),
+        ],
+    )
+    plans = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_formula_a",
+            translated_text=placeholder_a,
+            role=BlockRole.FORMULA,
+        ),
+        TranslationBlockPlan(
+            source_block_id="p1_formula_b",
+            translated_text=placeholder_b,
+            role=BlockRole.FORMULA,
+        ),
+    )
+
+    render_document = _render_source_bbox(document, [plans])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+
+    assert "width:120pt;height:20pt" in html
+    assert "width:80pt;height:40pt" in html
+    assert "formula_replay_article_uniform_height" not in diagnostics["quality_flag_counts"]
+
+
+def test_raw_tex_in_translated_text_renders_formula_nodes() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=190),
+        source_text="Raw TeX should be routed.",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=(
+                r"当 $t\geq 0$ 且 \mathbb{R} 中的 -\partial\xiW 出现时。"
+            ),
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(_document([paragraph]), [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block = render_document.pages[0].blocks[0]
+
+    assert html.count("formula-raw-tex") == 3
+    assert 'data-raw-tex="$t\\geq 0$"' in html
+    assert 'data-latex="\\mathbb{R}"' in html
+    assert 'data-latex="-\\partial \\xi W"' in html
+    assert "raw_tex_rendered" in block.quality_flags
+    assert "raw_tex_repaired" in block.quality_flags
+    assert diagnostics["raw_tex_rendered_count"] == 3
+    assert diagnostics["raw_tex_unrendered_count"] == 0
+    assert [node["status"] for node in diagnostics["raw_tex_nodes"]] == [
+        "rendered",
+        "rendered",
+        "rendered",
+    ]
+
+
+def test_unrenderable_raw_tex_is_reported_in_renderer_diagnostics() -> None:
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=72, y0=120, x1=420, y1=180),
+        source_text="Raw TeX should be diagnostic.",
+    )
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_body",
+            translated_text=r"坏公式 $\B$ 不能静默逃逸。",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = _render_source_bbox(_document([paragraph]), [plan])
+    html = render_to_html(render_document)
+    diagnostics = render_document.diagnostics()
+    block = render_document.pages[0].blocks[0]
+
+    assert "formula-raw-tex" in html
+    assert 'data-raw-tex-status="unrendered"' in html
+    assert '<span class="formula-plaintext-fallback">$\\B$</span>' in html
+    assert "raw_tex_unrendered" in block.quality_flags
+    assert diagnostics["raw_tex_unrendered_count"] == 1
+    assert diagnostics["raw_tex_nodes"] == [
+        {
+            "page_id": "p1",
+            "block_id": "p1_body",
+            "raw": r"$\B$",
+            "latex": r"\B",
+            "status": "unrendered",
+        }
+    ]
 
 
 def test_original_bbox_is_a_hard_constraint() -> None:
@@ -2704,7 +3856,7 @@ def test_rendered_formula_height_uses_heuristic_floor() -> None:
     assert height > 12.0 * (1.8 + 0.9)
 
 
-def test_formula_only_block_uses_visual_formula_height_for_long_single_line_latex() -> None:
+def test_formula_only_block_uses_article_slot_height_for_long_single_line_latex() -> None:
     formula = _block(
         "p1_formula",
         BlockRole.FORMULA,
@@ -2735,7 +3887,13 @@ def test_formula_only_block_uses_visual_formula_height_for_long_single_line_late
     )
     defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
     style = renderer_models._style_for_role(defaults, BlockRole.FORMULA)
-    visual_height = 12.0 * (1.8 + 0.6 + renderer_models._FORMULA_LIKE_VERTICAL_MARGIN_EM)
+    visual_height = (
+        renderer_models._article_display_formula_slot_height(
+            document,
+            defaults.formula_replay,
+        )
+        + 12.0 * renderer_models._FORMULA_LIKE_VERTICAL_MARGIN_EM
+    )
     estimation_text = renderer_models._formula_estimation_text(
         formula.source_text,
         document,
@@ -2915,6 +4073,55 @@ def test_continuous_reflow_compacts_formula_like_fragments_into_single_block() -
     assert diagnostics["formula_like_block_count"] >= 1
     assert 'data-formula-id="formula_a"' in html
     assert 'data-formula-id="formula_b"' in html
+
+
+def test_continuous_reflow_keeps_independent_formula_blocks_separate() -> None:
+    blocks = [
+        _block(
+            f"p1_formula_{index}",
+            BlockRole.FORMULA,
+            BoundingBox(x0=50, y0=90 + index * 24, x1=260, y1=108 + index * 24),
+            source_text=f"{{{{formula:formula_{index}}}}}",
+            reading_order=index,
+        )
+        for index in range(3)
+    ]
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=612, height=792),
+                blocks=blocks,
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id=f"formula_{index}",
+                page_id="p1",
+                source_block_id=f"p1_formula_{index}",
+                latex=f"x_{index} = y_{index}",
+                display_mode="display",
+                source_kind="text_layer",
+            )
+            for index in range(3)
+        ],
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        document,
+        [],
+        "zh-CN",
+        render_defaults=RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow"),
+    )
+    diagnostics = render_document.diagnostics()
+    render_blocks = render_document.pages[0].blocks
+    formula_heights = [block.bbox.y1 - block.bbox.y0 for block in render_blocks]
+
+    assert len(render_blocks) == 3
+    assert diagnostics["formula_reflow_cluster_count"] == 0
+    assert max(formula_heights) < 80
+    assert sum(1 for block in render_blocks if block.role == BlockRole.FORMULA) == 3
 
 
 def test_continuous_reflow_keeps_inline_formula_paragraph_as_regular_text_block() -> None:
@@ -3546,6 +4753,57 @@ def test_continuous_reflow_resplits_formula_paragraph_after_height_override() ->
     assert "{{formula:formula_inline}}" in " ".join(block.text for block in repaired_body_blocks)
 
 
+def test_browser_layout_rebuilds_after_final_measured_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    paragraph = _block(
+        "p1_body",
+        BlockRole.PARAGRAPH,
+        BoundingBox(x0=50, y0=90, x1=320, y1=160),
+        source_text="Measured text that needs one final browser height override.",
+        reading_order=0,
+    )
+
+    async def fake_measure_html_layout(html: str, *, asset_base_path=None):
+        return {
+            "page": {
+                "block_overflows": [
+                    {
+                        "block_id": "p1_body",
+                        "client_height": 10,
+                        "scroll_height": 24,
+                    }
+                ],
+                "block_overflow_count": 1,
+                "block_visual_slacks": [],
+                "block_visual_slack_count": 0,
+                "figure_group_issues": [],
+                "figure_group_issue_count": 0,
+            }
+        }
+
+    monkeypatch.setattr(renderer_module, "_measure_html_layout", fake_measure_html_layout)
+    monkeypatch.setattr(
+        renderer_module,
+        "_height_overrides_from_browser_overflows",
+        lambda _render_document, _overflows: {"forced-layout-signature": 96.0},
+    )
+
+    _html, _render_document, diagnostics = asyncio.run(
+        renderer_module.render_preview_with_browser_layout(
+            _document([paragraph]),
+            [],
+            "zh-CN",
+            max_iterations=1,
+        )
+    )
+
+    assert diagnostics["browser_layout_final_rebuild_applied"] is True
+    assert diagnostics["browser_layout_final_rebuild_measured"] is False
+
+
 def test_continuous_reflow_formula_paragraph_keeps_number_only_on_first_fragment() -> None:
     intro = _block(
         "intro",
@@ -3717,6 +4975,64 @@ def test_continuous_reflow_suppresses_publication_boilerplate_artifacts() -> Non
             "reason": "running_header_footer_or_pdf_artifact",
         }
     ]
+
+
+def test_continuous_reflow_suppresses_tiny_source_formula_fragments() -> None:
+    orphan_gamma = DocumentBlock(
+        block_id="p1_orphan_gamma",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=382.9, y0=537.5, x1=388.1, y1=547.6),
+        reading_order=0,
+        source_text="−γ",
+        text_for_translation="",
+        style_seed=StyleSeed(font_size=10, font_name="CMMI10"),
+    )
+    footer_number = DocumentBlock(
+        block_id="p1_footer_number",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=301.7, y0=682.2, x1=311.7, y1=692.2),
+        reading_order=1,
+        source_text="23",
+        text_for_translation="",
+        style_seed=StyleSeed(font_size=10, font_name="CMR10"),
+    )
+    real_short_block = DocumentBlock(
+        block_id="p1_real_short",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=72, y0=120, x1=80, y1=132),
+        reading_order=2,
+        source_text="γ",
+        text_for_translation="γ",
+        style_seed=StyleSeed(font_size=10, font_name="CMMI10"),
+    )
+    defaults = RenderDefaults(target_lang="zh-CN", layout_mode="continuous_reflow")
+    plan = _plan(
+        TranslationBlockPlan(
+            source_block_id="p1_real_short",
+            translated_text="真实参数",
+            role=BlockRole.PARAGRAPH,
+        )
+    )
+
+    render_document = RenderDocument.from_ir_and_plans(
+        _document([orphan_gamma, footer_number, real_short_block]),
+        [plan],
+        "zh-CN",
+        render_defaults=defaults,
+    )
+    html = render_to_html(render_document)
+
+    assert "−γ" not in html
+    assert 'data-block-id="p1_orphan_gamma"' not in html
+    assert 'data-block-id="p1_footer_number"' not in html
+    assert "真实参数" in html
+    assert [
+        entry["source_block_id"]
+        for entry in render_document.layout_trace["suppressed_artifacts"]
+    ] == ["p1_orphan_gamma", "p1_footer_number"]
 
 
 def test_render_document_diagnostics_reports_quality_flags() -> None:

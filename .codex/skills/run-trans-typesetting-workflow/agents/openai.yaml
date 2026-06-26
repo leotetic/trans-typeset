@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Trans Typesetting Workflow"
+  short_description: "Drive and verify the local PDF workbench"
+  default_prompt: "Use $run-trans-typesetting-workflow to translate and typeset a local PDF in this project."

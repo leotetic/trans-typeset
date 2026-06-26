@@ -2,22 +2,24 @@
 name = "trans-typesetting-api"
 version = "0.1.0"
 description = "FastAPI service for local PDF translation and typesetting."
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
-  "aiosqlite>=0.20",
-  "fastapi>=0.111",
-  "httpx>=0.27",
-  "jinja2>=3.1",
-  "langchain>=0.3",
-  "langchain-openai>=0.2",
-  "langgraph>=0.2",
-  "langgraph-checkpoint-sqlite>=2.0",
+  "aiosqlite>=0.20,<0.23",
+  "fastapi>=0.111,<0.139",
+  "httpx>=0.27,<0.29",
+  "jinja2>=3.1,<4",
+  "langchain>=1.3,<1.4",
+  "langchain-openai>=1.3,<1.4",
+  "langgraph>=1.2,<1.3",
+  "langgraph-checkpoint-sqlite>=3.1,<3.2",
+  "mineru[pipeline]==3.4.0",
   "pdf-translator-renderer",
   "pdf-translator-schema",
-  "pymupdf>=1.24",
-  "python-dotenv>=1.0",
-  "python-multipart>=0.0.9",
-  "uvicorn>=0.30"
+  "pdfminer.six>=20221105,<20270000",
+  "pymupdf>=1.24,<1.28",
+  "python-dotenv>=1.0,<2",
+  "python-multipart>=0.0.9,<0.1",
+  "uvicorn>=0.30,<0.50"
 ]
 
 [build-system]

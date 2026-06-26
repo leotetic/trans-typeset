@@ -12,16 +12,20 @@
 
 ## Quick Start
 
-推荐使用 Python 3.11 或 3.12 创建本地 `.venv`。Python 3.14 与可选 Pix2Text/RapidOCR/ONNX 公式 OCR 组合仍不稳定，可能导致模型初始化慢或进程退出时出现 semaphore 清理告警。
+必须使用 Python 3.11 或 3.12 创建本地 `.venv`。MinerU 当前发布的包要求 Python `>=3.10,<3.14`，因此 Python 3.14 会在安装 MinerU 时出现 `No matching distribution found`。如果你已经用 Python 3.14 创建过 `.venv`，请先删除并用 3.11/3.12 重建。
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 .venv/bin/python -m pip install -r services/api/requirements.txt -r requirements-dev.txt
 .venv/bin/python -m playwright install chromium
 npm install
 cp .env.example .env
 ```
+
+`services/api/requirements.txt` 会把 `mineru[pipeline]` 安装到项目 `.venv` 中。默认抽取后端是 `MinerU pipeline`，避免 `mineru[all]` 一次性拉取 VLM/MLX/Gradio 等非默认后端依赖；首次使用时 MinerU 可能按其配置下载/复用模型缓存。需要预下载模型时可在激活 `.venv` 后运行 `mineru-models-download`，或按 MinerU 文档设置 `MINERU_MODEL_SOURCE=local` 使用本地模型。不要把 MinerU 或模型依赖安装到系统 Python。
+
+可选 Pix2Text 视觉公式 OCR 不属于默认安装；只有在启用 `FORMULA_RECOGNITION_MODE=visual_ocr` 且 `OCR_PROVIDER_ORDER` 包含 `pix2text` 时，再运行 `.venv/bin/python -m pip install -r services/api/requirements-ocr.txt`。
 
 启动后端：
 
@@ -61,6 +65,13 @@ MINIMAX_MODEL=MiniMax-M3
 OCR_PROVIDER_ORDER=pix2text,deterministic
 OCR_PROVIDER_TIMEOUT_SECONDS=12
 OCR_MAX_VISUAL_CANDIDATES=4
+EXTRACTION_BACKEND=mineru
+MINERU_BACKEND=pipeline
+MINERU_METHOD=auto
+MINERU_FORMULA_ENABLED=true
+MINERU_TABLE_ENABLED=true
+MINERU_TIMEOUT_SECONDS=3600
+FORMULA_RECOGNITION_MODE=pdf_primitive_replay
 FORMULA_RECOGNITION_CONCURRENCY=8
 FORMULA_VISUAL_OCR_CONCURRENCY=2
 VITE_DEV_HOST=127.0.0.1
@@ -70,7 +81,9 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 
 当用户说明包含 `GB/T 7713.1` 时，renderer 在 continuous_reflow 模式下执行 GB/T 公式编号：display formula 单独成块、居中排版，编号 `(1)`、`(2)`… 顺序生成并右端对齐；译文自带源编号时保留原编号不重复编号，多 display formula block 跳过编号，均写入对应 quality flag，`renderer-diagnostics` 汇总 `formula_numbered_count`。标题/一级小节默认使用黑体字体栈（SimHei/Heiti SC fallback），正文保持宋体栈。渲染模板已强制开启 HTML autoescape，PDF 抽取文本中的 `<`、`&` 等字符不会再破坏 preview/PDF 结构。
 
-公式识别默认走快速文本层路径：clean inline/display 公式直接用 deterministic normalizer 和 KaTeX 校验，只有低置信度、疑似腐败文本层或图片/向量公式候选才会按 `OCR_MAX_VISUAL_CANDIDATES` 上限生成 crop 并尝试视觉 OCR。`FORMULA_RECOGNITION_CONCURRENCY` 控制候选并行处理，`FORMULA_VISUAL_OCR_CONCURRENCY` 控制 Pix2Text/MiniMax/OpenAI 视觉 OCR 并发。MiniMax-M3 可通过 `OCR_PROVIDER_ORDER=minimax_vision,pix2text,deterministic` 显式启用；`MINIMAX_API_KEY` 未设置时会复用 `OPENAI_API_KEY`，默认 endpoint 为 `https://api.minimaxi.com/v1/chat/completions`。MiniMax provider 使用严格 JSON prompt，只接受 `latex`、`display_mode`、`confidence` 和 `quality_flags`，拒绝 bbox/page/x/y 等布局字段。公式识别会写出 `formula-performance` artifact，记录 candidate/crop/文本识别/视觉 OCR/校验耗时、cache hit 和跳过的视觉候选，便于定位慢点。
+PDF 抽取默认走 MinerU：后端调用项目 `.venv` 中的 `mineru` CLI，把 `middle.json`、`content_list.json` 和 `content_list_v2.json` 映射为 `DocumentIR`。MinerU 识别到的文本、标题、公式、图片、表格和图注会进入同一条 `DocumentIR -> TranslationChunk[] -> TranslationLayoutPlan[] -> renderer` 流水线；公式以 `{{formula:id}}` preserve token 发送给 translator。若 MinerU 不可用、超时或输出缺失，任务会写入 `mineru-diagnostics` 并回退到现有 PyMuPDF parser。
+
+公式默认保留源 PDF 视觉。MinerU 公式会写入 `FormulaIR.pdf_formula(replay_kind="source_clip")`，HTML preview 优先显示源公式 crop/source clip，PDF export 时先保留公式槽位，再用 PyMuPDF 把原 PDF 对应区域叠加到最终 PDF。`RenderDefaults.formula_replay` 统一同一篇文章的公式字体和 display source-clip 槽位高度；PDF export 会隐藏 direct-replay preview/image fallback，避免下载 PDF 出现源公式和预览公式双重叠加。非 MinerU fallback 路径仍支持 `FORMULA_RECOGNITION_MODE=pdf_primitive_replay` 的 glyph/line primitive replay，但当源 crop 可用时 renderer 会优先使用源图像，primitive SVG 只作为辅助 fallback；可选模式包括 `text_latex`（旧文本层归一化/KaTeX 路径）和 `visual_ocr`（按 `OCR_PROVIDER_ORDER` 使用 Pix2Text/MiniMax/OpenAI 视觉公式 OCR）。`FORMULA_RECOGNITION_CONCURRENCY` 控制候选并行处理，`FORMULA_VISUAL_OCR_CONCURRENCY` 只在 `visual_ocr` 模式控制视觉 OCR 并发。
 
 ## Troubleshooting
 
@@ -102,6 +115,10 @@ VITE_API_PROXY_TARGET=http://127.0.0.1:8000
 - `GET /api/documents/{doc_id}/artifacts/retypeset-source`
 - `GET /api/documents/{doc_id}/artifacts/docx-conversion`
 - `GET /api/documents/{doc_id}/artifacts/parser-diagnostics`
+- `GET /api/documents/{doc_id}/artifacts/mineru-diagnostics`
+- `GET /api/documents/{doc_id}/artifacts/mineru-middle`
+- `GET /api/documents/{doc_id}/artifacts/mineru-content-list`
+- `GET /api/documents/{doc_id}/artifacts/mineru-content-list-v2`
 - `GET /api/documents/{doc_id}/artifacts/renderer-diagnostics`
 - `GET /api/documents/{doc_id}/artifacts/pdf-export-diagnostics`
 - `GET /api/documents/{doc_id}/assets/{filename}`: 返回 parser 提取的 PDF 图片资产，用于预览和 PDF 导出。
@@ -120,9 +137,9 @@ PDF export 会写入 `pdf-export-diagnostics.json`，记录 Playwright version�
 
 Parser 会从数字版 PDF 的 image block 提取栅格图片资产，写入 `DocumentIR.pages[].assets[]`，并保存到本地输出目录。Renderer 会按 `DocumentIR` 中的 asset bbox 在原页面位置保留图片；缺失 asset path 时输出 `asset_missing_path` 诊断和占位。
 
-Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本会标记为 `table`。公式会进入独立 enrichment：系统识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、公式 asset 和 `{{formula:formula_id}}` preserve token；默认 OCR 顺序为 Pix2Text -> deterministic，文本层疑似坏字形时会标记 `formula_text_layer_corrupt` / `formula_slash_glyph_suspect` 并优先视觉识别。Renderer 用 KaTeX-compatible HTML/CSS 渲染 LaTeX，失败或被标记为腐败 display 公式时回退原文本/图片并输出公式质量 flag。
+Parser 的阅读顺序对数字版论文做了基础多栏感知：检测左右栏后按栏内自上而下排序，并过滤跨页重复的页眉页脚候选。底部小字号短文本会标记为 `footnote`，参考文献标题和编号条目继续标记为 `reference`，表格样文本会标记为 `table`。公式会进入独立 enrichment：系统识别 text-layer formula block、公式样 image/vector candidate，生成 `DocumentIR.formulas[]`、公式 asset 和 `{{formula:formula_id}}` preserve token；默认路径优先使用源公式 crop/source clip 保留视觉，`FormulaIR.pdf_formula` primitive replay 作为辅助 fallback/debug，KaTeX/视觉 OCR 仅在显式启用 `text_latex`/`visual_ocr` 或没有源视觉资产时承担主要渲染。
 
-扫描版或 image-only PDF 会在 parser 阶段明确失败为 `unsupported_scanned_pdf`，并写入 `parser-diagnostics.json`，其中包含 `reason`、页数、文本块数、资产数和 `next_step`。当前 OCR 尚未实现；该 fallback 使前端能展示可恢复错误，而不是让任务在 chunking 阶段以模糊错误失败。
+扫描版或 image-only PDF 由 MinerU 尽力抽取；如果本地模型/文本层不足以产生可翻译内容，parser 阶段会明确失败为 `unsupported_scanned_pdf`，并写入 `parser-diagnostics.json`，其中包含 `reason`、页数、文本块数、资产数和 `next_step`。整页 OCR 仍是后续增强，不应阻塞数字版英文论文 MVP。
 
 Renderer diagnostics 还包含基础布局回归检查：同页 block/asset 重叠、bbox 越页和空渲染块会出现在 `layout_issues` 中，用于发现溢出、重叠、丢块和错误分页风险。
 
@@ -160,7 +177,7 @@ bash scripts/accept-test-pdf-first-four-pages.sh
 
 ## Known Limitations
 
-- PDF 解析依赖 PyMuPDF 的文本层；当前没有 OCR，扫描版 PDF 会明确失败并输出 `parser-diagnostics`，建议先使用 OCR 工具生成带文本层 PDF 后再上传。
+- PDF 默认依赖 MinerU pipeline 抽取数字版论文结构；PyMuPDF parser 是本地 fallback。扫描版/OCR PDF 仍是 best-effort，失败时会明确输出 `parser-diagnostics` 和可恢复建议。
 - 真实模型调用使用 OpenAI-compatible `/chat/completions`，并从响应内容提取 `TranslationLayoutPlan` JSON object；未配置 `OPENAI_API_KEY` 时只生成占位译文。
 - `TranslationLayoutPlan@0.1` 是 LLM 输出 contract；schema 会拒绝 `bbox`、`x`、`y`、`page` 等布局坐标字段。
 - PDF 导出依赖 Playwright Chromium；首次运行前需要执行 `.venv/bin/python -m playwright install chromium`。

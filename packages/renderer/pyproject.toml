@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "HTML and PDF renderer for translated academic PDFs."
 requires-python = ">=3.11"
 dependencies = [
-  "jinja2>=3.1",
+  "jinja2>=3.1,<4",
   "pdf-translator-schema",
-  "playwright>=1.45"
+  "playwright>=1.45,<1.61"
 ]
 
 [build-system]

@@ -159,3 +159,56 @@ npm run dev:web
 - 涉及 renderer 的改动有溢出、缺失译文或角色不匹配等失败场景覆盖。
 - 涉及前端的改动通过 typecheck，必要时通过 build。
 - 文档更新说明新增能力、限制、验证命令和 subagent 影响范围。
+
+## Project-control document map
+
+- `SPEC.md` - Defines what the application must do, including user flows, requirements, and acceptance criteria.
+- `NON_GOALS.md` - Defines what the application must not do yet, so Codex does not add risky or unnecessary features.
+- `DATA_MODEL.md` - Defines stored data, entities, fields, relationships, validation rules, uniqueness rules, migration rules, and backup/restore expectations.
+- `TEST_PLAN.md` - Defines how to verify the application, including manual checks, automated tests, data-safety tests, and regression tests.
+- `DECISIONS.md` - Records important technical and product decisions, rejected options, assumptions, and decisions to revisit later.
+- `README.md` - Gives a beginner-friendly entry point for humans using the repository.
+- `PROJECT_MAP.md` - Explains the actual repository structure, important files, and how a request or command flows through the app.
+
+## Required reading before work
+
+Before modifying source code, Codex must read:
+
+1. `AGENTS.md`
+2. `SPEC.md`
+3. `NON_GOALS.md`
+4. `DATA_MODEL.md`
+5. `TEST_PLAN.md`
+6. `DECISIONS.md`
+7. `PROJECT_MAP.md`, if present
+8. The specific source files relevant to the task
+
+## When to update each document
+
+- Update `SPEC.md` when user-visible behavior, user flows, or requirements change.
+- Update `NON_GOALS.md` when a feature is intentionally postponed or rejected.
+- Update `DATA_MODEL.md` when entities, fields, validation, schema, storage, import/export, backup, or migration behavior changes.
+- Update `TEST_PLAN.md` when new behavior needs verification or when test commands/checklists change.
+- Update `DECISIONS.md` when an architecture, dependency, database, framework, or safety decision is made.
+- Update `PROJECT_MAP.md` when important files, directories, commands, or request/data flow change.
+- Update `README.md` when setup, usage, or project status changes.
+
+## Conflict handling
+
+If documents conflict with source code:
+
+1. Treat source code as evidence of current behavior.
+2. Treat `SPEC.md` and `DATA_MODEL.md` as intended behavior only if they are consistent and recent.
+3. Do not silently rewrite code or docs to hide the conflict.
+4. Record the conflict under "Open questions" or "Known discrepancies".
+5. Ask the user which version should become the source of truth.
+
+If the latest user instruction conflicts with existing documents, ask whether the documents should be updated.
+
+## Work discipline
+
+Before editing files, Codex must restate the requested change in plain English, list assumptions, list expected files to change, give a verification plan, and mention whether project-control documents need updates.
+
+During implementation, Codex must make the smallest change that satisfies the task, avoid unrelated redesigns, avoid framework replacement unless explicitly requested, add or update tests when behavior changes, never use the real database for automated tests, and never silently delete or overwrite user data.
+
+Before finishing, Codex must run relevant tests if available, report exact commands run and results, report files changed, report what was verified, report remaining risks, mention any behavior not verified, and mention whether any control documents were updated or should be updated.

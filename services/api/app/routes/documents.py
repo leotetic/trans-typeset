@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pdf_translator_schema import UserIntent
 
 from ..config import settings
-from ..jobs import schedule_job
+from ..jobs import cancel_scheduled_job, is_job_active, schedule_job
 from ..job_events import build_job_log_response
 from ..models import (
     ArtifactSummary,
@@ -45,6 +45,10 @@ JSON_ARTIFACTS = {
     "layout-intent-plan": ("layout-intent-plan.json", "layout-intent-plan"),
     "validation-and-repair": ("validation-and-repair.json", "validation-and-repair"),
     "asset-ir": ("asset-ir.json", "asset-ir"),
+    "mineru-diagnostics": ("mineru-diagnostics.json", "mineru-diagnostics"),
+    "mineru-middle": ("mineru-middle.json", "mineru-middle"),
+    "mineru-content-list": ("mineru-content-list.json", "mineru-content-list"),
+    "mineru-content-list-v2": ("mineru-content-list-v2.json", "mineru-content-list-v2"),
     "formula-candidates": ("formula-candidates.json", "formula-candidates"),
     "formula-recognition": ("formula-recognition.json", "formula-recognition"),
     "formula-diagnostics": ("formula-diagnostics.json", "formula-diagnostics"),
@@ -271,6 +275,7 @@ async def create_document(
         layout_pdf_path,
         layout_file.filename if layout_file is not None else None,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=job_id,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -329,6 +334,7 @@ async def create_text_workflow(
         target_lang,
         user_intent,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=job_id,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -392,6 +398,7 @@ async def create_image_workflow(
         file.content_type,
         user_intent,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=job_id,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -454,6 +461,7 @@ async def create_docx_workflow(
         target_lang,
         user_intent,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=job_id,
     )
     return CreateDocumentResponse(job_id=job_id, doc_id=doc_id)
 
@@ -521,6 +529,7 @@ async def create_documents_batch(
             target_lang,
             user_intent,
             max_concurrency=job_max_concurrency,
+            tracked_job_id=job_id,
         )
         jobs.append(CreateDocumentResponse(job_id=job_id, doc_id=doc_id))
     return BatchCreateDocumentResponse(jobs=jobs)
@@ -561,7 +570,7 @@ async def cancel_job(job_id: str) -> JobStatus:
         status = storage.load_status(job_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Job not found") from exc
-    if status.status in {JobState.COMPLETED, JobState.FAILED, JobState.CANCELED}:
+    if status.status in {JobState.COMPLETED, JobState.FAILED}:
         return status
     canceled = JobStatus(
         job_id=status.job_id,
@@ -574,6 +583,7 @@ async def cancel_job(job_id: str) -> JobStatus:
         chunks=status.chunks,
     )
     storage.save_status(canceled)
+    cancel_scheduled_job(job_id)
     return canceled
 
 
@@ -613,6 +623,7 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
             target_lang,
             user_intent,
             max_concurrency=_job_max_concurrency(),
+            tracked_job_id=next_job_id,
         )
     else:
         schedule_job(
@@ -625,6 +636,7 @@ async def retry_job(job_id: str) -> CreateDocumentResponse:
             user_intent,
             layout_pdf_path,
             max_concurrency=_job_max_concurrency(),
+            tracked_job_id=next_job_id,
         )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
 
@@ -649,9 +661,8 @@ async def continue_job(job_id: str) -> CreateDocumentResponse:
     target_lang = status.target_lang or settings.default_target_lang
     ensure_target_lang(target_lang)
     user_intent = _load_user_intent(status.doc_id)
-    next_job_id = storage.new_job_id()
     next_status = JobStatus(
-        job_id=next_job_id,
+        job_id=status.job_id,
         doc_id=status.doc_id,
         filename=status.filename,
         target_lang=target_lang,
@@ -659,10 +670,12 @@ async def continue_job(job_id: str) -> CreateDocumentResponse:
         progress=0,
         message="Queued continuation",
     )
+    if is_job_active(job_id):
+        raise HTTPException(status_code=409, detail="Job is still stopping")
     storage.save_status(next_status)
     schedule_job(
         process_document_continuation_job,
-        next_job_id,
+        status.job_id,
         status.doc_id,
         status.filename,
         pdf_path,
@@ -670,8 +683,9 @@ async def continue_job(job_id: str) -> CreateDocumentResponse:
         user_intent,
         layout_pdf_path,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=status.job_id,
     )
-    return CreateDocumentResponse(job_id=next_job_id, doc_id=status.doc_id)
+    return CreateDocumentResponse(job_id=status.job_id, doc_id=status.doc_id)
 
 
 @router.post("/jobs/{job_id}/retypeset", response_model=CreateDocumentResponse)
@@ -736,6 +750,7 @@ async def retypeset_job(
         payload.scope,
         job_id,
         max_concurrency=_job_max_concurrency(),
+        tracked_job_id=next_job_id,
     )
     return CreateDocumentResponse(job_id=next_job_id, doc_id=next_doc_id)
 

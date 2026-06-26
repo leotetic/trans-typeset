@@ -76,6 +76,13 @@ _PAGE_MARGIN = 54.0
 _TEXT_WIDTH = _DEFAULT_PAGE_WIDTH - _PAGE_MARGIN * 2
 _LINE_HEIGHT_PT = 15.0
 _PARAGRAPH_GAP_PT = 10.0
+_FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
+_RAW_TEX_PATTERN = re.compile(
+    r"(?<!\\)\$(?!\s)(?:[^$\n]|\\.){1,240}(?<!\s)(?<!\\)\$|"
+    r"\\(?:frac|dfrac|tfrac|sqrt|sum|int|partial|nabla|mathbb|alpha|beta|gamma|delta|"
+    r"epsilon|varepsilon|zeta|eta|theta|lambda|mu|nu|xi|pi|rho|sigma|tau|phi|varphi|"
+    r"omega|leq?|geq?|neq?|infty)\b"
+)
 
 
 def coerce_user_intent(
@@ -248,11 +255,17 @@ def normalized_input_payload(
     assets: list[AssetIR] | None = None,
     input_text: str | None = None,
 ) -> dict[str, Any]:
+    document_assets = [asset for page in document.pages for asset in page.assets]
+    formula_assets = [asset for asset in document_assets if asset.kind == "formula"]
     return {
         "kind": "normalized_input",
         "input_sources": [source.model_dump() for source in input_sources],
         "document_ir_ref": "document-ir",
         "asset_count": len(assets or []),
+        "document_asset_count": len(document_assets),
+        "formula_asset_count": len(formula_assets),
+        "normalized_input_formula_asset_count": len(formula_assets),
+        "document_formula_count": len(document.formulas),
         "block_count": sum(len(page.blocks) for page in document.pages),
         "text_excerpt": _compact_text(input_text or _document_text(document), 600),
         "quality_flags": _collect_source_flags(input_sources) + _collect_asset_flags(assets or []),
@@ -927,6 +940,144 @@ def source_preserving_summary(
         "reused_existing_plans": reused_existing_plans,
         "quality_flags": ["translation_skipped", "source_text_preserved"],
     }
+
+
+def validate_translation_plan_formula_refs(
+    *,
+    document: DocumentIR,
+    chunks: list[TranslationChunk],
+    plans: list[TranslationLayoutPlan],
+) -> dict[str, Any]:
+    known_formula_ids = set(document.formulas_by_id())
+    chunk_by_id = {chunk.chunk_id: chunk for chunk in chunks}
+    chunk_formula_refs: set[str] = set()
+    plan_formula_refs: set[str] = set()
+    unknown_plan_refs: list[dict[str, str]] = []
+    unknown_chunk_refs: list[dict[str, str]] = []
+    raw_tex_occurrences: list[dict[str, str]] = []
+
+    for chunk in chunks:
+        for source_block in chunk.source_blocks:
+            for formula_id in _formula_ref_ids_from_text(source_block.source_text):
+                chunk_formula_refs.add(formula_id)
+                if formula_id not in known_formula_ids:
+                    unknown_chunk_refs.append(
+                        {
+                            "chunk_id": chunk.chunk_id,
+                            "source_block_id": source_block.block_id,
+                            "formula_id": formula_id,
+                        }
+                    )
+            for token in source_block.preserve_tokens:
+                for formula_id in _formula_ref_ids_from_text(token):
+                    chunk_formula_refs.add(formula_id)
+                    if formula_id not in known_formula_ids:
+                        unknown_chunk_refs.append(
+                            {
+                                "chunk_id": chunk.chunk_id,
+                                "source_block_id": source_block.block_id,
+                                "formula_id": formula_id,
+                            }
+                        )
+
+    for plan in plans:
+        chunk = chunk_by_id.get(plan.chunk_id)
+        source_tokens_by_block = {
+            block.block_id: set(block.preserve_tokens)
+            for block in (chunk.source_blocks if chunk is not None else [])
+        }
+        for block in plan.blocks:
+            texts = [block.translated_text]
+            for item in block.inline_items:
+                texts.extend([item.text or "", item.source_token or ""])
+                if item.kind == "formula" and item.asset_id:
+                    texts.append(f"{{{{formula:{item.asset_id}}}}}")
+            for text in texts:
+                for formula_id in _formula_ref_ids_from_text(text):
+                    plan_formula_refs.add(formula_id)
+                    if formula_id not in known_formula_ids:
+                        unknown_plan_refs.append(
+                            {
+                                "chunk_id": plan.chunk_id,
+                                "source_block_id": block.source_block_id,
+                                "formula_id": formula_id,
+                            }
+                        )
+            raw_tex = _raw_tex_outside_preserve_tokens(
+                block.translated_text,
+                source_tokens_by_block.get(block.source_block_id, set()),
+            )
+            for raw in raw_tex:
+                raw_tex_occurrences.append(
+                    {
+                        "chunk_id": plan.chunk_id,
+                        "source_block_id": block.source_block_id,
+                        "text": raw,
+                    }
+                )
+
+    quality_flags: list[str] = []
+    if unknown_chunk_refs:
+        quality_flags.append("unknown_formula_ref_in_chunk")
+    if unknown_plan_refs:
+        quality_flags.append("unknown_formula_ref_in_plan")
+    blocking_flags: list[str] = []
+    if unknown_chunk_refs:
+        blocking_flags.append("unknown_formula_ref_in_chunk")
+    if unknown_plan_refs:
+        blocking_flags.append("unknown_formula_ref_in_plan")
+    if raw_tex_occurrences:
+        quality_flags.append("raw_tex_detected")
+    status = "valid" if not blocking_flags else "invalid"
+    dedup_unknown_chunk_refs = _dedupe_dicts(unknown_chunk_refs)
+    dedup_unknown_plan_refs = _dedupe_dicts(unknown_plan_refs)
+    dedup_raw_tex_occurrences = _dedupe_dicts(raw_tex_occurrences)
+    return {
+        "kind": "translation_formula_ref_diagnostics",
+        "status": status,
+        "known_formula_count": len(known_formula_ids),
+        "chunk_formula_ref_count": len(chunk_formula_refs),
+        "plan_formula_ref_count": len(plan_formula_refs),
+        "unknown_formula_ref_count": len(dedup_unknown_chunk_refs) + len(dedup_unknown_plan_refs),
+        "unknown_chunk_formula_refs": dedup_unknown_chunk_refs,
+        "unknown_plan_formula_refs": dedup_unknown_plan_refs,
+        "raw_tex_detected_count": len(dedup_raw_tex_occurrences),
+        "raw_tex_detected": dedup_raw_tex_occurrences,
+        "raw_tex_unrendered_count": 0,
+        "raw_tex_unrendered": [],
+        "blocking_quality_flags": blocking_flags,
+        "quality_flags": quality_flags,
+    }
+
+
+def _formula_ref_ids_from_text(text: str) -> list[str]:
+    return [match.group(1) for match in _FORMULA_REF_PATTERN.finditer(text or "")]
+
+
+def _raw_tex_outside_preserve_tokens(text: str, preserve_tokens: set[str]) -> list[str]:
+    candidate = text or ""
+    for token in sorted(preserve_tokens, key=len, reverse=True):
+        if token:
+            candidate = candidate.replace(token, " ")
+    candidate = _FORMULA_REF_PATTERN.sub(" ", candidate)
+    raw_tex: list[str] = []
+    for match in _RAW_TEX_PATTERN.finditer(candidate):
+        snippet = match.group(0).strip()
+        if snippet:
+            raw_tex.append(snippet[:180])
+    return raw_tex
+
+
+def _dedupe_dicts(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    result: list[dict[str, str]] = []
+    for item in items:
+        key = tuple(sorted(item.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
 
 
 def _source_preserving_plan_for_chunk(

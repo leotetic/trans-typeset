@@ -294,6 +294,12 @@ async def _read_input(
                 parser_diagnostics["formula_recognizer_type"] = (
                     formula_result.diagnostics.get("recognizer_type", "unknown")
                 )
+                parser_diagnostics["formula_recognition_mode"] = (
+                    formula_result.diagnostics.get(
+                        "formula_recognition_mode",
+                        "unknown",
+                    )
+                )
                 parser_diagnostics["fallback_flags"] = _unique(
                     [
                         *parser_diagnostics.get("fallback_flags", []),
@@ -317,6 +323,22 @@ async def _read_input(
                         1 for formula in formula_result.formulas if formula.latex.strip()
                     ),
                     "candidate_count": formula_result.diagnostics.get("candidate_count", 0),
+                    "document_formula_count": formula_result.diagnostics.get(
+                        "document_formula_count",
+                        len(document.formulas),
+                    ),
+                    "legacy_retained_count": formula_result.diagnostics.get(
+                        "legacy_retained_count",
+                        0,
+                    ),
+                    "stale_formula_ref_count": formula_result.diagnostics.get(
+                        "stale_formula_ref_count",
+                        0,
+                    ),
+                    "unknown_formula_ref_count": formula_result.diagnostics.get(
+                        "unknown_formula_ref_count",
+                        0,
+                    ),
                     "recognized_count": formula_result.diagnostics.get(
                         "recognized_count",
                         0,
@@ -333,6 +355,10 @@ async def _read_input(
                     "formula_enrichment_ms": formula_enrichment_ms,
                     "recognizer_type": formula_result.diagnostics.get(
                         "recognizer_type",
+                        "unknown",
+                    ),
+                    "formula_recognition_mode": formula_result.diagnostics.get(
+                        "formula_recognition_mode",
                         "unknown",
                     ),
                     "visual_formula_recognition_enabled": formula_result.diagnostics.get(
@@ -358,6 +384,7 @@ async def _read_input(
                         "recognized_count": 0,
                         "formula_enrichment_ms": 0,
                         "recognizer_type": "unknown",
+                        "formula_recognition_mode": "unknown",
                         "visual_formula_recognition_enabled": False,
                         "quality_flags": ["formula_enrichment_failed"],
                         "error": str(exc),
@@ -377,6 +404,7 @@ async def _read_input(
                 parser_diagnostics["formula_enrichment_ms"] = 0
                 parser_diagnostics["visual_formula_recognition_enabled"] = False
                 parser_diagnostics["formula_recognizer_type"] = "unknown"
+                parser_diagnostics["formula_recognition_mode"] = "unknown"
                 parser_diagnostics["fallback_flags"] = _unique(
                     [
                         *parser_diagnostics.get("fallback_flags", []),
@@ -386,6 +414,7 @@ async def _read_input(
                 formula_diagnostics = context.build_formula_diagnostics(document)
                 formula_diagnostics["formula_enrichment_ms"] = 0
                 formula_diagnostics["recognizer_type"] = "unknown"
+                formula_diagnostics["formula_recognition_mode"] = "unknown"
                 formula_diagnostics["visual_formula_recognition_enabled"] = False
                 formula_diagnostics["quality_flags"] = _unique(
                     [
@@ -418,6 +447,16 @@ async def _read_input(
                 "formula-diagnostics",
                 "formula-performance",
             ]
+            if context.storage.output_json_path(doc_id, "mineru-diagnostics.json").exists():
+                output_artifacts.append("mineru-diagnostics")
+            if document.extraction_backend == "mineru":
+                output_artifacts.extend(
+                    [
+                        "mineru-middle",
+                        "mineru-content-list",
+                        "mineru-content-list-v2",
+                    ]
+                )
             if used_scanned_ocr:
                 output_artifacts.extend(["asset-ir", "ocr-recognition", "ocr-diagnostics"])
             if input_kind == InputKind.DOCX:
@@ -1071,7 +1110,11 @@ async def _translate_chunks_node(
             progress=0.36,
             message=f"Translating 0 of {len(chunks)} chunks",
             input_artifacts=["translation-chunks"],
-            output_artifacts=["translation-plans", "translation-progress"],
+            output_artifacts=[
+                "translation-plans",
+                "translation-progress",
+                "translation-formula-ref-diagnostics",
+            ],
         ),
     )
     context.save_workflow(doc_id, workflow)
@@ -1095,6 +1138,21 @@ async def _translate_chunks_node(
         translator=translator,
         translation_concurrency=runtime_config["translation_concurrency"],
     )
+    formula_ref_diagnostics = helpers["validate_translation_plan_formula_refs"](
+        document=document,
+        chunks=chunks,
+        plans=plans,
+    )
+    context.storage.write_json(
+        doc_id,
+        "translation-formula-ref-diagnostics.json",
+        formula_ref_diagnostics,
+    )
+    if formula_ref_diagnostics["status"] != "valid":
+        raise ValueError(
+            "translation plan contains unresolved formula refs; see "
+            "translation-formula-ref-diagnostics.json"
+        )
     context.storage.write_json(
         doc_id,
         "translation-plans.json",
@@ -1108,7 +1166,11 @@ async def _translate_chunks_node(
             progress=0.78,
             message=f"Translated {len(chunks)} chunks",
             input_artifacts=["translation-chunks"],
-            output_artifacts=["translation-plans", "translation-progress"],
+            output_artifacts=[
+                "translation-plans",
+                "translation-progress",
+                "translation-formula-ref-diagnostics",
+            ],
         ),
     )
     context.save_workflow(doc_id, workflow)
@@ -1165,6 +1227,21 @@ async def _build_source_plans_node(
         layout_plan=layout_plan,
         edit_scope=EditScope(),
     )
+    formula_ref_diagnostics = helpers["validate_translation_plan_formula_refs"](
+        document=document,
+        chunks=chunks,
+        plans=plans,
+    )
+    context.storage.write_json(
+        doc_id,
+        "translation-formula-ref-diagnostics.json",
+        formula_ref_diagnostics,
+    )
+    if formula_ref_diagnostics["status"] != "valid":
+        raise ValueError(
+            "source-preserving plan contains unresolved formula refs; see "
+            "translation-formula-ref-diagnostics.json"
+        )
     status_chunks = helpers["initial_chunk_progress"](chunks)
     for progress in status_chunks:
         progress.status = "skipped"
@@ -1209,6 +1286,7 @@ async def _build_source_plans_node(
             output_artifacts=[
                 "translation-plans",
                 "translation-progress",
+                "translation-formula-ref-diagnostics",
                 "edit-scope",
                 "retypeset-source",
             ],
@@ -1457,6 +1535,7 @@ async def _export_pdf(
         pdf_output,
         diagnostics_path=pdf_diagnostics_path,
         asset_base_path=context.storage.asset_dir(doc_id),
+        source_pdf_path=Path(state["source_path"]) if state.get("source_path") else None,
     )
     if not pdf_diagnostics_path.exists():
         context.storage.write_json(

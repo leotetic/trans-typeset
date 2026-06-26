@@ -461,6 +461,50 @@ def test_target_language_check_skips_non_prose_and_non_translation_blocks() -> N
     assert [block.quality_flags for block in plan.blocks] == [[], [], [], []]
 
 
+def test_openai_repair_restores_formula_tokens_into_translated_text() -> None:
+    formula_token = "{{formula:Finline}}"
+    chunk = TranslationChunk(
+        chunk_id="doc_1_chunk_0001",
+        target_lang="zh-CN",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=f"The relation {formula_token} holds.",
+                preserve_tokens=[formula_token],
+            )
+        ],
+        render_defaults=RenderDefaults(target_lang="zh-CN"),
+        constraints=TranslationConstraints(),
+    )
+    translator = OpenAICompatibleTranslator(
+        "https://example.test/v1",
+        "key",
+        "model",
+        max_attempts=1,
+    )
+    payload = {
+        "schema_version": "0.1",
+        "chunk_id": chunk.chunk_id,
+        "target_lang": chunk.target_lang,
+        "blocks": [
+            {
+                "source_block_id": "b1",
+                "translated_text": "该关系成立",
+                "inline_items": [
+                    {"kind": "formula", "text": formula_token, "source_token": formula_token}
+                ],
+                "role": "paragraph",
+            }
+        ],
+    }
+
+    plan = translator._validate_or_repair_content(chunk, payload, attempt=1)
+
+    assert formula_token in plan.blocks[0].translated_text
+    assert "formula_placeholder_repaired" in plan.blocks[0].quality_flags
+
+
 def test_openai_translator_revises_chunk_when_key_term_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

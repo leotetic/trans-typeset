@@ -185,6 +185,29 @@ def _stable_block_id(
     return f"{page_id}_b{digest[:12]}"
 
 
+def _unique_block_id(
+    base_block_id: str,
+    source_text: str,
+    bbox: tuple[float, float, float, float],
+    seen_block_ids: set[str],
+) -> str:
+    if base_block_id not in seen_block_ids:
+        seen_block_ids.add(base_block_id)
+        return base_block_id
+
+    normalized_text = re.sub(r"\s+", " ", source_text).strip()
+    precise_bbox = ",".join(f"{coordinate:.3f}" for coordinate in bbox)
+    suffix_seed = f"{base_block_id}|{precise_bbox}|{normalized_text}"
+    suffix = hashlib.sha1(suffix_seed.encode()).hexdigest()[:8]
+    candidate = f"{base_block_id}_d{suffix}"
+    ordinal = 2
+    while candidate in seen_block_ids:
+        candidate = f"{base_block_id}_d{suffix}_{ordinal}"
+        ordinal += 1
+    seen_block_ids.add(candidate)
+    return candidate
+
+
 def _reading_sort_key(block: dict) -> tuple[int, float, float, float]:
     x0, y0, x1, _ = block["bbox"]
     # Prefer a deterministic top-to-bottom order for digitally born PDFs. The
@@ -744,6 +767,7 @@ def parse_pdf(
     text_flags = _text_dict_flags_without_images()
     pages: list[DocumentPage] = []
     page_dicts: list[dict] = []
+    seen_block_ids: set[str] = set()
     for page in document:
         page_dict = page.get_text("dict", flags=text_flags)
         page_dict["height"] = page.rect.height
@@ -791,8 +815,14 @@ def parse_pdf(
                 continue
 
             bbox = block["bbox"]
+            bbox_tuple = tuple(float(value) for value in bbox)
             avg_font_size = sum(font_sizes) / len(font_sizes) if font_sizes else 10.0
-            block_id = _stable_block_id(page_id, source_text, tuple(float(value) for value in bbox))
+            block_id = _unique_block_id(
+                _stable_block_id(page_id, source_text, bbox_tuple),
+                source_text,
+                bbox_tuple,
+                seen_block_ids,
+            )
             lines: list[TextLineIR] = []
             spans: list[TextSpanIR] = []
             span_refs: list[str] = []
@@ -860,7 +890,7 @@ def parse_pdf(
                         page_index,
                         len(page_blocks),
                         avg_font_size,
-                        tuple(float(value) for value in bbox),
+                        bbox_tuple,
                         page.rect.height,
                     ),
                     bbox=BoundingBox(x0=bbox[0], y0=bbox[1], x1=bbox[2], y1=bbox[3]),
@@ -922,6 +952,7 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
             asset_counts[asset.kind] = asset_counts.get(asset.kind, 0) + 1
 
     fallback_flags: list[str] = []
+    fallback_flags.extend(document.quality_flags)
     if role_counts.get(BlockRole.TABLE.value, 0):
         fallback_flags.append("table_text_fallback")
     if role_counts.get(BlockRole.FORMULA.value, 0):
@@ -937,6 +968,10 @@ def build_parser_diagnostics(document: DocumentIR) -> dict:
 
     return {
         "kind": "parser_diagnostics",
+        "extraction_backend": document.extraction_backend,
+        "extraction_version": document.extraction_version,
+        "extraction_quality_flags": document.quality_flags,
+        "fallback_used": "pymupdf_fallback_used" in document.quality_flags,
         "page_count": len(document.pages),
         "text_block_count": sum(len(page.blocks) for page in document.pages),
         "asset_count": sum(len(page.assets) for page in document.pages),

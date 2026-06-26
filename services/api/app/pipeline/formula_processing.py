@@ -24,7 +24,7 @@ from .formulas.validation import (
 )
 
 FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_[A-Za-z0-9_]+@@")
-FORMULA_REF_PATTERN = re.compile(r"\{\{formula:[A-Za-z0-9_.:-]+\}\}")
+FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
 MALFORMED_FORMULA_REF_PATTERN = re.compile(r"(?<!\{)\{formula:([A-Za-z0-9_.:-]+)\}\}")
 
 _GREEK_TO_LATEX = GREEK_TO_LATEX
@@ -433,9 +433,15 @@ def _merge_formula_fragment_clusters(
                 cluster_members,
                 formulas_by_id,
             )
+            cluster_member_ids = {member.block_id for member in cluster_members}
+            keep_blocks = [
+                kept_block
+                for kept_block in keep_blocks
+                if kept_block.block_id not in cluster_member_ids
+            ]
             keep_blocks.append(merged_block)
             clusters.append(cluster)
-            consumed_block_ids.update(member.block_id for member in cluster_members)
+            consumed_block_ids.update(cluster_member_ids)
             formula_updates.update(
                 _rewrite_cluster_formula_refs(
                     formulas_by_id,
@@ -563,6 +569,29 @@ def _looks_like_formula_band_fragment(block: DocumentBlock) -> bool:
     )
 
 
+def _is_independent_formula_ref_block(
+    block: DocumentBlock,
+    formulas_by_id: dict[str, FormulaIR],
+) -> bool:
+    if block.role != BlockRole.FORMULA:
+        return False
+    text = (block.text_for_translation or block.source_text).strip()
+    if not text:
+        return False
+    match = FORMULA_REF_PATTERN.fullmatch(text)
+    if not match:
+        return False
+    formula_id = match.group(1)
+    if block.formula_id and block.formula_id == formula_id:
+        return True
+    if block.formulas:
+        return len(block.formulas) == 1 and block.formulas[0].formula_id == formula_id
+    formula = formulas_by_id.get(formula_id)
+    if formula is None:
+        return False
+    return formula.source_block_id == block.block_id or formula.anchor_block_id == block.block_id
+
+
 def _eligible_formula_cluster_block(
     block: DocumentBlock,
     formulas_by_id: dict[str, FormulaIR],
@@ -576,6 +605,8 @@ def _eligible_formula_cluster_block(
     if height < _FORMULA_CLUSTER_MIN_BBOX_HEIGHT or height > _FORMULA_CLUSTER_MAX_BBOX_HEIGHT:
         return False
     if len(text) > _FORMULA_CLUSTER_MAX_TEXT_LEN:
+        return False
+    if _is_independent_formula_ref_block(block, formulas_by_id):
         return False
     if block.formula_id and formulas_by_id.get(block.formula_id) is not None:
         return True

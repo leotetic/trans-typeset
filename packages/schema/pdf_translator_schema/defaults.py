@@ -25,6 +25,21 @@ DEFAULT_RENDER_DEFAULTS = {
     "paragraph_spacing_em": 0.45,
     "layout_mode": "continuous_reflow",
     "formula_numbering": "none",
+    "formula_replay": {
+        "font_stack": [
+            "Cambria Math",
+            "STIX Two Math",
+            "Times New Roman",
+            "serif",
+        ],
+        "font_size_pt": 12.0,
+        "line_height": 1.2,
+        "inline_slot_height_pt": 14.0,
+        "display_slot_policy": "article_uniform",
+        "display_slot_height_pt": None,
+        "min_display_slot_height_pt": 18.0,
+        "max_display_slot_height_pt": 48.0,
+    },
     "column_layout": {
         "column_count": 1,
         "column_gap_pt": 18.0,

@@ -232,6 +232,7 @@ class FormulaSourceKind(StrEnum):
     INLINE_TEXT = "inline_text"
     VECTOR_CANDIDATE = "vector_candidate"
     IMAGE_CANDIDATE = "image_candidate"
+    MINERU = "mineru"
     OCR = "ocr"
     MOCK = "mock"
     UNKNOWN = "unknown"
@@ -240,6 +241,7 @@ class FormulaSourceKind(StrEnum):
 FormulaDisplayMode = Literal["inline", "display"]
 OCRRegionKind = Literal["formula", "text", "page"]
 ColumnLayoutScope = Literal["document", "body"]
+FormulaDisplaySlotPolicy = Literal["source", "article_uniform"]
 
 
 class InputSource(StrictBaseModel):
@@ -774,6 +776,66 @@ class Formula(StrictBaseModel):
     quality_flags: list[str] = Field(default_factory=list)
 
 
+class PdfFormulaPrimitive(StrictBaseModel):
+    primitive_id: str = Field(min_length=1)
+    kind: Literal["glyph", "line"] = "glyph"
+    text: str = ""
+    font_name: str | None = None
+    font_size_pt: float | None = Field(default=None, gt=0)
+    bbox: BoundingBox | None = None
+    origin: tuple[float, float] | None = None
+    points: list[tuple[float, float]] = Field(default_factory=list)
+    stroke_width_pt: float = Field(default=0.5, gt=0)
+    color: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_primitive_payload(self) -> PdfFormulaPrimitive:
+        if self.kind == "glyph":
+            if not self.text:
+                raise ValueError("glyph primitive must include text")
+            if self.font_size_pt is None:
+                raise ValueError("glyph primitive must include font_size_pt")
+            if self.bbox is None:
+                raise ValueError("glyph primitive must include bbox")
+        if self.kind == "line" and len(self.points) < 2 and self.bbox is None:
+            raise ValueError("line primitive must include at least two points or a bbox")
+        return self
+
+
+class PdfFormula(StrictBaseModel):
+    coordinate_space: Literal["formula_local"] = "formula_local"
+    replay_kind: Literal["primitives", "source_clip"] = "primitives"
+    source_page_id: str | None = None
+    source_page_index: int | None = Field(default=None, ge=0)
+    source_bbox: BoundingBox | None = None
+    width_pt: float | None = Field(default=None, gt=0)
+    height_pt: float | None = Field(default=None, gt=0)
+    baseline_offset_pt: float | None = Field(default=None, ge=0)
+    primitives: list[PdfFormulaPrimitive] = Field(default_factory=list)
+    quality_flags: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_pdf_formula(self) -> PdfFormula:
+        if (self.width_pt is None) != (self.height_pt is None):
+            raise ValueError("pdf_formula width_pt and height_pt must be set together")
+        if self.replay_kind == "primitives" and not self.primitives:
+            raise ValueError("primitive replay requires at least one primitive")
+        if self.replay_kind == "source_clip":
+            if self.source_page_index is None:
+                raise ValueError("source_clip replay requires source_page_index")
+            if self.source_bbox is None:
+                raise ValueError("source_clip replay requires source_bbox")
+            if self.width_pt is None or self.height_pt is None:
+                raise ValueError("source_clip replay requires width_pt and height_pt")
+        primitive_ids: set[str] = set()
+        for primitive in self.primitives:
+            if primitive.primitive_id in primitive_ids:
+                raise ValueError(f"duplicate pdf_formula primitive_id: {primitive.primitive_id}")
+            primitive_ids.add(primitive.primitive_id)
+        return self
+
+
 class Asset(StrictBaseModel):
     asset_id: str = Field(min_length=1)
     page_id: str = Field(min_length=1)
@@ -816,6 +878,7 @@ class FormulaIR(StrictBaseModel):
     ocr_provider: str | None = None
     ocr_confidence: float | None = Field(default=None, ge=0, le=1)
     source_kind: FormulaSourceKind = FormulaSourceKind.UNKNOWN
+    pdf_formula: PdfFormula | None = None
     quality_flags: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -889,6 +952,9 @@ class DocumentIR(StrictBaseModel):
     doc_id: str = Field(min_length=1)
     pages: list[DocumentPage] = Field(min_length=1)
     formulas: list[FormulaIR] = Field(default_factory=list)
+    extraction_backend: str = "pymupdf"
+    extraction_version: str | None = None
+    quality_flags: list[str] = Field(default_factory=list)
 
     def blocks_by_id(self) -> dict[str, DocumentBlock]:
         return {block.block_id: block for page in self.pages for block in page.blocks}
@@ -997,6 +1063,58 @@ class PreservePolicy(StrictBaseModel):
     ]
 
 
+class FormulaReplayDefaults(StrictBaseModel):
+    font_stack: list[str] = Field(
+        default_factory=lambda: DEFAULT_RENDER_DEFAULTS["formula_replay"]["font_stack"].copy(),
+        min_length=1,
+    )
+    font_size_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["font_size_pt"],
+        gt=0,
+    )
+    line_height: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["line_height"],
+        gt=0,
+    )
+    inline_slot_height_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["inline_slot_height_pt"],
+        gt=0,
+    )
+    display_slot_policy: FormulaDisplaySlotPolicy = DEFAULT_RENDER_DEFAULTS["formula_replay"][
+        "display_slot_policy"
+    ]
+    display_slot_height_pt: float | None = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["display_slot_height_pt"],
+        gt=0,
+    )
+    min_display_slot_height_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["min_display_slot_height_pt"],
+        gt=0,
+    )
+    max_display_slot_height_pt: float = Field(
+        default=DEFAULT_RENDER_DEFAULTS["formula_replay"]["max_display_slot_height_pt"],
+        gt=0,
+    )
+
+    @model_validator(mode="after")
+    def validate_display_slot_range(self) -> FormulaReplayDefaults:
+        if self.min_display_slot_height_pt > self.max_display_slot_height_pt:
+            raise ValueError(
+                "min_display_slot_height_pt must be less than or equal to "
+                "max_display_slot_height_pt"
+            )
+        if self.display_slot_height_pt is not None and not (
+            self.min_display_slot_height_pt
+            <= self.display_slot_height_pt
+            <= self.max_display_slot_height_pt
+        ):
+            raise ValueError(
+                "display_slot_height_pt must be between min_display_slot_height_pt "
+                "and max_display_slot_height_pt"
+            )
+        return self
+
+
 class PageLayoutDefaults(StrictBaseModel):
     width_pt: float = Field(default=DEFAULT_RENDER_DEFAULTS["page_layout"]["width_pt"], gt=0)
     height_pt: float = Field(default=DEFAULT_RENDER_DEFAULTS["page_layout"]["height_pt"], gt=0)
@@ -1070,6 +1188,7 @@ class RenderDefaults(StrictBaseModel):
     formula_numbering: Literal["none", "parenthesized"] = DEFAULT_RENDER_DEFAULTS[
         "formula_numbering"
     ]
+    formula_replay: FormulaReplayDefaults = Field(default_factory=FormulaReplayDefaults)
     column_layout: ColumnLayoutDefaults = Field(default_factory=ColumnLayoutDefaults)
     page_layout: PageLayoutDefaults = Field(default_factory=PageLayoutDefaults)
     role_styles: RoleStyles = Field(default_factory=RoleStyles)

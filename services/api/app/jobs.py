@@ -19,6 +19,7 @@ class _QueuedJob:
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     max_concurrency: int
+    tracked_job_id: str | None = None
 
 
 @dataclass
@@ -26,6 +27,8 @@ class _SchedulerState:
     pending: deque[_QueuedJob] = field(default_factory=deque)
     tasks: set[asyncio.Task[None]] = field(default_factory=set)
     running: set[asyncio.Task[None]] = field(default_factory=set)
+    tracked_tasks: dict[str, set[asyncio.Task[None]]] = field(default_factory=dict)
+    task_job_ids: dict[asyncio.Task[None], str] = field(default_factory=dict)
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
@@ -38,6 +41,7 @@ def schedule_job(
     job_func: Callable[..., Awaitable[Any] | Any],
     *args: Any,
     max_concurrency: int | None = None,
+    tracked_job_id: str | None = None,
     **kwargs: Any,
 ) -> asyncio.Task[None]:
     state = _scheduler_state()
@@ -46,11 +50,34 @@ def schedule_job(
         args=args,
         kwargs=kwargs,
         max_concurrency=max(1, max_concurrency or settings.translation_concurrency),
+        tracked_job_id=tracked_job_id,
     )
     task = asyncio.create_task(_run_queued_job(state, queued_job))
     state.tasks.add(task)
+    if tracked_job_id:
+        state.tracked_tasks.setdefault(tracked_job_id, set()).add(task)
+        state.task_job_ids[task] = tracked_job_id
     task.add_done_callback(lambda finished: _handle_finished_task(state, finished))
     return task
+
+
+def cancel_scheduled_job(job_id: str) -> bool:
+    """Cancel queued or running scheduler tasks associated with a job id."""
+    state = _scheduler_state()
+    tasks = state.tracked_tasks.get(job_id, set())
+    canceled = False
+    for task in list(tasks):
+        if task.done():
+            continue
+        task.cancel()
+        canceled = True
+    return canceled
+
+
+def is_job_active(job_id: str) -> bool:
+    state = _scheduler_state()
+    tasks = state.tracked_tasks.get(job_id, set())
+    return any(not task.done() for task in tasks)
 
 
 def running_job_count() -> int:
@@ -127,6 +154,13 @@ def _handle_finished_task(
     task: asyncio.Task[None],
 ) -> None:
     state.tasks.discard(task)
+    tracked_job_id = state.task_job_ids.pop(task, None)
+    if tracked_job_id:
+        tracked_tasks = state.tracked_tasks.get(tracked_job_id)
+        if tracked_tasks is not None:
+            tracked_tasks.discard(task)
+            if not tracked_tasks:
+                state.tracked_tasks.pop(tracked_job_id, None)
     try:
         task.result()
     except asyncio.CancelledError:

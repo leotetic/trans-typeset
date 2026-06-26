@@ -13,8 +13,12 @@ FORMULA_REF_PATTERN = re.compile(r"\{\{formula:([A-Za-z0-9_.:-]+)\}\}")
 LEGACY_FORMULA_PLACEHOLDER_PATTERN = re.compile(r"@@FORMULA_([A-Za-z0-9_]+)@@")
 _MATH_SIGNAL_PATTERN = re.compile(
     r"(?:[=≤≥∑∫√∞≈≠∂∇^_+\-*/]|\\(?:partial|nabla|frac|sum|int|sqrt|"
-    r"alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|"
-    r"phi|omega|Delta|Omega|cdot|times)|\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*"
+    r"alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|lambda|mu|nu|xi|pi|rho|varrho|sigma|tau|"
+    r"phi|varphi|chi|psi|omega|Delta|Omega|Gamma|Phi|Pi|Sigma|"
+    r"Theta|Lambda|Xi|Psi|le|leq|ge|geq|ne|neq|approx|sim|simeq|equiv|propto|infty|to|rightarrow|leftarrow|mapsto|pm|mp|"
+    r"in|notin|subset|subseteq|supset|supseteq|cup|cap|cdot|times|"
+    r"div|mathbb|mathcal|mathrm|mathbf|operatorname|bar|dot|hat|vec|left|right)|"
+    r"\b[A-Za-zα-ωΑ-Ω]\s*[+\-*/^_]\s*"
     r"[A-Za-z0-9α-ωΑ-Ω])"
 )
 
@@ -150,7 +154,22 @@ def validate_formula_latex(
 
 
 def _minimum_math_signals(text: str) -> int:
+    if _looks_like_short_relation_formula(text):
+        return 1
     return 1 if len(text) <= 24 else 2
+
+
+def _looks_like_short_relation_formula(text: str) -> bool:
+    normalized = normalize_pdf_text(text)
+    if len(normalized) > 64:
+        return False
+    relation = r"(?:=|≤|≥|≠|≈|\\(?:le|leq|ge|geq|ne|neq|approx|sim))"
+    return bool(
+        re.search(
+            rf"[A-Za-z0-9α-ωΑ-Ω\\}})]\s*{relation}\s*[A-Za-z0-9α-ωΑ-Ω\\{{(]",
+            normalized,
+        )
+    )
 
 
 def _looks_like_prose(text: str) -> bool:
@@ -172,7 +191,7 @@ def _looks_low_confidence(text: str, math_signal_count: int) -> bool:
         return True
     if math_signal_count <= 1 and len(re.findall(r"[A-Za-z]{1,2}", text)) >= 4:
         return True
-    if re.search(r"\\tag\{\d+\}$", text):
+    if re.search(r"\\tag\{\d+(?:\.\d+)*\}$", text):
         return False
     if text.count("=") >= 3 and math_signal_count < 3:
         return True
@@ -204,8 +223,7 @@ def _severe_corruption_flags(flags: list[str], latex: str) -> list[str]:
 def _has_unrepaired_text_layer_corruption(latex: str) -> bool:
     return bool(
         re.search(
-            r"(?:\\partial\s+[A-Za-z]{2,}|"
-            r"[A-Za-z]_?[A-Za-z]\s*=\s*k(?:\^?\d|\{\d\})|"
+            r"(?:[A-Za-z]_?[A-Za-z]\s*=\s*k(?:\^?\d|\{\d\})|"
             r"[A-Za-z]\s*0\s*[A-Za-z])",
             latex,
         )

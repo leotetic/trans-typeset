@@ -468,6 +468,17 @@
           "$ref": "#/$defs/FormulaSourceKind",
           "default": "unknown"
         },
+        "pdf_formula": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PdfFormula"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "quality_flags": {
           "items": {
             "type": "string"
@@ -489,6 +500,7 @@
         "inline_text",
         "vector_candidate",
         "image_candidate",
+        "mineru",
         "ocr",
         "mock",
         "unknown"
@@ -515,6 +527,246 @@
         "height"
       ],
       "title": "PageSize",
+      "type": "object"
+    },
+    "PdfFormula": {
+      "additionalProperties": false,
+      "properties": {
+        "coordinate_space": {
+          "const": "formula_local",
+          "default": "formula_local",
+          "title": "Coordinate Space",
+          "type": "string"
+        },
+        "replay_kind": {
+          "default": "primitives",
+          "enum": [
+            "primitives",
+            "source_clip"
+          ],
+          "title": "Replay Kind",
+          "type": "string"
+        },
+        "source_page_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Page Id"
+        },
+        "source_page_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Page Index"
+        },
+        "source_bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "width_pt": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Width Pt"
+        },
+        "height_pt": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Height Pt"
+        },
+        "baseline_offset_pt": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Offset Pt"
+        },
+        "primitives": {
+          "items": {
+            "$ref": "#/$defs/PdfFormulaPrimitive"
+          },
+          "title": "Primitives",
+          "type": "array"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "title": "PdfFormula",
+      "type": "object"
+    },
+    "PdfFormulaPrimitive": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive_id": {
+          "minLength": 1,
+          "title": "Primitive Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "glyph",
+          "enum": [
+            "glyph",
+            "line"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "title": "Text",
+          "type": "string"
+        },
+        "font_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Name"
+        },
+        "font_size_pt": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size Pt"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Origin"
+        },
+        "points": {
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "stroke_width_pt": {
+          "default": 0.5,
+          "exclusiveMinimum": 0,
+          "title": "Stroke Width Pt",
+          "type": "number"
+        },
+        "color": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Color"
+        },
+        "quality_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Quality Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "primitive_id"
+      ],
+      "title": "PdfFormulaPrimitive",
       "type": "object"
     },
     "StyleSeed": {
@@ -734,6 +986,30 @@
         "$ref": "#/$defs/FormulaIR"
       },
       "title": "Formulas",
+      "type": "array"
+    },
+    "extraction_backend": {
+      "default": "pymupdf",
+      "title": "Extraction Backend",
+      "type": "string"
+    },
+    "extraction_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Extraction Version"
+    },
+    "quality_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Quality Flags",
       "type": "array"
     }
   },

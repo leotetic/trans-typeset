@@ -1,0 +1,5 @@
+# Optional visual formula OCR support.
+# Install this after services/api/requirements.txt only when using
+# FORMULA_RECOGNITION_MODE=visual_ocr with OCR_PROVIDER_ORDER including pix2text.
+pix2text>=1.1.6,<1.2
+numpy>=1.26,<3

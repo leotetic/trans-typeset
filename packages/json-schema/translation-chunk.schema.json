@@ -233,6 +233,73 @@
       "title": "ColumnLayoutDefaults",
       "type": "object"
     },
+    "FormulaReplayDefaults": {
+      "additionalProperties": false,
+      "properties": {
+        "font_stack": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Font Stack",
+          "type": "array"
+        },
+        "font_size_pt": {
+          "default": 12.0,
+          "exclusiveMinimum": 0,
+          "title": "Font Size Pt",
+          "type": "number"
+        },
+        "line_height": {
+          "default": 1.2,
+          "exclusiveMinimum": 0,
+          "title": "Line Height",
+          "type": "number"
+        },
+        "inline_slot_height_pt": {
+          "default": 14.0,
+          "exclusiveMinimum": 0,
+          "title": "Inline Slot Height Pt",
+          "type": "number"
+        },
+        "display_slot_policy": {
+          "default": "article_uniform",
+          "enum": [
+            "source",
+            "article_uniform"
+          ],
+          "title": "Display Slot Policy",
+          "type": "string"
+        },
+        "display_slot_height_pt": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Slot Height Pt"
+        },
+        "min_display_slot_height_pt": {
+          "default": 18.0,
+          "exclusiveMinimum": 0,
+          "title": "Min Display Slot Height Pt",
+          "type": "number"
+        },
+        "max_display_slot_height_pt": {
+          "default": 48.0,
+          "exclusiveMinimum": 0,
+          "title": "Max Display Slot Height Pt",
+          "type": "number"
+        }
+      },
+      "title": "FormulaReplayDefaults",
+      "type": "object"
+    },
     "LayoutMode": {
       "enum": [
         "source_bbox",
@@ -413,6 +480,9 @@
           ],
           "title": "Formula Numbering",
           "type": "string"
+        },
+        "formula_replay": {
+          "$ref": "#/$defs/FormulaReplayDefaults"
         },
         "column_layout": {
           "$ref": "#/$defs/ColumnLayoutDefaults"

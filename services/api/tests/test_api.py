@@ -76,6 +76,13 @@ def test_config_returns_runtime_settings_without_api_key(tmp_path: Path, monkeyp
     assert payload["layout_planner_model"] == "layout-model"
     assert payload["vision_analyzer_model"] == "vision-model"
     assert payload["ocr_max_visual_candidates"] == 4
+    assert payload["extraction_backend"] == "mineru"
+    assert payload["mineru_backend"] == "pipeline"
+    assert payload["mineru_method"] == "auto"
+    assert payload["mineru_formula_enabled"] is True
+    assert payload["mineru_table_enabled"] is True
+    assert payload["mineru_timeout_seconds"] == 3600
+    assert payload["formula_recognition_mode"] == "pdf_primitive_replay"
     assert payload["formula_recognition_concurrency"] == 8
     assert payload["formula_visual_ocr_concurrency"] == 2
     assert payload["render_defaults"]["target_lang"] == "ja-JP"
@@ -415,6 +422,13 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
             "translation_concurrency": 4,
             "translator_max_attempts": 3,
             "translation_chunk_max_chars": 4200,
+            "extraction_backend": "pymupdf",
+            "mineru_backend": "hybrid-engine",
+            "mineru_method": "txt",
+            "mineru_formula_enabled": False,
+            "mineru_table_enabled": False,
+            "mineru_timeout_seconds": 120,
+            "formula_recognition_mode": "visual_ocr",
             "formula_recognition_concurrency": 12,
             "formula_visual_ocr_concurrency": 3,
             "render_defaults": render_defaults,
@@ -430,6 +444,13 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
     assert payload["translation_concurrency"] == 4
     assert payload["translator_max_attempts"] == 3
     assert payload["translation_chunk_max_chars"] == 4200
+    assert payload["extraction_backend"] == "pymupdf"
+    assert payload["mineru_backend"] == "hybrid-engine"
+    assert payload["mineru_method"] == "txt"
+    assert payload["mineru_formula_enabled"] is False
+    assert payload["mineru_table_enabled"] is False
+    assert payload["mineru_timeout_seconds"] == 120
+    assert payload["formula_recognition_mode"] == "visual_ocr"
     assert payload["formula_recognition_concurrency"] == 12
     assert payload["formula_visual_ocr_concurrency"] == 3
     assert payload["render_defaults"]["font_stack"] == ["Noto Sans CJK SC", "serif"]
@@ -437,6 +458,8 @@ def test_update_config_persists_runtime_settings_without_leaking_key(tmp_path: P
     assert payload["render_defaults"]["overflow_policy"]["min_font_scale"] == 0.72
     assert "secret-key" not in response.text
     assert storage.read_runtime_config()["openai_api_key"] == "secret-key"
+    assert storage.read_runtime_config()["extraction_backend"] == "pymupdf"
+    assert storage.read_runtime_config()["formula_recognition_mode"] == "visual_ocr"
     assert storage.read_runtime_config()["render_defaults"]["line_height"] == 1.5
 
 
@@ -517,6 +540,55 @@ def test_update_config_rejects_invalid_formula_concurrency(tmp_path: Path, monke
     )
 
     assert response.status_code == 422
+
+
+def test_update_config_rejects_invalid_formula_recognition_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    client = TestClient(app)
+
+    response = client.put("/api/config", json={"formula_recognition_mode": "unknown"})
+
+    assert response.status_code == 422
+
+
+def test_runtime_config_falls_back_from_stale_formula_recognition_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config({"formula_recognition_mode": "bogus"})
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    response = runtime_config.runtime_config_response(storage)
+
+    assert response.formula_recognition_mode == "pdf_primitive_replay"
+
+
+def test_runtime_config_falls_back_from_stale_extraction_settings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    storage.write_runtime_config(
+        {
+            "extraction_backend": "unknown",
+            "mineru_backend": "unknown",
+            "mineru_method": "unknown",
+        }
+    )
+    config = Settings(openai_api_key="", openai_api_key_from_env=False)
+    monkeypatch.setattr(runtime_config, "settings", config)
+
+    response = runtime_config.runtime_config_response(storage)
+
+    assert response.extraction_backend == "mineru"
+    assert response.mineru_backend == "pipeline"
+    assert response.mineru_method == "auto"
 
 
 def test_job_not_found(tmp_path: Path, monkeypatch) -> None:
@@ -786,6 +858,12 @@ def test_cancel_running_job_marks_status_canceled(tmp_path: Path, monkeypatch) -
             message="Translating",
         )
     )
+    canceled_jobs: list[str] = []
+    monkeypatch.setattr(
+        documents_route,
+        "cancel_scheduled_job",
+        lambda job_id: canceled_jobs.append(job_id) or True,
+    )
     client = TestClient(app)
 
     response = client.post("/api/jobs/job_1/cancel")
@@ -794,6 +872,7 @@ def test_cancel_running_job_marks_status_canceled(tmp_path: Path, monkeypatch) -
     assert response.json()["status"] == "canceled"
     assert response.json()["message"] == "Canceled"
     assert storage.load_status("job_1").status == documents_route.JobState.CANCELED
+    assert canceled_jobs == ["job_1"]
 
 
 def test_cancel_completed_job_is_noop(tmp_path: Path, monkeypatch) -> None:
@@ -930,14 +1009,62 @@ def test_continue_job_requeues_existing_document_ir_without_upload(
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["job_id"] == "job_1"
     assert payload["doc_id"] == "doc_1"
     continuation_status = storage.load_status(payload["job_id"])
     assert continuation_status.status == documents_route.JobState.QUEUED
     assert continuation_status.message == "Queued continuation"
     assert scheduled[0][0] is documents_route.process_document_continuation_job
-    assert scheduled[0][1][0] == payload["job_id"]
+    assert scheduled[0][1][0] == "job_1"
     assert scheduled[0][1][1] == "doc_1"
     assert scheduled[0][1][3] is None
+
+
+def test_continue_job_active_canceled_job_returns_409(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    storage = Storage(tmp_path)
+    monkeypatch.setattr(documents_route, "storage", storage)
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=300, height=400),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=10, y0=10, x1=120, y1=40),
+                        reading_order=0,
+                        source_text="Alpha",
+                    )
+                ],
+            )
+        ],
+    )
+    storage.save_document_ir(document)
+    storage.save_status(
+        documents_route.JobStatus(
+            job_id="job_1",
+            doc_id="doc_1",
+            filename="paper.pdf",
+            target_lang="zh-CN",
+            status=documents_route.JobState.CANCELED,
+            progress=1,
+            message="Canceled",
+        )
+    )
+    monkeypatch.setattr(documents_route, "is_job_active", lambda job_id: job_id == "job_1")
+    client = TestClient(app)
+
+    response = client.post("/api/jobs/job_1/continue")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Job is still stopping"
+    assert storage.load_status("job_1").status == documents_route.JobState.CANCELED
 
 
 def test_continue_job_completed_job_returns_400(tmp_path: Path, monkeypatch) -> None:
@@ -1533,6 +1660,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     )
     storage.write_json("doc_1", "layout-trace.json", {"kind": "layout_trace"})
     storage.write_json("doc_1", "parser-diagnostics.json", {"kind": "parser_diagnostics"})
+    storage.write_json("doc_1", "mineru-diagnostics.json", {"kind": "mineru_diagnostics"})
+    storage.write_json("doc_1", "mineru-middle.json", {"pdf_info": []})
+    storage.write_json("doc_1", "mineru-content-list.json", [])
+    storage.write_json("doc_1", "mineru-content-list-v2.json", [[]])
     storage.write_json(
         "doc_1",
         "formula-recognition.json",
@@ -1566,6 +1697,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert artifacts["formula-recognition"]["available"] is True
     assert artifacts["formula-diagnostics"]["available"] is True
     assert artifacts["formula-performance"]["available"] is True
+    assert artifacts["mineru-diagnostics"]["available"] is True
+    assert artifacts["mineru-middle"]["available"] is True
+    assert artifacts["mineru-content-list"]["available"] is True
+    assert artifacts["mineru-content-list-v2"]["available"] is True
     assert artifacts["translation-plans"]["available"] is False
     assert artifacts["parser-diagnostics"]["available"] is True
 
@@ -1586,6 +1721,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     formula_performance_response = client.get(
         "/api/documents/doc_1/artifacts/formula-performance"
     )
+    mineru_diagnostics_response = client.get(
+        "/api/documents/doc_1/artifacts/mineru-diagnostics"
+    )
+    mineru_middle_response = client.get("/api/documents/doc_1/artifacts/mineru-middle")
     trace_response = client.get("/api/documents/doc_1/artifacts/layout-trace")
 
     assert document_response.status_code == 200
@@ -1610,6 +1749,10 @@ def test_artifacts_summary_and_document_ir_endpoint(tmp_path: Path, monkeypatch)
     assert formula_diagnostics_response.json() == {"kind": "formula_diagnostics"}
     assert formula_performance_response.status_code == 200
     assert formula_performance_response.json() == {"kind": "formula_performance"}
+    assert mineru_diagnostics_response.status_code == 200
+    assert mineru_diagnostics_response.json() == {"kind": "mineru_diagnostics"}
+    assert mineru_middle_response.status_code == 200
+    assert mineru_middle_response.json() == {"pdf_info": []}
     assert trace_response.status_code == 200
     assert trace_response.json() == {"kind": "layout_trace"}
 

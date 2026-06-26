@@ -28,7 +28,9 @@ class OCRService:
     def __post_init__(self) -> None:
         self.records: list[dict] = []
         self._cache: dict[str, OCRRecognitionResult] = {}
+        self._visual_candidate_count = 0
         self._visual_attempts = 0
+        self._visual_skipped_by_cap = 0
         self._lock = asyncio.Lock()
 
     async def recognize_formula(
@@ -69,9 +71,12 @@ class OCRService:
         best: OCRRecognitionResult | None = None
         if visual_candidate:
             async with self._lock:
+                self._visual_candidate_count += 1
                 self._visual_attempts += 1
                 visual_attempts = self._visual_attempts
             if self.max_visual_candidates >= 0 and visual_attempts > self.max_visual_candidates:
+                async with self._lock:
+                    self._visual_skipped_by_cap += 1
                 best = OCRRecognitionResult(
                     latex=candidate.source_text,
                     text=candidate.source_text,
@@ -80,13 +85,26 @@ class OCRService:
                     confidence=0.1,
                     quality_flags=[
                         "ocr_visual_candidate_limit_reached",
+                        "formula_visual_ocr_skipped_by_cap",
+                        "deterministic_formula_fallback_after_visual_skip",
                         "formula_recognition_mock",
                     ],
                 )
                 attempts.append(
                     {
+                        "provider": "visual_ocr",
+                        "status": "skipped_by_cap",
+                        "max_visual_candidates": self.max_visual_candidates,
+                        "quality_flags": [
+                            "ocr_visual_candidate_limit_reached",
+                            "formula_visual_ocr_skipped_by_cap",
+                        ],
+                    }
+                )
+                attempts.append(
+                    {
                         "provider": "deterministic",
-                        "status": "skipped",
+                        "status": "fallback",
                         "confidence": best.confidence,
                         "quality_flags": best.quality_flags,
                     }
@@ -95,9 +113,12 @@ class OCRService:
                     "candidate_id": candidate.candidate_id,
                     "source_kind": candidate.source_kind.value,
                     "display_mode": candidate.display_mode,
-                    "status": "recognized" if best.latex or best.text else "empty",
+                    "status": "skipped_visual_candidate_limit",
+                    "visual_status": "skipped_by_cap",
+                    "fallback_status": "deterministic_fallback_after_visual_skip",
                     "provider": best.provider,
                     "confidence": best.confidence,
+                    "quality_flags": best.quality_flags,
                     "attempts": attempts,
                 }
                 async with self._lock:
@@ -235,8 +256,19 @@ class OCRService:
             "source_kind": candidate.source_kind.value,
             "display_mode": candidate.display_mode,
             "status": "recognized" if best.latex or best.text else "empty",
+            "visual_status": _visual_status_for_record(
+                visual_candidate,
+                attempts,
+                best.provider,
+            ),
+            "fallback_status": _fallback_status_for_record(
+                visual_candidate,
+                attempts,
+                best,
+            ),
             "provider": best.provider,
             "confidence": best.confidence,
+            "quality_flags": best.quality_flags,
             "attempts": attempts,
         }
         async with self._lock:
@@ -250,10 +282,46 @@ class OCRService:
             str(getattr(provider, "name", provider.__class__.__name__))
             for provider in self.providers
         ]
+        visual_failure_count = 0
+        visual_skipped_count = 0
+        text_fallback_count = 0
+        for record in self.records:
+            if record.get("visual_status") in {"failed", "skipped_by_cap"}:
+                visual_failure_count += 1
+            if record.get("visual_status") == "skipped_by_cap":
+                visual_skipped_count += 1
+            if str(record.get("fallback_status", "")).startswith("deterministic_fallback"):
+                text_fallback_count += 1
+            for attempt in record.get("attempts", []):
+                flags = set(attempt.get("quality_flags", []) or [])
+                if "formula_visual_ocr_skipped_by_cap" in flags:
+                    visual_skipped_count += 0
+                if flags & {
+                    "formula_visual_ocr_skipped_by_cap",
+                    "ocr_provider_unavailable",
+                } or str(attempt.get("status")) == "failed":
+                    visual_failure_count += 0
+            if "formula_text_layer_fallback_after_visual_failure" in set(
+                record.get("quality_flags", []) or []
+            ):
+                text_fallback_count += 1
         return {
             "kind": "ocr_diagnostics",
             "active_provider_order": provider_order,
             "provider_order": provider_order,
+            "provider_statuses": [
+                {"name": provider_name, "active": True}
+                for provider_name in provider_order
+            ],
+            "max_visual_candidates": self.max_visual_candidates,
+            "visual_candidate_count": self._visual_candidate_count,
+            "visual_attempt_count": self._visual_attempts,
+            "visual_skipped_by_cap_count": self._visual_skipped_by_cap,
+            "visual_failure_count": visual_failure_count,
+            "visual_failed_count": visual_failure_count,
+            "visual_skipped_count": visual_skipped_count,
+            "deterministic_fallback_after_visual_failure_count": text_fallback_count,
+            "text_fallback_after_visual_failure_count": text_fallback_count,
             "record_count": len(self.records),
             "records": self.records,
             "quality_flags": _unique(
@@ -312,3 +380,46 @@ def _ordered_providers(
         if getattr(provider, "name", provider.__class__.__name__) not in visual_names
     ]
     return [*preferred, *fallback]
+
+
+def _visual_status_for_record(
+    visual_candidate: bool,
+    attempts: list[dict],
+    accepted_provider: str,
+) -> str:
+    if not visual_candidate:
+        return "not_applicable"
+    if any(attempt.get("status") == "skipped_by_cap" for attempt in attempts):
+        return "skipped_by_cap"
+    visual_names = {"pix2text", "openai_vision", "minimax_vision"}
+    visual_attempts = [
+        attempt for attempt in attempts if str(attempt.get("provider")) in visual_names
+    ]
+    if accepted_provider in visual_names:
+        return "recognized"
+    if not visual_attempts:
+        return "not_attempted"
+    if any(attempt.get("status") == "failed" for attempt in visual_attempts):
+        return "failed"
+    if any(attempt.get("status") == "empty" for attempt in visual_attempts):
+        return "empty"
+    return "rejected_or_low_confidence"
+
+
+def _fallback_status_for_record(
+    visual_candidate: bool,
+    attempts: list[dict],
+    best: OCRRecognitionResult,
+) -> str:
+    if not visual_candidate:
+        return "not_applicable"
+    if best.provider == "deterministic":
+        if any(attempt.get("status") == "skipped_by_cap" for attempt in attempts):
+            return "deterministic_fallback_after_visual_skip"
+        return "deterministic_fallback_after_visual_failure"
+    if best.provider == "none":
+        return "no_fallback_available"
+    visual_names = {"pix2text", "openai_vision", "minimax_vision"}
+    if best.provider in visual_names:
+        return "visual_ocr_accepted"
+    return "provider_fallback_accepted"

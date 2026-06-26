@@ -13,6 +13,16 @@ export interface HealthResponse {
   status: "ok";
 }
 
+export type FormulaRecognitionMode = "pdf_primitive_replay" | "text_latex" | "visual_ocr";
+export type ExtractionBackend = "mineru" | "pymupdf";
+export type MinerUBackend =
+  | "pipeline"
+  | "vlm-engine"
+  | "hybrid-engine"
+  | "vlm-http-client"
+  | "hybrid-http-client";
+export type MinerUMethod = "auto" | "txt" | "ocr";
+
 export interface RuntimeConfig {
   default_target_lang: string;
   allowed_target_langs: string[];
@@ -32,6 +42,13 @@ export interface RuntimeConfig {
   ocr_min_confidence: number;
   ocr_provider_timeout_seconds: number;
   ocr_max_visual_candidates: number;
+  extraction_backend: ExtractionBackend;
+  mineru_backend: MinerUBackend;
+  mineru_method: MinerUMethod;
+  mineru_formula_enabled: boolean;
+  mineru_table_enabled: boolean;
+  mineru_timeout_seconds: number;
+  formula_recognition_mode: FormulaRecognitionMode;
   formula_recognition_concurrency: number;
   formula_visual_ocr_concurrency: number;
   render_defaults: RenderDefaults;
@@ -53,6 +70,13 @@ export interface UpdateRuntimeConfig {
   ocr_min_confidence?: number;
   ocr_provider_timeout_seconds?: number;
   ocr_max_visual_candidates?: number;
+  extraction_backend?: ExtractionBackend;
+  mineru_backend?: MinerUBackend;
+  mineru_method?: MinerUMethod;
+  mineru_formula_enabled?: boolean;
+  mineru_table_enabled?: boolean;
+  mineru_timeout_seconds?: number;
+  formula_recognition_mode?: FormulaRecognitionMode;
   formula_recognition_concurrency?: number;
   formula_visual_ocr_concurrency?: number;
   render_defaults?: RenderDefaults;
@@ -664,6 +688,13 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     typeof payload.ocr_min_confidence !== "number" ||
     typeof payload.ocr_provider_timeout_seconds !== "number" ||
     typeof payload.ocr_max_visual_candidates !== "number" ||
+    !isExtractionBackend(payload.extraction_backend) ||
+    !isMinerUBackend(payload.mineru_backend) ||
+    !isMinerUMethod(payload.mineru_method) ||
+    typeof payload.mineru_formula_enabled !== "boolean" ||
+    typeof payload.mineru_table_enabled !== "boolean" ||
+    typeof payload.mineru_timeout_seconds !== "number" ||
+    !isFormulaRecognitionMode(payload.formula_recognition_mode) ||
     typeof payload.formula_recognition_concurrency !== "number" ||
     typeof payload.formula_visual_ocr_concurrency !== "number" ||
     !isRecord(payload.render_defaults)
@@ -691,10 +722,43 @@ function parseRuntimeConfig(payload: unknown): RuntimeConfig {
     ocr_min_confidence: payload.ocr_min_confidence,
     ocr_provider_timeout_seconds: payload.ocr_provider_timeout_seconds,
     ocr_max_visual_candidates: payload.ocr_max_visual_candidates,
+    extraction_backend: payload.extraction_backend,
+    mineru_backend: payload.mineru_backend,
+    mineru_method: payload.mineru_method,
+    mineru_formula_enabled: payload.mineru_formula_enabled,
+    mineru_table_enabled: payload.mineru_table_enabled,
+    mineru_timeout_seconds: payload.mineru_timeout_seconds,
+    formula_recognition_mode: payload.formula_recognition_mode,
     formula_recognition_concurrency: payload.formula_recognition_concurrency,
     formula_visual_ocr_concurrency: payload.formula_visual_ocr_concurrency,
     render_defaults: renderDefaults
   };
+}
+
+function isExtractionBackend(value: unknown): value is ExtractionBackend {
+  return value === "mineru" || value === "pymupdf";
+}
+
+function isMinerUBackend(value: unknown): value is MinerUBackend {
+  return (
+    value === "pipeline" ||
+    value === "vlm-engine" ||
+    value === "hybrid-engine" ||
+    value === "vlm-http-client" ||
+    value === "hybrid-http-client"
+  );
+}
+
+function isMinerUMethod(value: unknown): value is MinerUMethod {
+  return value === "auto" || value === "txt" || value === "ocr";
+}
+
+function isFormulaRecognitionMode(value: unknown): value is FormulaRecognitionMode {
+  return (
+    value === "pdf_primitive_replay" ||
+    value === "text_latex" ||
+    value === "visual_ocr"
+  );
 }
 
 function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
@@ -724,6 +788,9 @@ function parseRenderDefaults(payload: Record<string, unknown>): RenderDefaults {
       payload.formula_numbering === "parenthesized" || payload.formula_numbering === "none"
         ? payload.formula_numbering
         : undefined,
+    formula_replay: isRecord(payload.formula_replay)
+      ? (payload.formula_replay as RenderDefaults["formula_replay"])
+      : undefined,
     column_layout: isRecord(payload.column_layout)
       ? (payload.column_layout as RenderDefaults["column_layout"])
       : undefined,

@@ -6,6 +6,17 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from pdf_translator_schema import EditScope, RenderDefaults, StyleIntent, UserConstraints
 
+FormulaRecognitionMode = Literal["pdf_primitive_replay", "text_latex", "visual_ocr"]
+ExtractionBackend = Literal["mineru", "pymupdf"]
+MinerUBackend = Literal[
+    "pipeline",
+    "vlm-engine",
+    "hybrid-engine",
+    "vlm-http-client",
+    "hybrid-http-client",
+]
+MinerUMethod = Literal["auto", "txt", "ocr"]
+
 
 class JobState(StrEnum):
     QUEUED = "queued"
@@ -97,6 +108,13 @@ class RuntimeConfig(BaseModel):
     ocr_min_confidence: float
     ocr_provider_timeout_seconds: float
     ocr_max_visual_candidates: int
+    extraction_backend: ExtractionBackend
+    mineru_backend: MinerUBackend
+    mineru_method: MinerUMethod
+    mineru_formula_enabled: bool
+    mineru_table_enabled: bool
+    mineru_timeout_seconds: int
+    formula_recognition_mode: FormulaRecognitionMode
     formula_recognition_concurrency: int
     formula_visual_ocr_concurrency: int
     render_defaults: RenderDefaults
@@ -118,6 +136,13 @@ class UpdateRuntimeConfig(BaseModel):
     ocr_min_confidence: float | None = Field(default=None, ge=0, le=1)
     ocr_provider_timeout_seconds: float | None = Field(default=None, ge=1, le=120)
     ocr_max_visual_candidates: int | None = Field(default=None, ge=0, le=200)
+    extraction_backend: ExtractionBackend | None = None
+    mineru_backend: MinerUBackend | None = None
+    mineru_method: MinerUMethod | None = None
+    mineru_formula_enabled: bool | None = None
+    mineru_table_enabled: bool | None = None
+    mineru_timeout_seconds: int | None = Field(default=None, ge=1, le=86400)
+    formula_recognition_mode: FormulaRecognitionMode | None = None
     formula_recognition_concurrency: int | None = Field(default=None, ge=1, le=32)
     formula_visual_ocr_concurrency: int | None = Field(default=None, ge=1, le=8)
     render_defaults: RenderDefaults | None = None

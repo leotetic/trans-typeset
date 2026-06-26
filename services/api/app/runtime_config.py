@@ -28,6 +28,16 @@ _DETERMINISTIC_CHUNK_MAX_CHARS = 6000
 _MODEL_CHUNK_MAX_CHARS = 1500
 _MODEL_TRANSLATION_CONCURRENCY_LIMIT = 4
 _LEGACY_DEFAULT_OCR_PROVIDER_ORDER = ["pix2text", "openai_vision", "deterministic"]
+_FORMULA_RECOGNITION_MODES = {"pdf_primitive_replay", "text_latex", "visual_ocr"}
+_EXTRACTION_BACKENDS = {"mineru", "pymupdf"}
+_MINERU_BACKENDS = {
+    "pipeline",
+    "vlm-engine",
+    "hybrid-engine",
+    "vlm-http-client",
+    "hybrid-http-client",
+}
+_MINERU_METHODS = {"auto", "txt", "ocr"}
 _SOURCE_LIKE_MIN_MARGIN_PT = 36.0
 _SOURCE_LIKE_MAX_MARGIN_PT = 72.0
 logger = logging.getLogger(__name__)
@@ -75,6 +85,24 @@ def _ocr_provider_order_from_payload(payload: object) -> list[str]:
     if not configured or configured == _LEGACY_DEFAULT_OCR_PROVIDER_ORDER:
         return list(settings.ocr_provider_order)
     return configured
+
+
+def _formula_recognition_mode_from_payload(payload: object) -> str:
+    mode = str(payload or settings.formula_recognition_mode).strip()
+    if mode not in _FORMULA_RECOGNITION_MODES:
+        mode = settings.formula_recognition_mode
+    if mode not in _FORMULA_RECOGNITION_MODES:
+        return "pdf_primitive_replay"
+    return mode
+
+
+def _choice_from_payload(payload: object, fallback: str, allowed: set[str]) -> str:
+    value = str(payload or fallback).strip()
+    if value not in allowed:
+        value = fallback
+    if value not in allowed:
+        return sorted(allowed)[0]
+    return value
 
 
 def effective_runtime_config(storage: Storage) -> dict:
@@ -186,6 +214,39 @@ def effective_runtime_config(storage: Storage) -> dict:
             persisted.get("ocr_max_visual_candidates", settings.ocr_max_visual_candidates)
             or settings.ocr_max_visual_candidates
         ),
+        "extraction_backend": _choice_from_payload(
+            persisted.get("extraction_backend", settings.extraction_backend),
+            settings.extraction_backend,
+            _EXTRACTION_BACKENDS,
+        ),
+        "mineru_backend": _choice_from_payload(
+            persisted.get("mineru_backend", settings.mineru_backend),
+            settings.mineru_backend,
+            _MINERU_BACKENDS,
+        ),
+        "mineru_method": _choice_from_payload(
+            persisted.get("mineru_method", settings.mineru_method),
+            settings.mineru_method,
+            _MINERU_METHODS,
+        ),
+        "mineru_formula_enabled": _bool_from_payload(
+            persisted.get("mineru_formula_enabled", settings.mineru_formula_enabled),
+            settings.mineru_formula_enabled,
+        ),
+        "mineru_table_enabled": _bool_from_payload(
+            persisted.get("mineru_table_enabled", settings.mineru_table_enabled),
+            settings.mineru_table_enabled,
+        ),
+        "mineru_timeout_seconds": max(
+            1,
+            int(
+                persisted.get("mineru_timeout_seconds", settings.mineru_timeout_seconds)
+                or settings.mineru_timeout_seconds
+            ),
+        ),
+        "formula_recognition_mode": _formula_recognition_mode_from_payload(
+            persisted.get("formula_recognition_mode", settings.formula_recognition_mode)
+        ),
         "formula_recognition_concurrency": int(
             persisted.get(
                 "formula_recognition_concurrency",
@@ -202,7 +263,11 @@ def effective_runtime_config(storage: Storage) -> dict:
         ),
         "render_defaults": render_defaults,
     }
-    if sys.version_info >= (3, 14) and "pix2text" in config["ocr_provider_order"]:
+    if (
+        config["formula_recognition_mode"] == "visual_ocr"
+        and sys.version_info >= (3, 14)
+        and "pix2text" in config["ocr_provider_order"]
+    ):
         logger.warning(
             "Pix2Text OCR is enabled on Python %s.%s; Python 3.11/3.12 is recommended "
             "for this optional provider.",
@@ -402,6 +467,13 @@ def runtime_config_response(storage: Storage) -> RuntimeConfig:
         ocr_min_confidence=effective["ocr_min_confidence"],
         ocr_provider_timeout_seconds=effective["ocr_provider_timeout_seconds"],
         ocr_max_visual_candidates=effective["ocr_max_visual_candidates"],
+        extraction_backend=effective["extraction_backend"],
+        mineru_backend=effective["mineru_backend"],
+        mineru_method=effective["mineru_method"],
+        mineru_formula_enabled=effective["mineru_formula_enabled"],
+        mineru_table_enabled=effective["mineru_table_enabled"],
+        mineru_timeout_seconds=effective["mineru_timeout_seconds"],
+        formula_recognition_mode=effective["formula_recognition_mode"],
         formula_recognition_concurrency=effective["formula_recognition_concurrency"],
         formula_visual_ocr_concurrency=effective["formula_visual_ocr_concurrency"],
         render_defaults=effective["render_defaults"],

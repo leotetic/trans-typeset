@@ -53,7 +53,7 @@ LLM 生成的文章背景摘要；无 API key 的 deterministic 本地路径会�
 - `glossary`: 术语表，translator prompt 要求按该表保持术语一致。
 - `article_brief`: 同一篇文章共享的背景、主旨和关键术语，prompt 会优先展示它以提升专业词句的自然度。
 
-Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBlock.text_for_translation` 写入带公式占位符的文本，并在 `DocumentBlock.formulas[]` 记录 `formula_id`、`placeholder`、`kind=inline|display`、原始公式文本、LaTeX、bbox、置信度和质量 flags。LLM 不应看到或改写原始公式；只需原样保留 `{{formula:...}}`。
+Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBlock.text_for_translation` 写入带公式占位符的文本，并在 `DocumentBlock.formulas[]` 记录 `formula_id`、`placeholder`、`kind=inline|display`、原始公式文本、LaTeX、bbox、置信度和质量 flags。LLM 不应看到或改写原始公式；只需原样保留 `{{formula:...}}`。当前 canonical 公式引用是 `{{formula:formula_id}}`，进入 translator/renderer 边界前应能解析到同一份 `DocumentIR.formulas[]`，除非调用方显式声明 fallback alias。`DocumentIR.extraction_backend`、`extraction_version` 和 `quality_flags` 记录抽取后端来源；产品默认路径是 MinerU，本地 PyMuPDF parser 是显式 fallback。
 
 ## LLM 输出
 
@@ -75,7 +75,7 @@ Parser 会在 `DocumentBlock.source_text` 保留原始文本，在 `DocumentBloc
 
 renderer 负责坐标、分页、溢出、字号缩放和 continuation page。模型不得返回 `bbox`、`x`、`y`、`page` 等布局坐标字段；Pydantic models 使用 `extra="forbid"` 拒绝这些字段。
 
-后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens` 对应的 inline item，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired`、`preserve_token_repaired` 或 `formula_placeholder_repaired`。初次校验后会执行选择性翻译质量检查：未翻译、源文泄漏、关键术语缺失、过短/过长等严重问题会触发一次 revision 调用，并写入 `translation-quality-diagnostics`。不可解析 JSON、无法提取 plan JSON、brief 请求失败或翻译请求失败会进入 job status。
+后端真实模型路径使用同一套 `validate_layout_plan`。OpenAI-compatible provider 不一定提供严格 JSON mode，translator 会从 `message.content` 中提取符合 `TranslationLayoutPlan` 形状的 JSON object，再执行校验；MiniMax-M3 路径会显式关闭 thinking 并启用 reasoning split。如果模型输出可机械修复，后端会移除坐标字段、补齐缺失 block、补齐 `preserve_tokens`，并在 block `quality_flags` 写入 `repaired_layout_plan`、`missing_block_repaired`、`preserve_token_repaired` 或 `formula_placeholder_repaired`。公式 preserve token 必须原样出现在 `translated_text` 中；只放在 `inline_items` 里不能满足保留要求。若 `inline_items` 额外表达公式 metadata，`InlineItem.kind` 必须是 `formula`，用 citation/text/reference_marker 承载 `{{formula:...}}` 会被拒绝。即使未传入 `DocumentIR`，plan 中的每个 `{{formula:id}}` 也必须来自同一 source block 的 `source_text` / `preserve_tokens` 或显式 `fallback_formula_ids`，避免 translator 发明跨块或未知公式引用。调用 `validate_layout_plan(chunk, plan, document=document_ir)` 时，schema helper 会同时检查 `DocumentIR`、`TranslationChunk` 和 `TranslationLayoutPlan` 中每个 `{{formula:id}}` 是否存在于 `DocumentIR.formulas[]` 或显式 `fallback_formula_ids`，未知 ID 和 legacy `F...` stale ref 会在 render 前失败；需要把已存在的 legacy `F...` 公式也作为问题暴露时，可传入 `flag_legacy_formula_ids=True`。初次校验后会执行选择性翻译质量检查：未翻译、源文泄漏、关键术语缺失、过短/过长等严重问题会触发一次 revision 调用，并写入 `translation-quality-diagnostics`。不可解析 JSON、无法提取 plan JSON、brief 请求失败或翻译请求失败会进入 job status。
 
 ## 默认排版值
 
@@ -89,6 +89,7 @@ renderer 负责坐标、分页、溢出、字号缩放和 continuation page。�
 - `role_styles`: 默认 GB/T 7713.1 中文可读重排使用 title 18pt、heading 14pt、paragraph/abstract 12pt、caption/reference/footnote 10.5pt，并按角色设置加粗、对齐、首行缩进和段前后间距。若用户说明显式要求“12-point SimSun main text / 1.5 line spacing / 16-point SimHei Level 1 headings”，deterministic intent 会写入对应 `requirements`，后端会把 paragraph/heading role styles 调整为这些值。
 - `role_styles.*.font_stack`: 可选的按角色字体覆盖；为空时继承文档 `font_stack`。默认 title/heading 使用黑体栈（`Times New Roman`、`SimHei`、`Heiti SC`、`Noto Sans CJK SC`、`Source Han Sans SC`、`sans-serif`），正文保持宋体栈，符合 GB/T 7713.1 标题黑体、正文宋体的惯例。
 - `formula_numbering`: `none`（默认）或 `parenthesized`。`parenthesized` 时 renderer 在 continuous_reflow 下对 display formula block 顺序编号，编号 `(n)` 右端对齐（GB/T 7713.1 公式编号规则）。若译文末尾已带源编号（如 `(12)`、`（3.4）`），保留原编号并写入 `formula_number_source_preserved` flag；一个 block 含多个 display formula 时跳过编号并写入 `formula_number_skipped_multi_display`。用户说明触发 GB/T 7713.1 时后端会自动把该字段设为 `parenthesized`。
+- `formula_replay`: article-level formula replay profile。默认 `font_stack=["Cambria Math","STIX Two Math","Times New Roman","serif"]`、`font_size_pt=12`、`line_height=1.2`、`inline_slot_height_pt=14`、`display_slot_policy=article_uniform`，renderer 会把同一篇文章的 display 公式归一到同一个槽位高度（自动取 display PDF formula 高度中位数，或使用显式 `display_slot_height_pt`），再按 `min_display_slot_height_pt=18` / `max_display_slot_height_pt=48` clamp。该 profile 对 KaTeX、primitive SVG replay、source-clip replay 和 source asset image fallback 都生效；`display_slot_policy=source` 可保留每个公式自己的源 replay 高度。该 profile 只影响公式字体和重放槽位，不允许 LLM 返回坐标或分页字段。
 - `overflow_policy.strategy`: `scale_then_expand_then_continue`
 - `overflow_policy.min_font_scale`: `0.86`
 
@@ -131,7 +132,7 @@ exported_paths = export_schema(Path("packages/json-schema"))
 - `layout-intent-plan`: deterministic agent 生成或修复后的 `LayoutIntentPlan`。
 - `validation-and-repair`: plan validation 结果和 repair history。
 - `asset-ir`: image adapter 或后续 OCR/视觉摘要 adapter 生成的 `AssetIR[]`。
-- `document-ir`: parser 输出的 `DocumentIR`，是 bbox、页面尺寸和阅读顺序的事实来源。
+- `document-ir`: parser 输出的 `DocumentIR`，是 bbox、页面尺寸、阅读顺序、抽取后端和公式源信息的事实来源。
 - `article-brief`: 翻译前生成的 `ArticleBrief@0.1`，包含文章背景、主旨、贡献和关键术语。
 - `translation-chunks`: chunker 发送给 translator 的 `TranslationChunk[]`，包含 `preserve_tokens`、附近标题、`article_brief`、默认渲染值和约束。
 - `translation-plans`: translator 或 source-preserving builder 通过 `validate_layout_plan` 后的 `TranslationLayoutPlan[]`。
@@ -139,7 +140,11 @@ exported_paths = export_schema(Path("packages/json-schema"))
 - `translation-quality-diagnostics`: 选择性翻译质量检查和 revision 记录。
 - `edit-scope`: 历史重排使用的 `EditScope`。
 - `retypeset-source`: source-only 重排摘要、来源 job/doc、复用 artifact 和质量 flags。
-- `parser-diagnostics`: parser 阶段的页数、文本块、span/line metadata、资产、角色计数、复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。
+- `parser-diagnostics`: parser 阶段的页数、文本块、span/line metadata、资产、角色计数、抽取后端、fallback 状态、耗时和复杂 PDF fallback flags，扫描版失败时也会写入该 artifact。
+- `mineru-diagnostics`: MinerU CLI 调用、后端/method/formula/table 配置、输出统计、耗时、fallback 状态和错误摘要。
+- `mineru-middle`: MinerU `middle.json` 原始调试 artifact，包含页面尺寸、block hierarchy、lines、spans、images、tables 和 interline equations。
+- `mineru-content-list`: MinerU `content_list.json` 原始调试 artifact。
+- `mineru-content-list-v2`: MinerU `content_list_v2.json` 原始调试 artifact，可作为 reading-order/role fallback。
 - `formula-candidates`: 公式 enrichment 在 OCR 前生成的 display/inline/image/vector 候选记录，用于定位漏检和误检。
 - `formula-diagnostics`: 公式检测、OCR enrichment 和占位诊断，包含公式总数、行内/行间数量、LaTeX 成功数、fallback 数、低置信度项、未解析占位符和公式 OCR provider 状态。
 - `ocr-recognition`: 公共 OCR service 的区域识别记录，包含 provider、confidence、attempts 和质量 flags。
@@ -156,11 +161,15 @@ exported_paths = export_schema(Path("packages/json-schema"))
 
 Renderer 仍以 `DocumentIR` 为坐标事实来源，在原页面 bbox 位置渲染图片。缺失 asset path 时不会静默丢弃，而是输出 `asset_missing_path` 质量 flag 和占位元素。
 
-表格样文本仍作为 `DocumentBlock(role="table")` 保留。parser 会在 `DocumentBlock.lines[]` 和 `DocumentBlock.spans[]` 中保存 PyMuPDF line/span 的文本、bbox、font、size、flags 和 origin；这些坐标是 parser-owned metadata，只供 detector/renderer 使用，不属于模型可返回字段。
+表格样文本仍作为 `DocumentBlock(role="table")` 保留。MinerU 默认从 `middle.json` / `content_list_v2.json` 映射 table block 和可用的表格/截图 asset；PyMuPDF fallback parser 会在 `DocumentBlock.lines[]` 和 `DocumentBlock.spans[]` 中保存 line/span 的文本、bbox、font、size、flags 和 origin。这些坐标是 parser-owned metadata，只供 detector/renderer 使用，不属于模型可返回字段。
 
-公式现在是一等 metadata。parser 会优先把可由文本层启发式识别的公式归一化为 `DocumentBlock.formulas[]` 和 `@@FORMULA_...@@` 占位符，chunker 只把占位符送给 translator，renderer 再用 block-local formula metadata 回填行内或行间公式节点。PDF 路径也可在 parser 后执行公式 enrichment，识别 text-layer display formula、公式样 image/vector candidate 和段落内 inline formula run，生成 `DocumentIR.formulas[]`、必要的 `Asset(kind="formula")` 和兼容的 `{{formula:formula_id}}` preserve token。检测会清理 PDF 控制字符和常见符号编码，拒绝作者邮箱、长自然语言解释和 operator-only 残片，并在 `source_text_range` 上保留公式 token 的原始文本边界。`FormulaIR` 保存 `formula_id`、page/block/asset/anchor 引用、原文片段、span ids、LaTeX、inline/display mode、confidence、OCR provider、source kind 和 quality flags。OCR/model 返回的 `FormulaRecognitionResult` / `OCRRecognitionResult` 继承无坐标约束，只允许语义结果。默认 OCR 顺序是 Pix2Text -> deterministic，但 enrichment 会先并行尝试文本层/deterministic 路径；clean inline/display 公式不会生成 crop，只有低置信度、疑似腐败文本层或 image/vector candidate 才按 `OCR_MAX_VISUAL_CANDIDATES` 上限进入视觉 OCR。`FORMULA_RECOGNITION_CONCURRENCY` 控制候选并发，`FORMULA_VISUAL_OCR_CONCURRENCY` 控制视觉 OCR 并发。`formula-performance` artifact 会记录 candidate/crop/文本识别/视觉 OCR/校验耗时、cache hit 和跳过的视觉候选。OpenAI/MiniMax 视觉公式识别可通过 `OCR_PROVIDER_ORDER=openai_vision,pix2text,deterministic` 或 `minimax_vision,pix2text,deterministic` 加入，要求 API key，但不依赖 agent 视觉分析开关。
+公式现在是一等 metadata。默认 PDF 抽取后端是 MinerU，adapter 以 `middle.json` 为主、`content_list_v2.json` 为 reading-order/role fallback，把 inline/interline equation 映射为稳定 `FormulaIR`，并在可翻译文本中写入兼容的 `{{formula:formula_id}}` preserve token。display formula block 会设置 `requires_translation=false`，inline equation 保留在段落文本中由 translator 原样回传。`FormulaSourceKind` 包含 `mineru`，MinerU 公式使用 `PdfFormula(replay_kind="source_clip")`，允许 `primitives=[]`，但必须提供 `source_page_index`、`source_bbox`、`width_pt` 和 `height_pt`，供最终 PDF 从源文件重放。
 
-公式相关调试输出包括 `formula-candidates.json`、`formula-recognition.json`、`formula-diagnostics.json`、`ocr-recognition.json` 和 `ocr-diagnostics.json`。OCR 识别期间会增量写入 started/failed/recognized 记录，任务状态会显示 `Recognizing formulas n/total`，避免可选视觉 OCR 卡住时前端只能看到模糊断联。Renderer 以 `DocumentIR` 的 bbox 和 reading order 为布局事实，用本地 KaTeX 渲染公式 LaTeX；standalone block 渲染 display math，段落内 ref 渲染 inline math。无效 LaTeX 或被标记为腐败文本层的 display 公式会回退为 `formula_plaintext_fallback` 或 `formula_image_fallback`，缺失公式引用会记录 unresolved diagnostics；用户预览/PDF 不应出现裸 formula placeholder、红色 raw LaTeX 错误文本、空公式边框或 `.formula-render-failed` 节点。
+非 MinerU fallback 路径默认 `formula_recognition_mode=pdf_primitive_replay`。enrichment 会从源 PDF 捕获公式 `glyph|line` primitive，写入 `FormulaIR.pdf_formula`，其中 `PdfFormulaPrimitive` 保存 `primitive_id`、`kind`、可选文本/font/bbox/origin/points/stroke/color 和质量 flags；`PdfFormula(replay_kind="primitives")` 使用 `coordinate_space="formula_local"`，保存 source page/bbox、宽高、baseline offset、primitive 列表和质量 flags，并继续要求 `primitives` 非空。`FormulaIR.asset_id` 可指向源 crop asset；当 `pdf_formula` 与源 crop 同时可用时 renderer 优先使用 primitive/source-clip replay，源图像只作为 fallback；`formula_pdf_primitive_primary`、`formula_source_preserved`、`formula_source_asset_primary`、`formula_source_asset_fallback`、`formula_latex_auxiliary` 等 flags 描述 replay 路径。LaTeX/OCR 不再决定是否保留源公式。可选 `text_latex` 保留旧文本层 normalizer/KaTeX 路径；可选 `visual_ocr` 才按 `OCR_PROVIDER_ORDER` 调用 Pix2Text/OpenAI/MiniMax。
+
+`FormulaIR` 保存 `formula_id`、page/block/asset/anchor 引用、原文片段、span ids、LaTeX、inline/display mode、confidence、OCR provider、source kind、`pdf_formula` 和 quality flags。`collect_formula_ref_issues(document, check_anchor_consistency=True)` 可作为严格诊断，检查 formula 的 page 与 source/anchor block、asset page 是否一致，`span_ids` 是否指向 anchor block 内已知 span，`source_text_range` 是否能匹配原始 block 文本，并暴露文本占位符中的 unknown 或 stale legacy `F...` id；默认模型构造不启用这些更严格检查，以兼容旧 artifact。OCR/model 返回的 `FormulaRecognitionResult` / `OCRRecognitionResult` 继承无坐标约束，只允许语义结果。`FORMULA_RECOGNITION_CONCURRENCY` 控制候选并发，`FORMULA_VISUAL_OCR_CONCURRENCY` 只在 `visual_ocr` 模式控制视觉 OCR 并发。
+
+公式相关调试输出包括 `mineru-diagnostics.json`、`formula-candidates.json`、`formula-recognition.json`、`formula-diagnostics.json`、`ocr-recognition.json` 和 `ocr-diagnostics.json`。MinerU source-clip path 会在 HTML preview 显示 KaTeX/SVG/image/plaintext fallback，并在 print/PDF export 中隐藏所有 direct-replay fallback 内容但保留公式槽位尺寸；Chromium 导出后，renderer 收集实际 fallback/replay 盒子位置，再用 PyMuPDF 叠加原始 source PDF clip。`RenderDefaults.formula_replay` 统一同一篇文章的公式字体、行高、inline slot 和 display slot；display image fallback 不得再按父 block 的 `--h-pt` 放大。primitive replay 期间任务状态显示 `Preserving formulas n/total`；视觉 OCR 模式仍会增量写入 started/failed/recognized 记录。Renderer fallback precedence 是 `pdf_formula` SVG/direct PDF replay 或 source clip -> source asset image -> KaTeX/LaTeX -> plaintext。直接 replay 失败只进入 diagnostics，不应产生空公式。缺失 source asset、未解析公式引用或可疑 crop 会进入 diagnostics；用户预览/PDF 不应出现裸 formula placeholder、红色 raw LaTeX 错误文本、空公式边框或 `.formula-render-failed` 节点。
 
 复杂表格结构、公式矢量图和 PDF vector graphics 仍不是完整结构化资产；较大的 vector drawing 会以 `figure` placeholder asset 保留 bbox，`parser-diagnostics.fallback_flags[]` 会暴露 `table_text_fallback`、`formula_placeholder_normalized`、`vector_asset_placeholder`、`vector_assets_not_rasterized` 等状态，便于前端和测试识别当前保真边界。
 

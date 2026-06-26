@@ -38,6 +38,13 @@ class Settings:
     ocr_min_confidence: float = 0.35
     ocr_provider_timeout_seconds: float = 12.0
     ocr_max_visual_candidates: int = 4
+    extraction_backend: str = "mineru"
+    mineru_backend: str = "pipeline"
+    mineru_method: str = "auto"
+    mineru_formula_enabled: bool = True
+    mineru_table_enabled: bool = True
+    mineru_timeout_seconds: int = 3600
+    formula_recognition_mode: str = "pdf_primitive_replay"
     formula_recognition_concurrency: int = 8
     formula_visual_ocr_concurrency: int = 2
     render_font_stack: tuple[str, ...] = (
@@ -187,6 +194,17 @@ def load_settings() -> Settings:
             os.getenv("OCR_MAX_VISUAL_CANDIDATES", ""),
             4,
         ),
+        extraction_backend=os.getenv("EXTRACTION_BACKEND", "mineru").strip() or "mineru",
+        mineru_backend=os.getenv("MINERU_BACKEND", "pipeline").strip() or "pipeline",
+        mineru_method=os.getenv("MINERU_METHOD", "auto").strip() or "auto",
+        mineru_formula_enabled=parse_bool(os.getenv("MINERU_FORMULA_ENABLED", ""), True),
+        mineru_table_enabled=parse_bool(os.getenv("MINERU_TABLE_ENABLED", ""), True),
+        mineru_timeout_seconds=parse_int(os.getenv("MINERU_TIMEOUT_SECONDS", ""), 3600),
+        formula_recognition_mode=os.getenv(
+            "FORMULA_RECOGNITION_MODE",
+            "pdf_primitive_replay",
+        ).strip()
+        or "pdf_primitive_replay",
         formula_recognition_concurrency=parse_int(
             os.getenv("FORMULA_RECOGNITION_CONCURRENCY", ""),
             8,

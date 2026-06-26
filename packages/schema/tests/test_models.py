@@ -1,49 +1,54 @@
 import pytest
-from pydantic import ValidationError
-
 from pdf_translator_schema import (
     AcademicRequirement,
     ArticleBrief,
     Asset,
     AssetIR,
+    BibliographyPlan,
     BlockRole,
     BoundingBox,
-    BibliographyPlan,
     CitationStyle,
     ColumnLayoutDefaults,
     DocumentIR,
-    DocumentPage,
     DocumentKind,
+    DocumentPage,
     DocumentProfile,
     DocumentStructurePlan,
     DocumentStructureSection,
     EditScope,
     Formula,
     FormulaIR,
+    FormulaReplayDefaults,
     FormulaRecognitionResult,
+    FormulaRefValidationError,
     InputKind,
     InputSource,
-    OCRRecognitionResult,
-    PageSize,
     LayoutIntentBlock,
     LayoutIntentPlan,
     NumberingPlan,
     NumberingRule,
+    OCRRecognitionResult,
+    PageSize,
+    PdfFormula,
+    PdfFormulaPrimitive,
+    SectionKind,
     SemanticBlockSignal,
     SemanticLayoutAnalysis,
-    SectionKind,
     SourceBlock,
     TaskIntent,
     TranslationBlockPlan,
     TranslationChunk,
     TranslationLayoutPlan,
+    TypesettingStandard,
     UserIntent,
     WorkflowMode,
     WorkflowRun,
     WorkflowStep,
-    TypesettingStandard,
     all_schemas,
+    collect_formula_ref_issues,
+    extract_formula_refs,
     schema_for,
+    validate_formula_refs,
     validate_layout_intent_plan,
     validate_layout_plan,
 )
@@ -53,6 +58,7 @@ from pdf_translator_schema.validation import (
     LayoutIntentPlanValidationError,
     LayoutPlanValidationError,
 )
+from pydantic import ValidationError
 
 
 def test_render_defaults_are_available_on_chunk() -> None:
@@ -80,6 +86,18 @@ def test_render_defaults_are_available_on_chunk() -> None:
     assert chunk.render_defaults.overflow_policy.allow_continuation_page is True
     assert chunk.render_defaults.preserve_policy.whitespace == "allow_reflow"
     assert chunk.render_defaults.formula_numbering == "none"
+    assert chunk.render_defaults.formula_replay.display_slot_policy == "article_uniform"
+    assert chunk.render_defaults.formula_replay.font_size_pt == 12.0
+    assert chunk.render_defaults.formula_replay.line_height == 1.2
+    assert chunk.render_defaults.formula_replay.inline_slot_height_pt == 14.0
+    assert chunk.render_defaults.formula_replay.font_stack == [
+        "Cambria Math",
+        "STIX Two Math",
+        "Times New Roman",
+        "serif",
+    ]
+    assert chunk.render_defaults.formula_replay.min_display_slot_height_pt == 18.0
+    assert chunk.render_defaults.formula_replay.max_display_slot_height_pt == 48.0
     assert chunk.render_defaults.column_layout.column_count == 1
     assert chunk.render_defaults.column_layout.column_gap_pt == 18.0
     assert chunk.render_defaults.column_layout.scope == "body"
@@ -116,8 +134,22 @@ def test_article_brief_is_available_on_translation_chunk_and_schema() -> None:
 def test_render_defaults_accept_gbt_formula_numbering_and_role_fonts() -> None:
     from pdf_translator_schema.models import RenderDefaults, RoleStyleDefaults
 
-    defaults = RenderDefaults(formula_numbering="parenthesized")
+    defaults = RenderDefaults(
+        formula_numbering="parenthesized",
+        formula_replay={
+            "font_stack": ["Cambria Math", "serif"],
+            "font_size_pt": 11.0,
+            "line_height": 1.1,
+            "inline_slot_height_pt": 13.0,
+            "display_slot_height_pt": 24.0,
+        },
+    )
     assert defaults.formula_numbering == "parenthesized"
+    assert defaults.formula_replay.font_stack == ["Cambria Math", "serif"]
+    assert defaults.formula_replay.font_size_pt == 11.0
+    assert defaults.formula_replay.line_height == 1.1
+    assert defaults.formula_replay.inline_slot_height_pt == 13.0
+    assert defaults.formula_replay.display_slot_height_pt == 24.0
 
     style = RoleStyleDefaults(font_size_pt=14.0, font_stack=["SimHei", "sans-serif"])
     assert style.font_stack == ["SimHei", "sans-serif"]
@@ -126,6 +158,24 @@ def test_render_defaults_accept_gbt_formula_numbering_and_role_fonts() -> None:
         RenderDefaults(formula_numbering="roman")
     with pytest.raises(ValidationError):
         RoleStyleDefaults(font_size_pt=14.0, font_stack=[])
+    with pytest.raises(ValidationError, match="min_display_slot_height_pt"):
+        FormulaReplayDefaults(
+            min_display_slot_height_pt=30.0,
+            max_display_slot_height_pt=20.0,
+        )
+    with pytest.raises(ValidationError, match="display_slot_height_pt"):
+        FormulaReplayDefaults(display_slot_height_pt=80.0)
+    with pytest.raises(ValidationError):
+        FormulaReplayDefaults(line_height=0)
+    with pytest.raises(ValidationError):
+        FormulaReplayDefaults(inline_slot_height_pt=0)
+
+
+def test_formula_replay_defaults_are_exported_in_json_schema() -> None:
+    schema = schema_for("translation-chunk")["$defs"]["FormulaReplayDefaults"]["properties"]
+
+    assert schema["line_height"]["exclusiveMinimum"] == 0
+    assert schema["inline_slot_height_pt"]["exclusiveMinimum"] == 0
 
 
 def test_column_layout_defaults_reject_unsupported_column_counts() -> None:
@@ -523,6 +573,518 @@ def test_document_rejects_invalid_formula_refs() -> None:
                 )
             ],
         )
+
+
+def test_formula_ref_helpers_detect_unknown_and_stale_refs() -> None:
+    block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        source_text="where E = mc^2 holds",
+        text_for_translation="where {{formula:missing_formula}} holds",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_known",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                source_text_range=(6, 14),
+                display_mode="inline",
+            )
+        ],
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="where {{formula:Fabc123}} holds",
+                preserve_tokens=["{{formula:Fabc123}}"],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text="其中 {{formula:p0019_b4450dbe2c466_inline}} 成立",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    assert extract_formula_refs("{{formula:f_known}} and {{formula:f_known}}") == ("f_known",)
+    issues = collect_formula_ref_issues(document, chunk=chunk, plan=plan)
+
+    issue_pairs = {(issue.code, issue.formula_id) for issue in issues}
+    assert ("unknown_formula_ref", "missing_formula") in issue_pairs
+    assert ("stale_legacy_formula_ref", "Fabc123") in issue_pairs
+    assert ("unknown_formula_ref", "p0019_b4450dbe2c466_inline") in issue_pairs
+
+    with pytest.raises(FormulaRefValidationError, match="Fabc123"):
+        validate_formula_refs(document, chunk=chunk, plan=plan)
+
+
+def test_formula_ir_accepts_pdf_formula_primitives() -> None:
+    pdf_formula = PdfFormula(
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=10, y0=20, x1=90, y1=42),
+        width_pt=80,
+        height_pt=22,
+        primitives=[
+            PdfFormulaPrimitive(
+                primitive_id="g0",
+                kind="glyph",
+                text="E",
+                font_name="Cambria Math",
+                font_size_pt=12,
+                bbox=BoundingBox(x0=0, y0=0, x1=8, y1=12),
+                origin=(0, 10),
+            ),
+            PdfFormulaPrimitive(
+                primitive_id="l0",
+                kind="line",
+                points=[(10, 10), (40, 10)],
+                stroke_width_pt=0.5,
+            ),
+        ],
+        quality_flags=["formula_pdf_primitive_primary"],
+    )
+
+    formula = FormulaIR(
+        formula_id="f_pdf",
+        page_id="p1",
+        source_block_id="b1",
+        latex="not required for replay",
+        pdf_formula=pdf_formula,
+    )
+
+    assert formula.pdf_formula is not None
+    assert formula.pdf_formula.primitives[0].text == "E"
+
+
+def test_pdf_formula_rejects_invalid_primitives_and_dimensions() -> None:
+    with pytest.raises(ValidationError, match="primitive replay requires"):
+        PdfFormula()
+
+    with pytest.raises(ValidationError, match="primitive replay requires"):
+        PdfFormula(primitives=[])
+
+    with pytest.raises(ValidationError, match="glyph primitive must include text"):
+        PdfFormulaPrimitive(
+            primitive_id="g0",
+            kind="glyph",
+            font_size_pt=12,
+            bbox=BoundingBox(x0=0, y0=0, x1=8, y1=12),
+        )
+
+    with pytest.raises(ValidationError, match="line primitive must include"):
+        PdfFormulaPrimitive(primitive_id="l0", kind="line")
+
+    primitive = PdfFormulaPrimitive(
+        primitive_id="g0",
+        kind="glyph",
+        text="x",
+        font_size_pt=12,
+        bbox=BoundingBox(x0=0, y0=0, x1=8, y1=12),
+    )
+    with pytest.raises(ValidationError, match="width_pt and height_pt"):
+        PdfFormula(width_pt=80, primitives=[primitive])
+
+    with pytest.raises(ValidationError, match="duplicate pdf_formula primitive_id"):
+        PdfFormula(primitives=[primitive, primitive.model_copy()])
+
+
+def test_pdf_formula_accepts_source_clip_replay_without_primitives() -> None:
+    pdf_formula = PdfFormula(
+        replay_kind="source_clip",
+        source_page_id="p1",
+        source_page_index=0,
+        source_bbox=BoundingBox(x0=10, y0=20, x1=90, y1=42),
+        width_pt=80,
+        height_pt=22,
+        primitives=[],
+    )
+    document = DocumentIR(
+        doc_id="doc_mineru",
+        extraction_backend="mineru",
+        extraction_version="3.4.0",
+        quality_flags=["mineru_extraction"],
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.FORMULA,
+                        bbox=BoundingBox(x0=10, y0=20, x1=90, y1=42),
+                        reading_order=0,
+                        source_text="{{formula:f_clip}}",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_clip",
+                page_id="p1",
+                source_block_id="b1",
+                latex="E=mc^2",
+                source_kind="mineru",
+                pdf_formula=pdf_formula,
+            )
+        ],
+    )
+
+    assert document.extraction_backend == "mineru"
+    assert document.formulas[0].source_kind == "mineru"
+    assert document.formulas[0].pdf_formula is not None
+    assert document.formulas[0].pdf_formula.replay_kind == "source_clip"
+
+
+def test_source_clip_replay_requires_source_location() -> None:
+    with pytest.raises(ValidationError, match="source_page_index"):
+        PdfFormula(
+            replay_kind="source_clip",
+            source_bbox=BoundingBox(x0=10, y0=20, x1=90, y1=42),
+            width_pt=80,
+            height_pt=22,
+        )
+
+
+def test_formula_ref_helpers_can_flag_known_legacy_formula_ids() -> None:
+    block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        text_for_translation="where {{formula:Fretained123}} holds",
+    )
+    document = DocumentIR(
+        doc_id="doc_legacy",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="Fretained123",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="x",
+                quality_flags=["legacy_formula_retained_after_rejection"],
+            )
+        ],
+    )
+
+    assert collect_formula_ref_issues(document) == []
+    issues = collect_formula_ref_issues(document, flag_legacy_formula_ids=True)
+    issue_pairs = {(issue.code, issue.formula_id) for issue in issues}
+    assert ("legacy_formula_id", "Fretained123") in issue_pairs
+    assert ("legacy_formula_ref", "Fretained123") in issue_pairs
+
+    with pytest.raises(FormulaRefValidationError, match="Fretained123"):
+        validate_formula_refs(document, flag_legacy_formula_ids=True)
+
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="where {{formula:Fretained123}} holds",
+                preserve_tokens=["{{formula:Fretained123}}"],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text="其中 {{formula:Fretained123}} 成立",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    assert validate_layout_plan(chunk, plan, document=document) is plan
+    with pytest.raises(LayoutPlanValidationError, match="Fretained123"):
+        validate_layout_plan(
+            chunk,
+            plan,
+            document=document,
+            flag_legacy_formula_ids=True,
+        )
+
+
+def test_layout_plan_can_validate_formula_refs_against_document() -> None:
+    block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        source_text="where E = mc^2 holds",
+    )
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_known",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="E = mc^2",
+            )
+        ],
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text="where {{formula:f_known}} holds",
+                preserve_tokens=["{{formula:f_known}}"],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=(
+                    "其中 {{formula:f_known}} 和 {{formula:p0019_b4450dbe2c466_inline}}"
+                ),
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    with pytest.raises(LayoutPlanValidationError, match="p0019_b4450dbe2c466_inline"):
+        validate_layout_plan(chunk, plan)
+    with pytest.raises(LayoutPlanValidationError, match="p0019_b4450dbe2c466_inline"):
+        validate_layout_plan(chunk, plan, document=document)
+
+
+def test_layout_plan_requires_formula_refs_in_translated_text() -> None:
+    formula_token = "{{formula:f_known}}"
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=f"where {formula_token} holds",
+                preserve_tokens=[formula_token],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text="其中成立",
+                role=BlockRole.PARAGRAPH,
+                inline_items=[
+                    InlineItem(kind="formula", text=formula_token, source_token=formula_token)
+                ],
+            )
+        ],
+    )
+
+    with pytest.raises(LayoutPlanValidationError, match="missing preserve tokens"):
+        validate_layout_plan(chunk, plan)
+
+    valid_plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=f"其中 {formula_token} 成立",
+                role=BlockRole.PARAGRAPH,
+                inline_items=[
+                    InlineItem(kind="formula", text=formula_token, source_token=formula_token)
+                ],
+            )
+        ],
+    )
+
+    assert validate_layout_plan(chunk, valid_plan) == valid_plan
+
+
+def test_layout_plan_allows_declared_formula_fallback_aliases() -> None:
+    fallback_token = "{{formula:image_fallback_1}}"
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+                        reading_order=0,
+                    )
+                ],
+            )
+        ],
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=f"where {fallback_token} holds",
+                preserve_tokens=[fallback_token],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=f"其中 {fallback_token} 成立",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    assert validate_layout_plan(chunk, plan) is plan
+    with pytest.raises(LayoutPlanValidationError, match="image_fallback_1"):
+        validate_layout_plan(chunk, plan, document=document)
+    assert (
+        validate_layout_plan(
+            chunk,
+            plan,
+            document=document,
+            fallback_formula_ids={"image_fallback_1"},
+        )
+        is plan
+    )
+
+
+def test_formula_ref_helpers_can_check_anchor_and_source_range_consistency() -> None:
+    span = TextSpanIR(
+        span_id="s1",
+        page_id="p1",
+        block_id="b1",
+        line_id="l1",
+        text="E = mc^2",
+        bbox=BoundingBox(x0=10, y0=10, x1=50, y1=20),
+    )
+    good_block = DocumentBlock(
+        block_id="b1",
+        page_id="p1",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        source_text="where E = mc^2 holds",
+        spans=[span],
+    )
+    good_document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[good_block],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_known",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                source_text_range=(6, 14),
+                span_ids=["s1"],
+                display_mode="inline",
+            )
+        ],
+    )
+
+    assert collect_formula_ref_issues(good_document, check_anchor_consistency=True) == []
+
+    bad_block = DocumentBlock(
+        block_id="b2",
+        page_id="p2",
+        role=BlockRole.PARAGRAPH,
+        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=30),
+        reading_order=0,
+        source_text="where E = mc^2 holds",
+        spans=[span.model_copy(update={"block_id": "b2", "page_id": "p2"})],
+    )
+    bad_document = DocumentIR(
+        doc_id="doc_2",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[],
+            ),
+            DocumentPage(
+                page_id="p2",
+                size=PageSize(width=100, height=100),
+                blocks=[bad_block],
+            ),
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_bad",
+                page_id="p1",
+                anchor_block_id="b2",
+                latex="E = mc^2",
+                source_text="E = mc^2",
+                source_text_range=(0, 5),
+                span_ids=["missing_span"],
+                display_mode="inline",
+            )
+        ],
+    )
+
+    issues = collect_formula_ref_issues(bad_document, check_anchor_consistency=True)
+    issue_codes = {issue.code for issue in issues}
+    assert "formula_anchor_page_mismatch" in issue_codes
+    assert "formula_unknown_span_ref" in issue_codes
+    assert "formula_source_text_range_mismatch" in issue_codes
 
 
 def test_formula_contract_defaults_on_document_and_chunk_blocks() -> None:

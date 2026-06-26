@@ -10,14 +10,107 @@ import pdf_renderer.models as renderer_models
 from app.config import Settings
 from app.models import JobState
 from app.pipeline import orchestrator
-from app.pipeline.workflow import coerce_user_intent
+from app.pipeline.workflow import coerce_user_intent, validate_translation_plan_formula_refs
 from app import runtime_config
 from app.storage import Storage
+from pdf_translator_schema import (
+    BlockRole,
+    BoundingBox,
+    DocumentBlock,
+    DocumentIR,
+    DocumentPage,
+    FormulaIR,
+    PageSize,
+    SourceBlock,
+    TranslationBlockPlan,
+    TranslationChunk,
+    TranslationLayoutPlan,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 ROOT_TEST_PDF = REPO_ROOT / "test.pdf"
 RUN_ROOT_TEST_PDF_GATE_ENV = "RUN_ROOT_TEST_PDF_ACCEPTANCE_GATE"
+
+
+def test_translation_formula_ref_diagnostics_blocks_unknown_refs_but_allows_raw_tex() -> None:
+    formula_token = "{{formula:f_known}}"
+    document = DocumentIR(
+        doc_id="doc_1",
+        pages=[
+            DocumentPage(
+                page_id="p1",
+                size=PageSize(width=100, height=100),
+                blocks=[
+                    DocumentBlock(
+                        block_id="b1",
+                        page_id="p1",
+                        role=BlockRole.PARAGRAPH,
+                        bbox=BoundingBox(x0=0, y0=0, x1=100, y1=20),
+                        reading_order=0,
+                        source_text=f"Energy {formula_token}.",
+                    )
+                ],
+            )
+        ],
+        formulas=[
+            FormulaIR(
+                formula_id="f_known",
+                page_id="p1",
+                anchor_block_id="b1",
+                latex="E = mc^2",
+                display_mode="inline",
+            )
+        ],
+    )
+    chunk = TranslationChunk(
+        chunk_id="chunk_1",
+        source_blocks=[
+            SourceBlock(
+                block_id="b1",
+                role=BlockRole.PARAGRAPH,
+                source_text=f"Energy {formula_token}.",
+                preserve_tokens=[formula_token],
+            )
+        ],
+    )
+    plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text=rf"能量 {formula_token} 且 $t\geq 0$。",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+    bad_plan = TranslationLayoutPlan(
+        chunk_id="chunk_1",
+        blocks=[
+            TranslationBlockPlan(
+                source_block_id="b1",
+                translated_text="能量 {{formula:f_missing}}。",
+                role=BlockRole.PARAGRAPH,
+            )
+        ],
+    )
+
+    diagnostics = validate_translation_plan_formula_refs(
+        document=document,
+        chunks=[chunk],
+        plans=[plan],
+    )
+    bad_diagnostics = validate_translation_plan_formula_refs(
+        document=document,
+        chunks=[chunk],
+        plans=[bad_plan],
+    )
+
+    assert diagnostics["status"] == "valid"
+    assert diagnostics["raw_tex_detected_count"] == 1
+    assert "raw_tex_detected" in diagnostics["quality_flags"]
+    assert bad_diagnostics["status"] == "invalid"
+    assert bad_diagnostics["unknown_formula_ref_count"] == 1
 
 
 def _write_digital_pdf(path: Path) -> None:
@@ -483,6 +576,7 @@ def test_local_pipeline_formula_smoke_pdf_preserves_formula_rendering(
     assert status.status == JobState.COMPLETED
     assert formula_diagnostics["candidate_count"] == 3
     assert formula_diagnostics["accepted_count"] == 3
+    assert formula_diagnostics["formula_recognition_mode"] == "pdf_primitive_replay"
     assert formula_diagnostics["display_count"] == 1
     assert formula_diagnostics["inline_count"] == 2
     assert formula_diagnostics["unresolved_placeholders"] == []
@@ -492,6 +586,7 @@ def test_local_pipeline_formula_smoke_pdf_preserves_formula_rendering(
     assert renderer_diagnostics["formula_rendered_count"] == 3
     assert renderer_diagnostics["quality_flag_counts"].get("formula_render_failed", 0) == 0
     assert renderer_diagnostics["quality_flag_counts"].get("text_script_marker_rendered", 0) == 1
+    assert all(formula.pdf_formula is not None for formula in document.formulas)
 
     display_formula = next(
         formula for formula in document.formulas if formula.display_mode == "display"
@@ -533,9 +628,8 @@ def test_local_pipeline_formula_smoke_pdf_preserves_formula_rendering(
     assert "{{formula:" not in html
     assert "@@FORMULA_" not in html
     assert '<span class="formula-plaintext-fallback">' not in html
-    assert 'data-latex="n_{e}"' in html
-    assert 'data-latex="E = mc^2"' in html
-    assert 'data-latex="\\int f_s d\\Omega"' in html
+    assert html.count('class="formula-image-fallback"') >= 3
+    assert 'data-pdf-formula="true"' in html
     assert "50<sup>-4</sup>" in html
     assert "_{" not in visible_outside_formulas
     assert "^{" not in visible_outside_formulas
@@ -677,6 +771,7 @@ def test_local_pipeline_plan_v3_formula_regression_smoke(
 
     assert status.status == JobState.COMPLETED
     assert formula_diagnostics["accepted_count"] == 6
+    assert formula_diagnostics["formula_recognition_mode"] == "pdf_primitive_replay"
     assert formula_diagnostics["display_count"] == 4
     assert formula_diagnostics["inline_count"] == 2
     assert formula_diagnostics["unresolved_placeholders"] == []
@@ -698,17 +793,18 @@ def test_local_pipeline_plan_v3_formula_regression_smoke(
     assert "@@FORMULA_" not in html
     assert html.count('class="formula-equation-number"') == 4
     assert '<span class="formula-plaintext-fallback">' not in html
+    assert html.count('class="formula-image-fallback"') >= 6
+    assert 'data-pdf-formula="true"' in html
     assert "50<sup>-4</sup>" in html
     assert "_{" not in visible_outside_formulas
     assert "^{" not in visible_outside_formulas
-    assert 'data-latex="\\int f_s d\\Omega v_{n}"' in html
-    assert 'data-latex="\\frac{\\alpha}{\\beta + 1} = q_s"' in html
     assert storage.output_pdf_path("doc_plan_v3_regression").read_bytes().startswith(
         b"%PDF-"
     )
 
     display_formulas = [formula for formula in document.formulas if formula.display_mode == "display"]
     assert len(display_formulas) == 4
+    assert all(formula.pdf_formula is not None for formula in document.formulas)
 
     for display_formula in display_formulas:
         source_display_block = next(
